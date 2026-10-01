@@ -25,7 +25,7 @@ Windows 运行构建结果需要 Qt 运行库和平台插件。构建后可执�
 
 ```powershell
 pwsh -File scripts/deploy_qt_windows.ps1 -Binary build/release/release/easyDebug.exe
-pwsh -File scripts/deploy_qt_windows.ps1 -Binary build/ui-tests-run/release/easyDebug_ui_tests.exe -IncludeOffscreen
+pwsh -File scripts/deploy_qt_windows.ps1 -Binary build/ui-tests/release/easyDebug_ui_tests.exe -IncludeOffscreen
 ```
 
 运行 UI 测试时使用 `QT_QPA_PLATFORM=offscreen`；脚本会把插件复制到 exe 旁边，避免“没有 Qt 平台插件”启动错误。
