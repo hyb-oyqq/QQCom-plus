@@ -2,7 +2,7 @@
 
 面向设备调试的 Qt Widgets 工具，计划支持串口、TCP 服务器、TCP 客户端和 UDP，并提供实时收发显示、端口间转发、自定义发送。
 
-**当前阶段：程序设计与实施规划。** 仓库中的程序仍为 Qt Creator 生成的空窗口；下列能力是设计目标，尚未实现或通过性能验收。
+**当前阶段：M0 设计基线 + 主页面初版界面。** 当前版本已经提供可运行的 Qt Widgets 工作台原型：端口列表与参数页、接收监视区、发送区、快捷命令和转发规则草稿。通信按钮仍是预览状态，真实串口/TCP/UDP 后端和性能验收按后续里程碑实施。
 
 ## 设计文档
 
@@ -19,7 +19,16 @@
 
 采用 C++17、Qt 6.10.1、Qt Widgets、qmake，主验收环境为 Windows 10/11 x64、MSVC 2022。这是根据现有 `easyDebug.pro` 和本机 Qt Creator Kit 作出的首版选择；MinGW 在发布阶段验证。
 
-现有空窗口可用 Qt Creator 打开 `easyDebug.pro`，选择已安装的 Qt 6.10.1 Kit 构建。通信实现阶段再加入 Qt Network、SerialPort；Qt Test 用于独立测试工程。当前 PowerShell 的 PATH 未发现 qmake，本次仅完成设计文档检查，未执行编译或设备测试。
+可用 Qt Creator 打开 `easyDebug.pro`，选择 Qt 6.10.1 Kit 构建。当前界面原型使用 Qt Widgets；通信实现阶段再加入 Qt Network、SerialPort。Qt Test 用于独立测试工程。示例数据只进入界面模型，不会发送到真实设备。
+
+Windows 运行构建结果需要 Qt 运行库和平台插件。构建后可执行：
+
+```powershell
+pwsh -File scripts/deploy_qt_windows.ps1 -Binary build/release/release/easyDebug.exe
+pwsh -File scripts/deploy_qt_windows.ps1 -Binary build/ui-tests-run/release/easyDebug_ui_tests.exe -IncludeOffscreen
+```
+
+运行 UI 测试时使用 `QT_QPA_PLATFORM=offscreen`；脚本会把插件复制到 exe 旁边，避免“没有 Qt 平台插件”启动错误。
 
 ## 核心设计
 
@@ -32,4 +41,4 @@
 - `D:/AWork/myself/QTProject/debugTool`
 - `D:/AWork/myself/QTProject/YmodemTool`
 
-后续实现从 [PLAN.md](PLAN.md) 的 M1 开始。每个阶段完成后更新任务状态、测试记录和设计偏差。
+界面原型对应 [PLAN.md](PLAN.md) 的 M0/M2/M3 交互准备工作；后续实现从 M1 通信契约开始。每个阶段完成后更新任务状态、测试记录和设计偏差。

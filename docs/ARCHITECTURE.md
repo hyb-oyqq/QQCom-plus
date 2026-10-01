@@ -1,6 +1,6 @@
 # easyDebug 架构设计
 
-版本：0.1 设计基线，2026-10-01。本文规定未来实现的职责和行为，类名、接口示意与目录树尚不是已实现代码。
+版本：0.1 设计基线，2026-10-01。本文规定未来实现的职责和行为；当前已落地的界面原型位于 `src/ui`，通信接口和运行时仍按下文设计逐步实现。
 
 ## 1. 架构目标与依赖方向
 
@@ -298,7 +298,7 @@ peerId、generation、socket 指针与待发送缓存永不持久化。固定 TC
 easyDebug/
 ├── easyDebug.pro                # qmake 入口，实施阶段组织模块 .pri
 ├── main.cpp                     # 组合根入口
-├── mainwindow.{h,cpp,ui}         # 现有窗口，M3 按需要迁入 src/ui
+├── mainwindow.{h,cpp,ui}         # 组合根窗口
 ├── src/
 │   ├── domain/                  # 值类型、配置、结果
 │   ├── app/                     # Controller、IoRuntime、EndpointManager
@@ -308,7 +308,7 @@ easyDebug/
 │   ├── monitoring/              # 缓冲、统计、模型
 │   ├── persistence/             # SessionStore、CaptureWriter
 │   ├── discovery/               # 串口与网卡发现
-│   └── ui/                      # 端口控件、参数页、监视/发送/路由页面
+│   └── ui/                      # 已有端口控件、监视/发送/路由页面原型；后续接入控制器
 ├── resources/                   # 图标、翻译、样式
 ├── tests/                       # FakeTransport、Qt Test、集成与性能驱动
 └── docs/                        # 设计及验收记录
