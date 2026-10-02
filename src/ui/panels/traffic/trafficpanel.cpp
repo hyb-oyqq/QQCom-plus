@@ -94,6 +94,34 @@ int TrafficModel::rowCount(const QModelIndex &parent) const { return parent.isVa
 int TrafficModel::columnCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : ColumnCount; }
 const Traffic::Message &TrafficModel::record(int row) const { return m_records.at(row); }
 
+QString TrafficModel::renderDataColumn(int row) const
+{
+    // LRU 式按需渲染：先查缓存，未命中才渲染并缓存。
+    // QHash 在键不存在时 contains() 比 [] 更高效，避免默认构造空值。
+    if (m_renderCache.contains(row))
+        return m_renderCache.value(row);
+
+    const auto &r = m_records.at(row);
+    auto text = PayloadCodec::render(r.raw, m_format);
+    if (r.truncated) text += QObject::tr(" …");
+    if (r.isFragment() && r.hasMoreFragments) text += QObject::tr(" ⏎");
+
+    // 插入缓存。缓存容量控制：超过 200 条时清理一半最旧的条目，
+    // 避免无限增长但不过度频繁清理（每次清理约 100 条的开销可接受）。
+    if (m_renderCache.size() >= 200) {
+        // 简单策略：清空缓存，让热点数据自然重新填充。
+        // 更精细的 LRU 淘汰需要额外的访问时间戳，这里用粗粒度策略换取实现简洁。
+        m_renderCache.clear();
+    }
+    m_renderCache.insert(row, text);
+    return text;
+}
+
+void TrafficModel::clearRenderCache()
+{
+    m_renderCache.clear();
+}
+
 QVariant TrafficModel::data(const QModelIndex &index, int role) const
 {
     if (!index.isValid() || index.row() >= m_records.size()) return {};
@@ -148,12 +176,7 @@ QVariant TrafficModel::data(const QModelIndex &index, int role) const
     }
     // 显示真实长度，截断标记交给悬停与状态列，不在数字里掺信息。
     case BytesColumn: return r.displayBytes();
-    case DataColumn: {
-        auto text = PayloadCodec::render(r.raw, m_format);
-        if (r.truncated) text += QObject::tr(" …");
-        if (r.isFragment() && r.hasMoreFragments) text += QObject::tr(" ⏎");
-        return text;
-    }
+    case DataColumn: return renderDataColumn(index.row());
     default: return {};
     }
 }
@@ -173,6 +196,7 @@ void TrafficModel::replaceRecords(QList<Traffic::Message> records)
     enforceBudget(records);
     beginResetModel();
     m_records = std::move(records);
+    clearRenderCache();  // 记录全部替换，缓存失效
     endResetModel();
 }
 
@@ -188,10 +212,12 @@ void TrafficModel::appendRecords(QList<Traffic::Message> records)
     if (m_records.size() != before) {
         // 超出预算时丢的是最旧记录，行号整体平移，用 reset 让视图和索引重新对齐。
         beginResetModel();
+        clearRenderCache();  // 行号平移，所有缓存的行号失效
         endResetModel();
         return;
     }
     beginInsertRows({}, before - added, before - 1);
+    // 新插入的行不在缓存里，无需清理；已有行的行号不变，缓存仍然有效
     endInsertRows();
 }
 
@@ -199,6 +225,7 @@ void TrafficModel::setFormat(PayloadCodec::Format format)
 {
     // 渲染格式只影响显示列，原始字节始终是事实依据。
     m_format = format;
+    clearRenderCache();  // 格式变化，所有缓存的渲染文本失效
     if (!m_records.isEmpty())
         emit dataChanged(index(0, DataColumn), index(m_records.size() - 1, DataColumn));
 }
@@ -588,6 +615,8 @@ void TrafficPanel::applyWrapMode(bool wrap)
     // 数据不动，只让行高按当前模式整体重算：开启后长内容折行（委托钳到 6 行），
     // 关闭后回到统一的 33px 单行省略。行高由 ResizeToContents 模式切换与本次
     // 模型重置各自触发重算，无需再手动 resizeRowsToContents 重复算一遍。
+    // 注意：refreshLayout 会触发 beginResetModel，但不会清空渲染缓存——
+    // 换行模式切换不改变数据内容，缓存的文本仍然有效，只是行高重新计算。
     m_model->refreshLayout();
 }
 

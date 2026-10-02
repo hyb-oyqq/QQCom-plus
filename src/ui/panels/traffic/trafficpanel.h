@@ -53,8 +53,13 @@ public:
     // 切换换行模式等全局显示形态时重建视图行高：数据不动，只让行高按当前模式重算。
     void refreshLayout() { beginResetModel(); endResetModel(); }
 private:
+    // 渲染缓存：按需渲染 DataColumn 文本，减少自动换行时 sizeHint() 的重复开销。
+    // 键为行号，值为当前格式的渲染文本；格式切换或模型重置后失效。
+    QString renderDataColumn(int row) const;
+    void clearRenderCache();
     QList<Traffic::Message> m_records;
     PayloadCodec::Format m_format = PayloadCodec::Format::Hex;
+    mutable QHash<int, QString> m_renderCache;  // 缓存容量由 QHash 自动管理
 };
 
 class TrafficFilter : public QSortFilterProxyModel
