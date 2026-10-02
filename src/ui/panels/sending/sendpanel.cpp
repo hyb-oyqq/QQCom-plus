@@ -1,5 +1,5 @@
 #include "sendpanel.h"
-#include "../../common/payloadcodec.h"
+#include "ui/common/payloadcodec.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -9,6 +9,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
@@ -96,43 +97,71 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
 
     auto *actions = new QHBoxLayout;
     actions->setSpacing(6);
-    auto *repeat = new QCheckBox(tr("定时发送"));
-    repeat->setObjectName("repeatSending");
-    auto *interval = new QSpinBox;
-    interval->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    interval->setRange(10, 3600000);
-    interval->setValue(1000);
-    interval->setSuffix(" ms");
-    interval->setEnabled(false);
-    auto *times = new QSpinBox;
-    times->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    times->setRange(0, 999999);
-    times->setValue(0);
-    times->setSpecialValueText(tr("持续"));
-    times->setSuffix(tr(" 次"));
-    times->setEnabled(false);
-    auto *send = new QPushButton(tr("发送"));
-    send->setObjectName("PrimaryButton");
-    send->setMinimumWidth(90);
-    send->setEnabled(false);
-    send->setToolTip(tr("当前为界面预览，尚未连接端口"));
-    actions->addWidget(repeat);
-    actions->addWidget(interval);
-    actions->addWidget(times);
+    m_repeat = new QCheckBox(tr("定时发送"));
+    m_repeat->setObjectName("repeatSending");
+    m_repeat->setToolTip(tr("按固定周期重复发送当前内容；再次勾选或取消勾选即停止"));
+    m_interval = new QSpinBox;
+    m_interval->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    m_interval->setRange(10, 3600000);
+    m_interval->setValue(1000);
+    m_interval->setSuffix(" ms");
+    m_interval->setEnabled(false);
+    m_times = new QSpinBox;
+    m_times->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    m_times->setRange(0, 999999);
+    m_times->setValue(0);
+    m_times->setSpecialValueText(tr("持续"));
+    m_times->setSuffix(tr(" 次"));
+    m_times->setEnabled(false);
+    m_sendButton = new QPushButton(tr("发送"));
+    m_sendButton->setObjectName("PrimaryButton");
+    m_sendButton->setMinimumWidth(90);
+    m_sendButton->setEnabled(false);
+    m_sendButton->setToolTip(tr("端口未连接"));
+    m_connectionHint = new QLabel(tr("端口未连接"));
+    m_connectionHint->setObjectName("Muted");
+    m_repeatTimer = new QTimer(this);
+    actions->addWidget(m_repeat);
+    actions->addWidget(m_interval);
+    actions->addWidget(m_times);
     actions->addStretch();
-    auto *disconnected = new QLabel(tr("端口未连接"));
-    disconnected->setObjectName("Muted");
-    actions->addWidget(disconnected);
+    actions->addWidget(m_connectionHint);
     actions->addWidget(new QLabel(tr("目标")));
     for (auto *button : {m_targetA, m_targetB, m_targetBoth}) actions->addWidget(button);
-    actions->addWidget(send);
+    actions->addWidget(m_sendButton);
     layout->addLayout(actions);
 
-    connect(repeat, &QCheckBox::toggled, interval, &QSpinBox::setEnabled);
-    connect(repeat, &QCheckBox::toggled, times, &QSpinBox::setEnabled);
+    // 定时发送：每拍与手动发送走同一条 issueSend 路径。周期用尽力调度，
+    // 不承诺 Windows 上的硬实时精度；次数计满自动停下。
+    m_repeatTimer->setTimerType(Qt::CoarseTimer);
+    connect(m_repeat, &QCheckBox::toggled, this, [this](bool checked) {
+        m_interval->setEnabled(checked);
+        m_times->setEnabled(checked);
+        if (checked) {
+            m_remainingTicks = m_times->value();
+            issueSend(); // 勾选立即发第一拍，之后按周期
+            m_repeatTimer->start(m_interval->value());
+        } else {
+            m_repeatTimer->stop();
+        }
+    });
+    connect(m_repeatTimer, &QTimer::timeout, this, [this] {
+        issueSend();
+        if (m_remainingTicks > 0 && --m_remainingTicks == 0)
+            m_repeat->setChecked(false);
+    });
+    connect(m_interval, &QSpinBox::valueChanged, this, [this](int ms) {
+        if (m_repeatTimer->isActive()) m_repeatTimer->start(ms);
+    });
+    connect(m_sendButton, &QPushButton::clicked, this, [this] {
+        issueSend();
+        // 单次发送不打断进行中的定时任务：两者目标相同、语义一致。
+    });
     connect(m_editor, &QPlainTextEdit::textChanged, this, &SendPanel::updatePreview);
     connect(m_format, &QComboBox::currentIndexChanged, this, &SendPanel::updatePreview);
     connect(m_suffix, &QComboBox::currentIndexChanged, this, &SendPanel::updatePreview);
+    for (auto *button : {m_targetA, m_targetB, m_targetBoth})
+        connect(button, &QPushButton::toggled, this, &SendPanel::updateSendAvailability);
     updatePreview();
 }
 
@@ -140,6 +169,18 @@ void SendPanel::setPorts(const QList<PortDraft> &ports)
 {
     m_ports = ports;
     updateTargets();
+}
+
+void SendPanel::setEndpointOpen(int index, bool open)
+{
+    if (index < 0 || index >= 2) return;
+    m_openFlags[index] = open;
+    updateSendAvailability();
+    QStringList parts;
+    for (int i = 0; i < 2; ++i)
+        if (m_openFlags[i]) parts.append(QString(QChar::fromLatin1('A' + char(i))));
+    m_connectionHint->setText(parts.isEmpty() ? tr("端口未连接")
+        : tr("%1 已连接").arg(parts.join(tr("、"))));
 }
 
 void SendPanel::updateTargets()
@@ -163,6 +204,8 @@ void SendPanel::updatePreview()
     const auto parsed = PayloadCodec::parse(m_editor->toPlainText(),
         PayloadCodec::formats().value(m_format->currentIndex(), PayloadCodec::Format::Hex),
         lineEndings.value(m_suffix->currentIndex()));
+    m_payloadValid = parsed.valid();
+    m_payloadBytes = parsed.bytes;
     m_length->setText(parsed.valid() ? tr("%1 字节").arg(parsed.bytes.size()) : tr("输入错误"));
     const auto text = parsed.valid() ? (parsed.bytes.isEmpty() ? tr("最终发送内容将在这里预览")
         : PayloadCodec::render(parsed.bytes.left(64), PayloadCodec::Format::Hex)
@@ -174,6 +217,31 @@ void SendPanel::updatePreview()
         m_previewError = !parsed.valid();
         m_preview->setStyleSheet(m_previewError ? "color: #c44343;" : "color: #738097;");
     }
+    updateSendAvailability();
+}
+
+void SendPanel::updateSendAvailability()
+{
+    // 发送条件：内容可解析且非空，且选中目标里至少有一个端点已连接。
+    // AB 目标只连了一端时按该端发送，不必强迫用户切目标。
+    const bool anySelectedOpen =
+        (m_targetA->isChecked() && m_openFlags[0])
+        || (m_targetB->isChecked() && m_openFlags[1])
+        || (m_targetBoth->isChecked() && (m_openFlags[0] || m_openFlags[1]));
+    const bool ready = m_payloadValid && !m_payloadBytes.isEmpty() && anySelectedOpen;
+    m_sendButton->setEnabled(ready);
+    m_sendButton->setToolTip(ready ? tr("发送 %1 字节").arg(m_payloadBytes.size())
+        : anySelectedOpen ? tr("请输入有效内容") : tr("端口未连接"));
+}
+
+void SendPanel::issueSend()
+{
+    if (!m_sendButton->isEnabled()) return;
+    int mask = 0;
+    if (m_targetA->isChecked()) mask |= 1;
+    if (m_targetB->isChecked()) mask |= 2;
+    if (m_targetBoth->isChecked()) mask |= 3;
+    emit sendRequested(m_payloadBytes, mask);
 }
 
 void SendPanel::setPayload(const QByteArray &bytes)

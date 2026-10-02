@@ -1,9 +1,11 @@
 #include "mainwindow.h"
-#include "src/ui/common/payloadcodec.h"
-#include "src/ui/panels/sending/sendpanel.h"
-#include "src/ui/panels/traffic/trafficpanel.h"
-#include "src/discovery/portdiscoveryservice.h"
-#include "src/persistence/preferencesstore.h"
+#include "domain/receiveframing.h"
+#include "ui/common/endpointformat.h"
+#include "ui/common/payloadcodec.h"
+#include "ui/panels/sending/sendpanel.h"
+#include "ui/panels/traffic/trafficpanel.h"
+#include "discovery/portdiscoveryservice.h"
+#include "persistence/preferencesstore.h"
 
 #include <QAction>
 #include <QApplication>
@@ -220,22 +222,140 @@ private slots:
         TrafficModel model;
         TrafficFilter filter;
         const auto a = QUuid::createUuid(), b = QUuid::createUuid();
-        model.replaceRecords({{QDateTime(), a, "A", false, QByteArray::fromHex("007fff")},
-                              {QDateTime(), b, "B", true, "hello"}});
+        PortDraft portA, portB;
+        portA.id = a;
+        portA.kind = PortDraft::Serial;
+        portB.id = b;
+        portB.kind = PortDraft::TcpServer;
+
+        const auto sample = [&](quint64 id, const PortDraft &port, int index, Traffic::Direction direction,
+                                const QByteArray &raw, Traffic::Framing framing = Traffic::Framing::Message) {
+            return Traffic::makeSampleMessage(id, QDateTime(), Traffic::makeSource(port, index), direction, raw, framing);
+        };
+
+        model.replaceRecords({sample(1, portA, 0, Traffic::Direction::Receive, QByteArray::fromHex("007fff")),
+            sample(2, portB, 1, Traffic::Direction::Transmit, "hello")});
         filter.setSourceModel(&model);
         // 端点为独立开关：勾选集合内的才显示，一个都不勾则不显示。
-        filter.setOptions({a, b}, true, true, "7F FF");
+        TrafficFilter::Options options;
+        options.endpoints = {a, b};
+        options.search = QStringLiteral("7F FF");
+        filter.setOptions(options);
         QCOMPARE(filter.rowCount(), 1);
         // 显示格式只影响渲染，模型里的原始字节始终不变。
         model.setFormat(PayloadCodec::Format::Utf8);
-        QCOMPARE(model.record(0).payload, QByteArray::fromHex("007fff"));
-        filter.setOptions({a}, true, false, {});
+        QCOMPARE(model.record(0).raw, QByteArray::fromHex("007fff"));
+        options.search.clear();
+        options.endpoints = {a};
+        options.tx = false;
+        filter.setOptions(options);
         QCOMPARE(filter.rowCount(), 1);
-        filter.setOptions({b}, false, true, "HELLO");
+        options.endpoints = {b};
+        options.rx = false;
+        options.tx = true;
+        options.search = QStringLiteral("HELLO");
+        filter.setOptions(options);
         QCOMPARE(filter.rowCount(), 1);
-        filter.setOptions({b}, false, false, {});
+        options.search.clear();
+        options.tx = false;
+        filter.setOptions(options);
         QCOMPARE(filter.rowCount(), 0);
-        filter.setOptions({}, false, false, {});
+        options.endpoints.clear();
+        filter.setOptions(options);
+        QCOMPARE(filter.rowCount(), 0);
+    }
+
+    void messagesCarryStructuredFacts()
+    {
+        // 消息是值类型：原始字节、时间、来源、长度都是数据，显示设置改不了它们。
+        PortDraft port;
+        port.kind = PortDraft::TcpServer;
+        const auto source = Traffic::makeSource(port, 1);
+        QCOMPARE(source.endpointIndex, 1);
+        QCOMPARE(source.endpointKind, int(PortDraft::TcpServer));
+        QVERIFY(!source.hasPeer()); // 未连接时没有对端，字段留空而不是塞占位串
+
+        Traffic::Message message;
+        message.id = 7;
+        message.timestamp = QDateTime::fromString(QStringLiteral("2026-10-02T12:00:00.123"), Qt::ISODateWithMs);
+        message.direction = Traffic::Direction::Transmit;
+        message.origin = Traffic::Origin::Forward;
+        message.framing = Traffic::Framing::Stream;
+        message.hasMoreFragments = true;
+        message.source = source;
+        message.raw = QByteArray::fromHex("0102");
+        message.rawLength = 4096; // 真实长度远大于保留的预览
+        message.truncated = true;
+        message.state = Traffic::State::Partial;
+        message.requestId = QUuid::createUuid();
+        message.routeId = QUuid::createUuid();
+        message.frameId = QUuid::createUuid();
+        message.durationUs = 1500;
+
+        // 语义查询：方向、来源、发送状态互不干扰。
+        QVERIFY(message.isData());
+        QVERIFY(message.isFragment());
+        QCOMPARE(message.displayBytes(), Q_INT64_C(4096)); // 显示真实长度，不是预览长度
+        QVERIFY(message.isValid());
+        QCOMPARE(Traffic::directionName(message.direction), QStringLiteral("TX"));
+        QCOMPARE(Traffic::originName(message.origin), QStringLiteral("转发"));
+        QCOMPARE(Traffic::stateName(message.state), QStringLiteral("部分写出"));
+        QCOMPARE(Traffic::framingName(message.framing), QStringLiteral("流片段"));
+        // 非数据类消息不参与收发字节统计，isData() 是唯一的判定入口。
+        Traffic::Message state;
+        state.direction = Traffic::Direction::State;
+        QVERIFY(!state.isData());
+        QVERIFY(!state.isValid()); // 空消息无任何事实，不该被当成有效记录
+    }
+
+    void structuredFiltersUseFactsNotLabels()
+    {
+        TrafficModel model;
+        TrafficFilter filter;
+        filter.setSourceModel(&model);
+
+        PortDraft portA, portB;
+        portA.kind = PortDraft::Serial;
+        portB.kind = PortDraft::TcpServer;
+        const auto a = Traffic::makeSource(portA, 0);
+        auto b = Traffic::makeSource(portB, 1);
+        b.peerAddress = QStringLiteral("127.0.0.1:52344");
+
+        const auto stream = Traffic::makeSampleMessage(
+            1, QDateTime(), a, Traffic::Direction::Receive, QByteArray::fromHex("aa"), Traffic::Framing::Stream);
+        const auto datagram = Traffic::makeSampleMessage(
+            2, QDateTime(), b, Traffic::Direction::Receive, QByteArray::fromHex("bb"), Traffic::Framing::Datagram);
+        const auto message = Traffic::makeSampleMessage(
+            3, QDateTime(), b, Traffic::Direction::Receive, QByteArray(64, 'z'), Traffic::Framing::Message);
+        model.replaceRecords({stream, datagram, message});
+
+        TrafficFilter::Options options;
+        options.endpoints = {a.endpointId, b.endpointId};
+
+        // 只看完整消息：按 framing 字段判定，而不是靠"数据内容里有没有换行"这类猜测。
+        options.textOnly = true;
+        filter.setOptions(options);
+        QCOMPARE(filter.rowCount(), 2);
+        options.textOnly = false;
+        filter.setOptions(options);
+        QCOMPARE(filter.rowCount(), 3);
+
+        // 最小长度：按真实字节数，不受预览截断影响。
+        options.minBytes = 8;
+        filter.setOptions(options);
+        QCOMPARE(filter.rowCount(), 1);
+        QCOMPARE(model.record(model.rowCount() - 1).raw.size(), 64);
+        options.minBytes = 0;
+
+        // 对端地址是来源的结构化字段，能被关键词直接命中，不必先渲染成显示文本。
+        options.search = QStringLiteral("52344");
+        filter.setOptions(options);
+        QCOMPARE(filter.rowCount(), 2);
+
+        // 关掉示例数据：真实的 RX/TX 记录不受影响，示例全部隐藏。
+        options.search.clear();
+        options.sample = false;
+        filter.setOptions(options);
         QCOMPARE(filter.rowCount(), 0);
     }
 
@@ -572,7 +692,9 @@ private slots:
             const int typeTop = type->mapTo(&window, QPoint()).y();
             QVERIFY(badgeMid >= typeTop && badgeMid <= typeTop + type->height());
             QVERIFY(fits(action));
-            QVERIFY(!action->isEnabled()); // Preview only; no transport is wired yet.
+            // 动作按钮的可用性跟随配置校验：草稿有效即可打开（通信后端已接线），
+            // 无效则禁用。默认草稿下 A（串口未选设备）无效，B（TCP 服务器默认值）有效。
+            QCOMPARE(action->isEnabled(), selector->hasValidConfiguration());
         }
         QVERIFY(a->mapTo(&window, QPoint()).y() < b->mapTo(&window, QPoint()).y());
 
@@ -926,6 +1048,66 @@ private slots:
                  b->findChild<QPushButton *>("endpointAction")->mapTo(&window, QPoint(0, 0)).y());
     }
 
+    void endpointActionOpensAndCloses()
+    {
+        // 端到端接线：点击动作按钮 → 运行时监听 → 状态回到按钮文案；
+        // 再次点击关闭。全程不需要真实硬件（TCP 服务器走本机监听）。
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+        auto *b = window.findChild<PortSelectorWidget *>("endpointB");
+        QVERIFY(b);
+        QVERIFY(b->hasValidConfiguration()); // TCP 服务器默认 127.0.0.1:9000
+        auto *action = b->findChild<QPushButton *>("endpointAction");
+        QCOMPARE(action->text(), QStringLiteral("监听"));
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("停止"));
+        // 打开期间配置被锁定：不能边连边改。
+        QVERIFY(!b->findChild<QComboBox *>("portType")->isEnabled());
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("监听"));
+        QVERIFY(b->findChild<QComboBox *>("portType")->isEnabled());
+    }
+
+    void trafficColumnsShowTheirOwnContent()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+        window.loadExample();
+        auto *table = window.findChild<QTableView *>("trafficTable");
+        QVERIFY(table);
+        auto *model = table->model();
+        QCOMPARE(model->rowCount(), 12);
+
+        // 断言"绘制区放得下文字"，而不是"列宽减一个拍出来的常数放得下"。
+        // workbench.qss 给 QTableView::item 加了 padding，直接比 columnWidth 和
+        // horizontalAdvance 会在样式生效时给出假通过。SE_ItemViewItemText 与实际
+        // 绘制同源，量出来的就是真正的文本区。
+        const auto textAreaWidth = [table](int column) {
+            QStyleOptionViewItem option;
+            option.initFrom(table);
+            option.rect = QRect(0, 0, 400, table->fontMetrics().height());
+            const int overhead = qMax(0, option.rect.width()
+                - table->style()->subElementRect(QStyle::SE_ItemViewItemText, &option, table).width());
+            return table->columnWidth(column) - overhead;
+        };
+        for (int row = 0; row < model->rowCount(); ++row) {
+            for (const int column : {TrafficModel::SourceColumn, TrafficModel::PeerColumn}) {
+                const auto text = model->index(row, column).data().toString();
+                QVERIFY2(table->fontMetrics().horizontalAdvance(text) <= textAreaWidth(column),
+                         qPrintable(QStringLiteral("第 %1 行第 %2 列被截断：%3（文本区 %4px，字宽 %5px）")
+                                        .arg(row).arg(column).arg(text)
+                                        .arg(textAreaWidth(column))
+                                        .arg(table->fontMetrics().horizontalAdvance(text))));
+            }
+        }
+    }
+
     void compactWindowAndExamples()
     {
         MainWindow window;
@@ -954,6 +1136,23 @@ private slots:
               splitterProbe->widget(0)->sizeHint().height(),
               splitterProbe->widget(1)->sizeHint().height());
         QCOMPARE(table->model()->rowCount(), 12);
+        // 对端独占一列并按 Source.peerAddress 渲染。串口行没有对端概念，显示占位破折号；
+        // 挤进端口列的第二行会被 33px 行高裁掉，所以它必须是独立的一列。
+        QCOMPARE(TrafficModel::ColumnCount, 7);
+        QCOMPARE(table->model()->index(0, TrafficModel::SourceColumn).data().toString(),
+                 QStringLiteral("A · 串口"));
+        QCOMPARE(table->model()->index(0, TrafficModel::PeerColumn).data().toString(),
+                 QStringLiteral("—"));
+        const int tcpServerRow = [&] {
+            for (int row = 0; row < table->model()->rowCount(); ++row)
+                if (table->model()->index(row, TrafficModel::SourceColumn).data().toString()
+                    == QStringLiteral("B · TCP 服务器"))
+                    return row;
+            return -1;
+        }();
+        QVERIFY(tcpServerRow >= 0);
+        QCOMPARE(table->model()->index(tcpServerRow, TrafficModel::PeerColumn).data().toString(),
+                 QStringLiteral("127.0.0.1:52001"));
         // 显示选项收进"显示设置"菜单后仍可过滤：关掉 RX 只剩 TX 记录。
         auto *rx = window.findChild<QAction *>("showRx");
         QVERIFY(rx && rx->isChecked());
@@ -974,11 +1173,13 @@ private slots:
         QCOMPARE(table->model()->rowCount(), 12);
         QVERIFY(window.rect().contains(QRect(editor->mapTo(&window, QPoint()), editor->size())));
         // 切换显示格式：表格渲染跟着变（HEX 基线 → DEC），原始字节不变。
-        const QModelIndex firstData = table->model()->index(0, 4);
-        QCOMPARE(firstData.data().toString(), QStringLiteral("01 03 00 00 00 02 C4 0B"));
+        // 第 0 条是字节流片段，内容列在渲染文本后带 ⏎ 续接标记——边界是消息的事实，
+        // 不能因为格式切换或只看完整消息的开关而消失。
+        const QModelIndex firstData = table->model()->index(0, TrafficModel::DataColumn);
+        QCOMPARE(firstData.data().toString(), QStringLiteral("01 03 00 00 00 02 C4 0B ⏎"));
         trafficFormat->setCurrentIndex(1); // DEC
-        QCOMPARE(table->model()->index(0, 4).data().toString(),
-                 QStringLiteral("1 3 0 0 0 2 196 11"));
+        QCOMPARE(table->model()->index(0, TrafficModel::DataColumn).data().toString(),
+                 QStringLiteral("1 3 0 0 0 2 196 11 ⏎"));
         // 搜索匹配当前格式的渲染文本：DEC 文本也能命中（C4 0B → "196 11"）。
         auto *search = window.findChild<QLineEdit *>("trafficSearch");
         search->setText("196 11");
@@ -991,6 +1192,45 @@ private slots:
         search->clear();
         window.findChild<QPushButton *>("clearTraffic")->click();
         QCOMPARE(table->model()->rowCount(), 0);
+    }
+
+    void receiveFramingValueSemantics()
+    {
+        // 接收组帧是端点配置值类型：默认参数可直接使用，非法组合必须被 isValid 拦下。
+        using Framing = ReceiveFraming;
+        const Framing defaults;
+        QVERIFY(defaults.isValid());
+        QCOMPARE(defaults.mode, Framing::Passthrough); // 默认仅兜底输出，不改逐包语义
+        QCOMPARE(defaults.idleTimeoutMs, 100);
+        QCOMPARE(defaults.bufferThresholdBytes, 300);
+        QVERIFY(!defaults.includeDelimiter);           // 结束符默认剥离
+        QVERIFY(defaults.includeLengthPrefix);         // 长度前缀默认保留帧头
+
+        // Delimiter 模式必须有非空结束符；超时与阈值必须为正。
+        Framing delimiter;
+        delimiter.mode = Framing::Delimiter;
+        QVERIFY(!delimiter.isValid());
+        delimiter.delimiter = QByteArray::fromHex("0D0A");
+        QVERIFY(delimiter.isValid());
+        Framing badTimeout = delimiter;
+        badTimeout.idleTimeoutMs = 0;
+        QVERIFY(!badTimeout.isValid());
+        Framing badThreshold = delimiter;
+        badThreshold.bufferThresholdBytes = -1;
+        QVERIFY(!badThreshold.isValid());
+
+        // 帧内容开关参与相等性：组帧器据此决定输出帧携带什么。
+        Framing stripped = delimiter;
+        stripped.includeDelimiter = true;
+        QVERIFY(stripped != delimiter);        // 唯一差异是开关，必须判为不等
+        Framing same = stripped;
+        QVERIFY(same == stripped);             // 其余字段逐项相同则相等
+
+        // 与参考实现的分级对齐：警告是独立方向，有自己的显示名，非数据消息不进统计。
+        Traffic::Message warning;
+        warning.direction = Traffic::Direction::Warning;
+        QVERIFY(!warning.isData());
+        QCOMPARE(Traffic::directionName(warning.direction), QStringLiteral("警告"));
     }
 };
 

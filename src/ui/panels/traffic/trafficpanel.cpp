@@ -1,5 +1,7 @@
 #include "trafficpanel.h"
-#include "../../common/tintedicon.h"
+#include "ui/common/combometrics.h"
+#include "ui/common/endpointformat.h"
+#include "ui/common/tintedicon.h"
 
 #include <QActionGroup>
 #include <QApplication>
@@ -16,7 +18,9 @@
 #include <QSaveFile>
 #include <QScrollBar>
 #include <QStackedWidget>
+#include <QStyle>
 #include <QTableView>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
@@ -24,38 +28,100 @@ namespace {
 // 顶栏按钮与菜单条目的字形尺寸，与动作按钮一致。
 constexpr int BarIconSize = 16;
 
+// 单条消息最多保留的预览字节数。原始长度另存于 rawLength，显示的是"本条实际有多大"，
+// 而不是"我们留下了多少"——两者不等即说明发生了截断。
+constexpr int PreviewLimit = 4096;
+
+// 整个模型保留的原始字节预算，与 ARCHITECTURE.md §7 的 GUI 历史模型上限一致。
+constexpr qint64 HistoryByteBudget = 4 * 1024 * 1024;
+
+// 丢弃最旧记录直到回到预算内。逐条移除而不是整体截断，保留最新的连续上下文。
+void enforceBudget(QList<Traffic::Message> &records)
+{
+    qint64 bytes = 0;
+    for (const auto &record : records)
+        bytes += record.raw.size();
+    while (bytes > HistoryByteBudget && !records.isEmpty())
+        bytes -= records.takeFirst().raw.size();
+}
+
+// 保留预览长度，并把 rawLength 修正为真实长度。
+void applyPreviewLimit(Traffic::Message &record)
+{
+    record.rawLength = record.rawLength > 0 ? record.rawLength : record.raw.size();
+    if (record.raw.size() > PreviewLimit) {
+        record.raw.truncate(PreviewLimit);
+        record.truncated = true;
+    } else if (record.rawLength > record.raw.size()) {
+        record.truncated = true;
+    }
+}
+
 } // namespace
 
 TrafficModel::TrafficModel(QObject *parent) : QAbstractTableModel(parent) {}
 int TrafficModel::rowCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : m_records.size(); }
-int TrafficModel::columnCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : 6; }
-const TrafficRecord &TrafficModel::record(int row) const { return m_records.at(row); }
+int TrafficModel::columnCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : ColumnCount; }
+const Traffic::Message &TrafficModel::record(int row) const { return m_records.at(row); }
 
 QVariant TrafficModel::data(const QModelIndex &index, int role) const
 {
     if (!index.isValid() || index.row() >= m_records.size()) return {};
     const auto &r = m_records.at(index.row());
-    if (role == Qt::ForegroundRole && index.column() == 2)
-        return QColor(r.tx ? "#3565ce" : "#008577");
-    if (role == Qt::ForegroundRole && index.column() == 5)
+    if (role == Qt::ForegroundRole && index.column() == DirectionColumn)
+        return QColor(r.direction == Traffic::Direction::Transmit ? "#3565ce" : "#008577");
+    if (role == Qt::ForegroundRole && index.column() == OriginColumn)
         return QColor("#8591a2");
-    if (role == Qt::FontRole && (index.column() == 0 || index.column() == 4)) {
+    // 对端地址用等宽字体：IP:port 的数字要能上下对齐着扫，比例字体会让 52344 和 52345 看着一样长。
+    if (role == Qt::FontRole && (index.column() == TimeColumn || index.column() == BytesColumn
+            || index.column() == PeerColumn)) {
         auto font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
         font.setPointSize(10);
         return font;
     }
-    if (role == Qt::TextAlignmentRole && (index.column() == 2 || index.column() == 3))
+    if (role == Qt::TextAlignmentRole && (index.column() == DirectionColumn || index.column() == BytesColumn))
         return int(Qt::AlignCenter);
-    if (role == Qt::ToolTipRole)
-        return tr("示例数据，仅用于界面预览\n原始字节：%1").arg(PayloadCodec::render(r.payload, PayloadCodec::Format::Hex));
+    if (role == Qt::ToolTipRole) {
+        // 悬停展示结构化字段本身：真实长度、边界语义、关联 id，都不是显示列里的内容。
+        QStringList lines{QObject::tr("原始字节（HEX）：%1")
+                              .arg(PayloadCodec::render(r.raw, PayloadCodec::Format::Hex))};
+        if (r.truncated)
+            lines.prepend(QObject::tr("已截断：共 %1 字节，仅保留前 %2 字节").arg(r.rawLength).arg(r.raw.size()));
+        lines << QObject::tr("边界：%1").arg(Traffic::framingName(r.framing));
+        if (r.isFragment())
+            lines << QObject::tr("片段 %1%2").arg(r.fragmentIndex).arg(r.hasMoreFragments ? QObject::tr("，后续仍有片段") : QString());
+        if (r.state != Traffic::State::None)
+            lines << QObject::tr("发送状态：%1%2").arg(Traffic::stateName(r.state),
+                                 r.statusText.isEmpty() ? QString() : QObject::tr("（%1）").arg(r.statusText));
+        if (r.durationUs >= 0) lines << QObject::tr("本地耗时：%1 µs").arg(r.durationUs);
+        if (!r.detail.isEmpty()) lines << r.detail;
+        if (!r.requestId.isNull()) lines << QObject::tr("请求：%1").arg(r.requestId.toString());
+        if (!r.routeId.isNull()) lines << QObject::tr("路由：%1").arg(r.routeId.toString());
+        if (!r.frameId.isNull()) lines << QObject::tr("来源帧：%1").arg(r.frameId.toString());
+        return lines.join(QLatin1Char('\n'));
+    }
     if (role != Qt::DisplayRole) return {};
     switch (index.column()) {
-    case 0: return r.time.toString("HH:mm:ss.zzz");
-    case 1: return r.portLabel;
-    case 2: return r.tx ? QStringLiteral("↑ TX") : QStringLiteral("↓ RX");
-    case 3: return r.payload.size();
-    case 4: return PayloadCodec::render(r.payload, m_format);
-    case 5: return tr("示例");
+    case TimeColumn: return r.timestamp.toString("HH:mm:ss.zzz");
+    // 行标识由来源的行号与类型派生，不随消息落库：改了端点类型，旧记录的标签也跟着更新。
+    case SourceColumn: return endpointLabel(r.source.endpointIndex, r.source.endpointKind);
+    // 对端独占一列。挤进端口列的第二行会被 33px 的行高裁掉，而 TCP Server 的
+    // "哪个客户端发来的"恰恰是排障时最先要看的信息，不能因为放不下就不显示。
+    case PeerColumn: return r.source.hasPeer() ? r.source.peerAddress : QStringLiteral("—");
+    case DirectionColumn: {
+        const auto name = Traffic::directionName(r.direction);
+        if (r.state == Traffic::State::None || r.state == Traffic::State::LocalCompleted) return name;
+        return QStringLiteral("%1 %2").arg(name, Traffic::stateName(r.state));
+    }
+    // 显示真实长度，截断标记交给悬停与状态列，不在数字里掺信息。
+    case BytesColumn: return r.displayBytes();
+    case DataColumn: {
+        auto text = PayloadCodec::render(r.raw, m_format);
+        if (r.truncated) text += QObject::tr(" …");
+        if (r.isFragment() && r.hasMoreFragments) text += QObject::tr(" ⏎");
+        return text;
+    }
+    case OriginColumn: return Traffic::originName(r.origin);
     default: return {};
     }
 }
@@ -63,23 +129,38 @@ QVariant TrafficModel::data(const QModelIndex &index, int role) const
 QVariant TrafficModel::headerData(int section, Qt::Orientation orientation, int role) const
 {
     if (orientation != Qt::Horizontal || role != Qt::DisplayRole) return {};
-    return QStringList{tr("时间"), tr("端口 / 对端"), tr("方向"), tr("字节"), tr("数据内容"), tr("来源")}.value(section);
+    return QStringList{tr("时间"), tr("端口"), tr("对端"), tr("方向"), tr("字节"), tr("数据内容"), tr("来源")}.value(section);
 }
 
-void TrafficModel::replaceRecords(QList<TrafficRecord> records)
+void TrafficModel::replaceRecords(QList<Traffic::Message> records)
 {
     // This preview model has a hard cap; live batching belongs to the I/O milestone.
     if (records.size() > 2000) records = records.last(2000);
-    qsizetype bytes = 0;
-    for (auto &r : records) {
-        r.payload = r.payload.left(4096);
-        bytes += r.payload.size();
-    }
-    while (bytes > 4 * 1024 * 1024 && !records.isEmpty())
-        bytes -= records.takeFirst().payload.size();
+    for (auto &r : records)
+        applyPreviewLimit(r);
+    enforceBudget(records);
     beginResetModel();
     m_records = std::move(records);
     endResetModel();
+}
+
+void TrafficModel::appendRecords(QList<Traffic::Message> records)
+{
+    if (records.isEmpty()) return;
+    for (auto &r : records)
+        applyPreviewLimit(r);
+    const int added = records.size();
+    m_records += records;
+    const int before = m_records.size();
+    enforceBudget(m_records);
+    if (m_records.size() != before) {
+        // 超出预算时丢的是最旧记录，行号整体平移，用 reset 让视图和索引重新对齐。
+        beginResetModel();
+        endResetModel();
+        return;
+    }
+    beginInsertRows({}, before - added, before - 1);
+    endInsertRows();
 }
 
 void TrafficModel::setFormat(PayloadCodec::Format format)
@@ -87,7 +168,7 @@ void TrafficModel::setFormat(PayloadCodec::Format format)
     // 渲染格式只影响显示列，原始字节始终是事实依据。
     m_format = format;
     if (!m_records.isEmpty())
-        emit dataChanged(index(0, 4), index(m_records.size() - 1, 4));
+        emit dataChanged(index(0, DataColumn), index(m_records.size() - 1, DataColumn));
 }
 
 TrafficFilter::TrafficFilter(QObject *parent) : QSortFilterProxyModel(parent) {}
@@ -95,30 +176,50 @@ void TrafficFilter::setDisplayFormat(PayloadCodec::Format format)
 {
     m_format = format;
 }
-void TrafficFilter::setOptions(const QSet<QUuid> &endpoints, bool rx, bool tx, const QString &search)
+void TrafficFilter::setOptions(const Options &options)
 {
     beginFilterChange();
-    m_endpoints = endpoints;
-    m_rx = rx;
-    m_tx = tx;
-    m_search = search.trimmed();
+    m_options = options;
+    m_options.search = options.search.trimmed();
     endFilterChange(QSortFilterProxyModel::Direction::Rows);
 }
 
 bool TrafficFilter::filterAcceptsRow(int row, const QModelIndex &) const
 {
     const auto &r = static_cast<TrafficModel *>(sourceModel())->record(row);
-    // 一个端点都不勾选时不显示任何记录。
-    if (m_endpoints.isEmpty() || !m_endpoints.contains(r.endpoint)) return false;
-    if (r.tx ? !m_tx : !m_rx) return false;
-    if (m_search.isEmpty()) return true;
-    // 搜索匹配当前显示格式的渲染文本、UTF-8 文本与两种 HEX 写法，所见即可搜。
-    // 逐项短路，命中即返回，避免对每行做无谓的渲染与 HEX 展开。
-    if (r.portLabel.contains(m_search, Qt::CaseInsensitive)) return true;
-    if (PayloadCodec::render(r.payload, m_format).contains(m_search, Qt::CaseInsensitive)) return true;
-    if (PayloadCodec::render(r.payload, PayloadCodec::Format::Utf8).contains(m_search, Qt::CaseInsensitive)) return true;
-    if (QString(r.payload.toHex()).contains(m_search, Qt::CaseInsensitive)) return true;
-    return QString::fromLatin1(r.payload.toHex(' ')).contains(m_search, Qt::CaseInsensitive);
+    // 端点与方向是消息自带的事实字段，直接按结构判等，不解析显示文本。
+    if (m_options.endpoints.isEmpty() || !m_options.endpoints.contains(r.source.endpointId)) return false;
+    switch (r.direction) {
+    case Traffic::Direction::Receive:
+        if (!m_options.rx) return false;
+        break;
+    case Traffic::Direction::Transmit:
+        if (!m_options.tx) return false;
+        break;
+    default:
+        // 状态与错误不属于任何一个方向开关，跟随 RX 一起显示。
+        if (!m_options.rx && !m_options.tx) return false;
+        break;
+    }
+    // 示例数据单独开关：调试时最怕把预览数据和真实收发混在一起看。
+    if (r.origin == Traffic::Origin::Sample && !m_options.sample) return false;
+    if (m_options.textOnly && r.isFragment()) return false;
+    // 长度用真实字节数过滤，不用预览后剩下的长度，否则大消息会被误判为小。
+    if (r.displayBytes() < m_options.minBytes) return false;
+    if (m_options.search.isEmpty()) return true;
+
+    // 搜索匹配当前显示格式的渲染文本、UTF-8 文本与两种 HEX 写法，所见即可搜；
+    // 也匹配来源的对端地址和自由说明文本。逐项短路，命中即返回，
+    // 避免对每行做无谓的渲染与 HEX 展开。
+    const auto needle = m_options.search;
+    if (r.source.peerAddress.contains(needle, Qt::CaseInsensitive)) return true;
+    if (r.source.endpointName.contains(needle, Qt::CaseInsensitive)) return true;
+    if (r.statusText.contains(needle, Qt::CaseInsensitive)) return true;
+    if (r.detail.contains(needle, Qt::CaseInsensitive)) return true;
+    if (PayloadCodec::render(r.raw, m_format).contains(needle, Qt::CaseInsensitive)) return true;
+    if (PayloadCodec::render(r.raw, PayloadCodec::Format::Utf8).contains(needle, Qt::CaseInsensitive)) return true;
+    if (QString(r.raw.toHex()).contains(needle, Qt::CaseInsensitive)) return true;
+    return QString::fromLatin1(r.raw.toHex(' ')).contains(needle, Qt::CaseInsensitive);
 }
 
 TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
@@ -162,7 +263,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
 
     m_search = new QLineEdit;
     m_search->setObjectName("trafficSearch");
-    m_search->setPlaceholderText(tr("搜索文本 / HEX / 端口"));
+    m_search->setPlaceholderText(tr("搜索文本 / HEX / 对端地址"));
     m_search->setClearButtonEnabled(true);
     top->addWidget(m_search, 1);
 
@@ -182,16 +283,41 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_txAction->setCheckable(true);
     m_txAction->setChecked(true);
     connect(m_txAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
+    m_sampleAction = displayMenu->addAction(tr("显示示例数据"));
+    m_sampleAction->setCheckable(true);
+    m_sampleAction->setChecked(true);
+    connect(m_sampleAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
+    m_wholeAction = displayMenu->addAction(tr("只看完整消息"));
+    m_wholeAction->setCheckable(true);
+    // 默认关：字节流片段在真实抓包调试中是常态，默认滤掉会让人以为设备没发数据。
+    m_wholeAction->setToolTip(tr("滤掉字节流片段，只显示按数据报或协议边界完整的记录"));
+    connect(m_wholeAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
+    displayMenu->addSeparator();
+    // 最小长度用预设档位而不是输入框：调试时要么"不要噪声心跳"要么"只看大块数据"，
+    // 很少需要精确到个位数。互斥用 QActionGroup，和顶栏 A/B 开关同一套勾选样式。
+    auto *lengthMenu = displayMenu->addMenu(tr("最小字节数"));
+    auto *lengthGroup = new QActionGroup(lengthMenu);
+    lengthGroup->setExclusive(true);
+    for (const int bytes : {0, 1, 8, 16, 64}) {
+        auto *action = lengthMenu->addAction(bytes == 0 ? tr("不限") : tr("≥ %1 字节").arg(bytes));
+        action->setCheckable(true);
+        action->setChecked(bytes == 0);
+        action->setData(bytes);
+        connect(action, &QAction::toggled, this, &TrafficPanel::updateFilter);
+        lengthGroup->addAction(action);
+    }
+    m_lengthMenu = lengthMenu;
     auto *timeAction = displayMenu->addAction(tr("时间戳列"));
     timeAction->setCheckable(true);
     timeAction->setChecked(true);
     connect(timeAction, &QAction::toggled, this,
-            [this](bool checked) { m_table->setColumnHidden(0, !checked); });
+            [this](bool checked) { m_table->setColumnHidden(TrafficModel::TimeColumn, !checked); });
     displayMenu->addSeparator();
     auto *pauseAction = displayMenu->addAction(tr("暂停显示"));
     pauseAction->setCheckable(true);
     connect(pauseAction, &QAction::toggled, this, [this](bool checked) {
         m_paused = checked;
+        m_droppedWhilePaused = 0;
         updateSummary();
     });
     settings->setMenu(displayMenu);
@@ -215,6 +341,12 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
 
     m_model = new TrafficModel(this);
     m_filter = new TrafficFilter(this);
+    // 真实通信时消息可能成百条/秒，而 fitFixedColumns 要遍历全部可见行；
+    // 防抖到 200ms 一拍，宽度仍然及时，代价却与消息速率无关。
+    m_fitDebounce = new QTimer(this);
+    m_fitDebounce->setSingleShot(true);
+    m_fitDebounce->setInterval(200);
+    connect(m_fitDebounce, &QTimer::timeout, this, &TrafficPanel::fitFixedColumns);
     m_filter->setSourceModel(m_model);
     m_table = new QTableView;
     m_table->setObjectName("trafficTable");
@@ -229,12 +361,17 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_table->verticalHeader()->setDefaultSectionSize(33);
     auto *header = m_table->horizontalHeader();
     header->setSectionResizeMode(QHeaderView::Interactive);
-    header->setSectionResizeMode(4, QHeaderView::Stretch);
-    m_table->setColumnWidth(0, 116);
-    m_table->setColumnWidth(1, 158);
-    m_table->setColumnWidth(2, 64);
-    m_table->setColumnWidth(3, 52);
-    m_table->setColumnWidth(5, 58);
+    // 列宽一律按枚举写死值。裸下标在上次加"对端"列时就悄悄错位过一次，
+    // 枚举让"宽度跟着哪一列走"这件事在代码里是显式的。
+    header->setSectionResizeMode(TrafficModel::DataColumn, QHeaderView::Stretch);
+    m_table->setColumnWidth(TrafficModel::TimeColumn, 116);
+    m_table->setColumnWidth(TrafficModel::DirectionColumn, 64);
+    m_table->setColumnWidth(TrafficModel::BytesColumn, 52);
+    m_table->setColumnWidth(TrafficModel::OriginColumn, 58);
+    // 端口与对端两列由 fitFixedColumns() 按实际内容定宽，构造时先给个下限。
+    m_table->setColumnWidth(TrafficModel::SourceColumn, 96);
+    m_table->setColumnWidth(TrafficModel::PeerColumn, 120);
+    fitFixedColumns();
     m_stack = new QStackedWidget;
     m_stack->addWidget(m_table);
     auto *empty = new QLabel(tr("等待接收数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。"));
@@ -269,13 +406,35 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(m_table, &QTableView::customContextMenuRequested, this, [this](const QPoint &point) {
         const auto index = m_table->indexAt(point);
         if (!index.isValid()) return;
-        const auto bytes = m_model->record(m_filter->mapToSource(index).row()).payload;
+        const auto &record = m_model->record(m_filter->mapToSource(index).row());
         QMenu menu;
         auto *copy = menu.addAction(tr("复制 HEX"));
         auto *reuse = menu.addAction(tr("填入发送区"));
+        menu.addSeparator();
+        // 边界是消息的事实属性，不是显示设置：把"只显示完整消息"的开关反应用到这一行，
+        // 比让用户回到顶栏菜单里找同一个条件更直接。
+        auto *onlyWhole = menu.addAction(tr("只看完整消息"));
+        onlyWhole->setCheckable(true);
+        onlyWhole->setChecked(m_wholeAction->isChecked());
+        menu.addSeparator();
+        // 关联 id 可直接复制，用来和文件记录、路由规则对照。
+        auto *copyIds = menu.addAction(record.requestId.isNull() && record.routeId.isNull() && record.frameId.isNull()
+                ? tr("复制行标识")
+                : tr("复制关联 ID"));
         const auto *chosen = menu.exec(m_table->viewport()->mapToGlobal(point));
-        if (chosen == copy) QApplication::clipboard()->setText(PayloadCodec::render(bytes, PayloadCodec::Format::Hex));
-        if (chosen == reuse) emit reusePayload(bytes);
+        if (chosen == copy) QApplication::clipboard()->setText(PayloadCodec::render(record.raw, PayloadCodec::Format::Hex));
+        if (chosen == reuse) emit reusePayload(record.raw);
+        if (chosen == onlyWhole) m_wholeAction->setChecked(!m_wholeAction->isChecked());
+        if (chosen == copyIds) {
+            QStringList ids;
+            if (!record.frameId.isNull()) ids << tr("帧 %1").arg(record.frameId.toString());
+            if (!record.routeId.isNull()) ids << tr("路由 %1").arg(record.routeId.toString());
+            if (!record.requestId.isNull()) ids << tr("请求 %1").arg(record.requestId.toString());
+            if (ids.isEmpty())
+                ids << QStringLiteral("%1 · %2").arg(endpointLabel(record.source.endpointIndex, record.source.endpointKind),
+                                        record.timestamp.toString(Qt::ISODateWithMs));
+            QApplication::clipboard()->setText(ids.join(QLatin1Char('\n')));
+        }
     });
     updateSummary();
 }
@@ -291,20 +450,52 @@ void TrafficPanel::setPorts(const QList<PortDraft> &ports)
 void TrafficPanel::loadExample(const QList<PortDraft> &ports)
 {
     if (m_paused || ports.isEmpty()) return;
-    QList<TrafficRecord> records;
+    // 构造真实形状的消息，而不是"看起来像"的占位数据：示例走的是与真实数据
+    // 完全相同的筛选、格式化与导出路径，将来换了字段不会只有示例数据对不上。
     const auto start = QDateTime::currentDateTime().addSecs(-2);
     const QList<QByteArray> data{QByteArray::fromHex("010300000002c40b"), QByteArray::fromHex("010304001900286bf6"),
         QByteArray("device.ready\r\n"), QByteArray("status: OK\r\n"),
         QByteArray::fromHex("aa550601100020003f0d0a"), QByteArray("ping\r\n"), QByteArray("pong\r\n"),
         QByteArray::fromHex("01060001000119ca"), QByteArray::fromHex("01060001000119ca"),
         QStringLiteral("温度: 25.0 C\r\n").toUtf8(), QByteArray("heartbeat: 128\r\n"), QByteArray("OK\r\n")};
+    QList<Traffic::Message> records;
+    records.reserve(data.size());
+    quint64 id = 1;
     for (int i = 0; i < data.size(); ++i) {
         const int index = (i / 3) % ports.size();
         const auto &port = ports.at(index);
-        records.append({start.addMSecs(i * 137), port.id, endpointLabel(index, port.kind),
-                        i % 3 == 0, data.at(i)});
+        // 交替演示三种边界语义：流片段、数据报、完整消息，悬停即可看出区别。
+        const auto framing = i % 3 == 0 ? Traffic::Framing::Stream
+                                         : (i % 3 == 1 ? Traffic::Framing::Datagram : Traffic::Framing::Message);
+        auto message = Traffic::makeSampleMessage(id++, start.addMSecs(i * 137),
+            Traffic::makeSource(port, index), i % 3 == 0 ? Traffic::Direction::Transmit : Traffic::Direction::Receive,
+            data.at(i), framing);
+        // 串口与 TCP Client 是字节流，一条记录只是一段，标注它还有后续片段。
+        if (framing == Traffic::Framing::Stream && i + 1 < data.size()) {
+            message.fragmentIndex = 0;
+            message.hasMoreFragments = true;
+        }
+        if (port.kind == PortDraft::TcpServer || port.kind == PortDraft::Udp)
+            message.source.peerAddress = QStringLiteral("127.0.0.1:%1").arg(52000 + index);
+        records.append(message);
     }
     m_model->replaceRecords(records);
+    fitFixedColumns(); // 端点类型和对端地址是刚定下来的，列宽要跟着量一次
+    updateSummary();
+    if (m_follow->isChecked()) m_table->scrollToBottom();
+}
+
+void TrafficPanel::appendMessages(const QList<Traffic::Message> &messages)
+{
+    if (messages.isEmpty()) return;
+    if (m_paused) {
+        // 暂停只冻结显示，不无限积压：直接丢弃并累计缺口，恢复时计数清零。
+        m_droppedWhilePaused += messages.size();
+        updateSummary();
+        return;
+    }
+    m_model->appendRecords(messages);
+    m_fitDebounce->start(); // 列宽自适应限流执行，见构造处的说明
     updateSummary();
     if (m_follow->isChecked()) m_table->scrollToBottom();
 }
@@ -318,9 +509,57 @@ void TrafficPanel::updatePortVisibility()
     updateFilter();
 }
 
+void TrafficPanel::fitFixedColumns()
+{
+    // 遍历可见行实测文字宽度，取最大值再加样式表带来的开销。只增不减：
+    // 数据滚动时列宽来回跳比稍微宽一点更难用。固定列变宽的代价由 Stretch 的数据内容列吸收。
+    //
+    // 开销不能拍一个常数：workbench.qss 给 QTableView::item 加了 padding，Qt 绘制时
+    // 还会留出焦点框和文档边距。用 QStyle::subElementRect(SE_ItemViewItemText) 问
+    // 样式本身"文本区到底有多宽"，比在这里猜 padding 数值可靠——它和实际绘制同源。
+    const QFontMetrics metrics = m_table->fontMetrics();
+    // 量样式开销要用 QStyleOption 载体：subElementRect 会把 option 拷一份再改，
+    // 传裸矩形拿不到真实的文本区。SE_ItemViewItemText 与实际绘制同源。
+    QStyleOptionViewItem itemOption;
+    itemOption.initFrom(m_table);
+    itemOption.rect = QRect(0, 0, 400, metrics.height());
+    const int overhead = qMax(0, itemOption.rect.width()
+        - m_table->style()->subElementRect(QStyle::SE_ItemViewItemText, &itemOption, m_table).width());
+    int portWidth = 0;
+    int peerWidth = 0;
+    for (int row = 0; row < m_model->rowCount(); ++row) {
+        const auto &record = m_model->record(row);
+        portWidth = qMax(portWidth, metrics.horizontalAdvance(endpointLabel(record.source.endpointIndex, record.source.endpointKind)));
+        if (record.source.hasPeer())
+            peerWidth = qMax(peerWidth, metrics.horizontalAdvance(record.source.peerAddress));
+    }
+    // 表头有自己的 padding，单独按表头样式算，不能和数据行共用一个开销值。
+    QStyleOptionViewItem headerOption;
+    headerOption.initFrom(m_table);
+    headerOption.rect = QRect(0, 0, 400, 20);
+    const int headerOverhead = qMax(0, headerOption.rect.width()
+        - m_table->style()->subElementRect(QStyle::SE_HeaderLabel, &headerOption, m_table).width());
+    const int sourceNeeded = qMax(portWidth + overhead,
+        metrics.horizontalAdvance(m_model->headerData(TrafficModel::SourceColumn, Qt::Horizontal).toString()) + headerOverhead);
+    const int peerNeeded = qMax(peerWidth + overhead,
+        metrics.horizontalAdvance(m_model->headerData(TrafficModel::PeerColumn, Qt::Horizontal).toString()) + headerOverhead);
+    m_table->setColumnWidth(TrafficModel::SourceColumn, qMax(m_table->columnWidth(TrafficModel::SourceColumn), sourceNeeded));
+    m_table->setColumnWidth(TrafficModel::PeerColumn, qMax(m_table->columnWidth(TrafficModel::PeerColumn), peerNeeded));
+}
+
 void TrafficPanel::updateFilter()
 {
-    m_filter->setOptions(m_visibleEndpoints, m_rxAction->isChecked(), m_txAction->isChecked(), m_search->text());
+    TrafficFilter::Options options;
+    options.endpoints = m_visibleEndpoints;
+    options.rx = m_rxAction->isChecked();
+    options.tx = m_txAction->isChecked();
+    options.sample = m_sampleAction->isChecked();
+    options.textOnly = m_wholeAction->isChecked();
+    options.search = m_search->text();
+    // 长度档位读的是被选中的动作，不缓存上次值，避免与菜单实际状态失步。
+    for (const auto *action : m_lengthMenu->actions())
+        if (action->isChecked()) options.minBytes = action->data().toInt();
+    m_filter->setOptions(options);
     updateSummary();
 }
 
@@ -329,26 +568,41 @@ void TrafficPanel::updateSummary()
     const int count = m_model->rowCount();
     m_stack->setCurrentIndex(count == 0 ? 1 : 0);
     // 空态提示由表格区的空态文案承担；顶栏标记只提醒示例数据不计入统计。
-    m_exampleBadge->setText(tr("示例数据 · 不计入收发统计"));
+    const bool sampleVisible = m_sampleAction->isChecked();
+    m_exampleBadge->setText(sampleVisible ? tr("示例数据 · 不计入收发统计") : tr("仅显示真实收发"));
     m_exampleBadge->setVisible(count > 0);
-    m_summary->setText(m_paused ? tr("显示已暂停 · 恢复后可重新载入示例")
+    m_summary->setText(m_paused ? tr("显示已暂停 · 期间丢弃 %1 条").arg(m_droppedWhilePaused)
                               : tr("显示 %1 / %2 条  ·  右键记录可复制或填入发送区").arg(m_filter->rowCount()).arg(count));
 }
 
 void TrafficPanel::exportVisible()
 {
     if (!m_filter->rowCount()) { m_summary->setText(tr("当前没有可导出的记录")); return; }
-    const auto path = QFileDialog::getSaveFileName(this, tr("导出示例记录"), "easyDebug-preview.tsv", tr("制表符文件 (*.tsv)"));
+    const auto path = QFileDialog::getSaveFileName(this, tr("导出记录"), "easyDebug-preview.tsv", tr("制表符文件 (*.tsv)"));
     if (path.isEmpty()) return;
-    QByteArray output("# easyDebug UI preview - sample data only\nTime\tPort\tDirection\tBytes\tHEX\n");
+    // 导出列与显示列解耦：即使界面上隐藏了某列，导出仍是完整的结构化事实。
+    // 时间用 ISO 格式带毫秒，方向/边界/来源用稳定名称，HEX 用大写无分隔。
+    QByteArray output("# easyDebug UI preview - sample data only\n"
+                      "Time\tPort\tPeer\tDirection\tOrigin\tFraming\tState\tBytes\tTruncated\tHEX\n");
     for (int i = 0; i < m_filter->rowCount(); ++i) {
         const auto &r = m_model->record(m_filter->mapToSource(m_filter->index(i, 0)).row());
-        QString label = r.portLabel;
-        label.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ');
-        output += QString("%1\t%2\t%3\t%4\t%5\n").arg(r.time.toString(Qt::ISODateWithMs), label,
-            r.tx ? "TX" : "RX", QString::number(r.payload.size()), PayloadCodec::render(r.payload, PayloadCodec::Format::Hex)).toUtf8();
+        auto clean = [](QString text) {
+            text.replace(QLatin1Char('\t'), QLatin1Char(' '));
+            text.replace(QLatin1Char('\n'), QLatin1Char(' '));
+            text.replace(QLatin1Char('\r'), QLatin1Char(' '));
+            return text;
+        };
+        output += QString("%1\t%2\t%3\t%4\t%5\t%6\t%7\t%8\t%9\t%10\n")
+                      .arg(r.timestamp.toString(Qt::ISODateWithMs),
+                           clean(endpointLabel(r.source.endpointIndex, r.source.endpointKind)),
+                           clean(r.source.peerAddress), Traffic::directionName(r.direction),
+                           Traffic::originName(r.origin), Traffic::framingName(r.framing),
+                           Traffic::stateName(r.state), QString::number(r.displayBytes()),
+                           r.truncated ? QStringLiteral("yes") : QStringLiteral("no"),
+                           clean(PayloadCodec::render(r.raw, PayloadCodec::Format::Hex)))
+                      .toUtf8();
     }
     QSaveFile file(path);
     const bool ok = file.open(QIODevice::WriteOnly) && file.write(output) == output.size() && file.commit();
-    m_summary->setText(ok ? tr("示例记录已导出") : tr("导出失败：%1").arg(file.errorString()));
+    m_summary->setText(ok ? tr("记录已导出") : tr("导出失败：%1").arg(file.errorString()));
 }

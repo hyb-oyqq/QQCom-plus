@@ -87,8 +87,17 @@ flowchart TB
 | SendRequest | requestId、origin（Manual/Scheduled/Forward）、可选 frameId/routeId、目标 session、目标 peer/address、payload |
 | SendResult | requestId、目标、admittedBytes、qtAcceptedBytes、localWrittenBytes、状态、错误码与消息 |
 | RouteRule | id、enabled、source EndpointId、来源过滤、目标选择、分包配置、拥塞策略、revision |
-| TrafficEvent | RX/TX/State/Error、session、peer、关联 request/frame/route、实际/原始长度、预览、截断标记 |
+| Traffic::Message | 已落地（`src/domain/trafficmessage.h`）：id、timestamp + monotonicNs、direction、origin、state、framing + fragmentIndex/hasMoreFragments、Source、frameId/requestId/routeId、raw + rawLength + truncated + durationUs、statusText/detail |
 | Statistics | RX 字节/报文、TX 已接受/本地完成字节、队列积压、失败/拒绝、路由丢弃、显示遗漏、记录遗漏 |
+
+**消息是唯一的显示与记录单元。** `Traffic::Message` 在实现上合并了原计划的 IngressFrame 与 TrafficEvent：IngressFrame 描述"来源侧发生了什么"，是 `Source` + 时间 + `raw` + 关联 id；TrafficEvent 描述"这条记录怎么被看到"，是 direction/origin/state/framing/statusText。首版工作区只有 A/B 两个端点、显示即事实，拆成两个类型只会让每个消费者同时持有两者；等 ProtocolInspectorPage 引入解析结果（字段树、错误定位）时再拆，那时解析结果是第三个独立维度。
+
+类型内部有三条不可动摇的边界：
+
+1. **只有事实，没有派生文本。** 端口标签、渲染后的 HEX/UTF-8、列标题都在 UI 层现算，不写回消息。改端点类型不会让历史记录的标签变陈旧，切显示格式不触碰数据。
+2. **`raw` 是事实依据，`rawLength` 是真实长度，`truncated` 说明二者不等。** 三者分开的理由是：HEX 渲染、关键词匹配、导出都读 `raw`；字节数统计与长度过滤读 `rawLength`；界面据此提示"已截断"。混成一个字段就会在预览截断后谎报消息大小。
+3. **`framing` 决定一条记录能不能被当成完整消息。** 串口/TCP 的 readyRead 片段不是协议帧，UDP 一次接收才是一个报文。不显式区分，界面会把流片段显示成完整消息，关键词过滤也会在错误的边界上命中。
+
 
 `QByteArray` 使用隐式共享，发布后视为不可变；不在转发路径调用 toHex/toUtf8、不反复 append 大块 buffer。多路转发可共享同一 payload，但每目标仍保守计入额度。预览用限定长度的新 QByteArray，不能用保留整个大 payload 的视图伪装成小缓存。
 
@@ -113,6 +122,8 @@ class AbstractTransport : public QObject {
 ```
 
 `submit()` 在 I/O 线程同步完成容量预约，返回 Admitted、NotReady、NoTarget、QueueFull、InvalidPayload 或 StaleSession；真正写入及完成是后续事件。GUI 从不跨线程直接调用该函数，只向有界邮箱投递命令，获得最终 admission 结果后更新 UI。
+
+**M2 已落地差异**（实现见 `src/transport`，组合根见 `src/app/EndpointRuntime`）：接口以 `start(const PortDraft &draft, quint64 generation)` / `stop()` / `write(const QByteArray &payload, const QUuid &peerId)` 落地——配置值对象直接复用界面的 `PortDraft`（EndpointConfig 待 M5 会话存储时再拆）；发送首版简化为 write() 同步返回全部目标累计"本地接受"字节数（-1 为拒绝），运行时据此装配 LocalCompleted/Partial/Failed 的 TX 消息，AdmissionResult/SendQueue/每目标 FIFO 留待压测证明需要时再引入；`close(CloseMode)` 简化为幂等的 `stop()`，退出排空策略待 M6。事件为 stateChanged / dataReceived / peerListChanged / errorOccurred 四个，全部携带 generation，运行时过滤陈旧事件后装配 `Traffic::Message` 发布给 GUI。命令路径为 GUI → 队列调用 EndpointRuntime 槽（openEndpoint/closeEndpoint/sendPayload），EndpointRuntime 整体归属 I/O 线程并持有全部传输实例。
 
 发送状态区分：Requested → Admitted → Writing → LocalCompleted；任一步可 Rejected/Cancelled/Failed。TCP 广播在目标展开时产生每 peer 子请求与结果，父请求汇总部分成功；没有客户端时返回 NoTarget。
 
@@ -306,31 +317,33 @@ peerId、generation、socket 指针与待发送缓存永不持久化。固定 TC
 
 ```text
 easyDebug/
-├── easyDebug.pro                # qmake 入口，实施阶段组织模块 .pri
+├── easyDebug.pro                # qmake 入口；include ui.pri 与 services.pri
 ├── main.cpp                     # 组合根入口
 ├── mainwindow.{h,cpp,ui}         # 组合根窗口
 ├── src/
-│   ├── domain/                  # 值类型、配置、结果
-│   ├── app/                     # Controller、IoRuntime、EndpointManager
-│   ├── transport/               # 接口、工厂、serial/tcpclient/tcpserver/udp
-│   ├── routing/                 # Router、规则、UDP 分包
-│   ├── sending/                 # PayloadEncoder、SendQueue、Scheduler
-│   ├── monitoring/              # 缓冲、统计、模型
-│   ├── persistence/             # SessionStore、CaptureWriter
-│   ├── discovery/               # 串口与网卡发现
+│   ├── domain/                  # 值类型、配置、结果（domain.pri：纯 QtCore）
+│   ├── app/                     # Controller、IoRuntime、EndpointManager（待 M1）
+│   ├── transport/               # 接口、工厂、serial/tcpclient/tcpserver/udp（待 M1）
+│   ├── routing/                 # Router、规则、UDP 分包（待 M4）
+│   ├── sending/                 # PayloadEncoder、SendQueue、Scheduler（待 M4）
+│   ├── monitoring/              # 缓冲、统计、模型（待 M3）
+│   ├── persistence/             # SessionStore、CaptureWriter（persistence.pri；PreferencesStore 已落地）
+│   ├── discovery/               # 串口与网卡发现（discovery.pri：serialport+concurrent 只在此声明）
 │   └── ui/
 │       ├── shell/               # PageHost、PageRegistry；当前 MainWindow 仍在项目根目录
 │       ├── panels/              # portselector、traffic、sending、routing
-│       ├── pages/               # messageeditor、protocolinspector、transfer
+│       ├── pages/               # messageeditor、protocolinspector、transfer（待 M5）
 │       ├── settings/            # SettingsDialog 和设置分组页面
 │       ├── dialogs/             # AboutDialog 等低频对话框
-│       └── common/              # PayloadPreview 等复用组件
+│       └── common/              # codec.pri（PayloadCodec+core5compat）、endpointformat、combometrics、tintedicon
 ├── version/                     # 版本清单、生成头文件和 qmake 版本入口
 ├── resources/                   # 图标、翻译、样式
 ├── scripts/                     # 构建、部署和版本脚本
 ├── tests/                       # FakeTransport、Qt Test、集成与性能驱动
 └── docs/                        # 设计及验收记录
 ```
+
+构建单元按层拆分：`domain.pri`（纯值类型，无硬件依赖）、`discovery.pri`（串口扫描）、`persistence.pri`（偏好存储）由 `services.pri` 聚合；UI 侧 `ui.pri` 引 `common/codec.pri`（编解码与 Core5Compat 依赖收敛于此）。M1 的无 UI 核心测试直接 include `domain.pri` 即可，不再被迫链接 SerialPort。include 统一用项目根相对路径（`ui/...`、`domain/...`），INCLUDEPATH 由各 `.pri` 自带，复用方无需自带；端点格式化等跨面板纯函数在 `ui/common/endpointformat.h`，面板之间不再互相 include 控件头。
 
 实施阶段使用 `QT += core gui widgets network serialport`、`CONFIG += c++17`；MSVC 增加 `/utf-8`。Qt Test 单独工程链接核心模块，避免让 UI 成为核心测试前提。首版只维护 qmake，一旦需要迁移 CMake，单独设计与提交，避免两个构建源同时漂移。
 

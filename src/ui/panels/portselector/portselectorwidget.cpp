@@ -1,6 +1,8 @@
 #include "portselectorwidget.h"
-#include "../../../domain/networkaddress.h"
-#include "../../common/tintedicon.h"
+#include "domain/networkaddress.h"
+#include "ui/common/combometrics.h"
+#include "ui/common/endpointformat.h"
+#include "ui/common/tintedicon.h"
 
 #include <QComboBox>
 #include <QAbstractItemView>
@@ -89,88 +91,6 @@ QIcon tintedIcon(const QString &path, const QColor &color)
 
 } // namespace
 
-// Let the style size the box from its own items: QStyleSheetStyle::sizeFromContents() adds the
-// stylesheet chrome, which is far wider than the item text because the arrow is drawn inside
-// the combo's right padding. Fixed then asks the layout for exactly this hint, so the box
-// follows font, DPI and translation changes instead of a frozen pixel width.
-void fitComboToItems(QComboBox *box)
-{
-    box->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-    box->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-}
-
-// Closed: the action to take. Open: the action that stops it. The button states itself.
-QString portActionName(int kind, bool open)
-{
-    switch (kind) {
-    case 2: return open ? QObject::tr("停止") : QObject::tr("监听");
-    case 3: return open ? QObject::tr("解绑") : QObject::tr("绑定");
-    default: return open ? QObject::tr("断开") : QObject::tr("连接");
-    }
-}
-
-// The glyph beside that text: a link for the actions that dial out, an access point for the
-// ones that listen, and a broken link once the endpoint is open. Colour keeps living in the
-// stylesheet's open property, so the icon only has to carry the shape.
-QString portActionIconName(int kind, bool open)
-{
-    if (open) return QStringLiteral(":/icons/link-off.svg");
-    return kind <= 1 ? QStringLiteral(":/icons/link-variant.svg")
-                     : QStringLiteral(":/icons/access-point.svg");
-}
-
-QString portKindName(int kind)
-{
-    return QStringList{QObject::tr("串口"), QObject::tr("TCP 客户端"),
-                       QObject::tr("TCP 服务器"), QObject::tr("UDP")}.value(kind);
-}
-
-QString endpointLabel(int index, int kind)
-{
-    return QString(QChar::fromLatin1('A' + char(index))) + QStringLiteral(" · ") + portKindName(kind);
-}
-
-QString portDraftSummary(const PortDraft &draft)
-{
-    const auto &v = draft.values;
-    switch (draft.kind) {
-    case 0: {
-        const auto port = v.value("serial.port").toString();
-        const auto parity = v.value("serial.parity", "None").toString();
-        const QMap<QString, QString> parityCodes{{"None", "N"}, {"Even", "E"}, {"Odd", "O"},
-                                                 {"Mark", "M"}, {"Space", "S"}};
-        const auto flow = v.value("serial.flow", "None").toString();
-        return QStringLiteral("%1 · %2 · %3%4%5 · %6")
-            .arg(port.isEmpty() ? QObject::tr("未选择串口") : port,
-                 v.value("serial.baud", "115200").toString(),
-                 v.value("serial.bits", "8").toString(), parityCodes.value(parity, "?"),
-                 v.value("serial.stop", "1").toString(), flow == "None" ? QObject::tr("无流控") : flow);
-    }
-    case 1: return v.value("client.host", "127.0.0.1").toString()
-                + ":" + v.value("client.port", 9000).toString();
-    case 2: return v.value("server.address", "127.0.0.1").toString()
-                + ":" + v.value("server.port", 9000).toString();
-    default: return v.value("udp.address", "127.0.0.1").toString()
-                + ":" + v.value("udp.port", 9001).toString();
-    }
-}
-
-QString portDraftDetails(const PortDraft &draft)
-{
-    if (draft.kind != 0) return QObject::tr("地址：%1").arg(portDraftSummary(draft));
-    const auto &v = draft.values;
-    const QMap<QString, QString> parityNames{{"None", QObject::tr("无校验")},
-        {"Even", QObject::tr("偶校验")}, {"Odd", QObject::tr("奇校验")},
-        {"Mark", QObject::tr("标记校验")}, {"Space", QObject::tr("空校验")}};
-    const auto port = v.value("serial.port").toString();
-    const auto parity = v.value("serial.parity", "None").toString();
-    const auto flow = v.value("serial.flow", "None").toString();
-    return QObject::tr("串口：%1\n波特率：%2 bps\n数据位：%3\n校验：%4\n停止位：%5\n流控：%6")
-        .arg(port.isEmpty() ? QObject::tr("未选择串口") : port,
-             v.value("serial.baud", "115200").toString(), v.value("serial.bits", "8").toString(),
-             parityNames.value(parity, parity), v.value("serial.stop", "1").toString(),
-             flow == "None" ? QObject::tr("无流控") : flow);
-}
 
 PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
 {
@@ -191,8 +111,10 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
 
     m_type = new QComboBox;
     m_type->setObjectName("portType");
-    for (int i = 0; i < 4; ++i)
-        m_type->addItem(portKindName(i), i);
+    // 类型身份绑定到 itemData 的枚举值，而不是条目位置：排序、翻译或插入
+    // 分组都不会改变已保存配置的含义（ARCHITECTURE §6.4 的映射规则）。
+    for (int kind = PortDraft::Serial; kind <= PortDraft::Udp; ++kind)
+        m_type->addItem(portKindName(kind), kind);
     fitComboToItems(m_type);
     m_type->setToolTip(tr("端点类型；切换后参数随之更换"));
     row->addWidget(m_type);
@@ -295,10 +217,11 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     m_action->setMinimumWidth(78);
     m_action->setEnabled(false);
     m_action->setIconSize(QSize(ActionIconSize, ActionIconSize));
+    // 动作只表达"意图"：开/关/取消都走 actionRequested，方向由组合根决定。
+    connect(m_action, &QPushButton::clicked, this, &PortSelectorWidget::actionRequested);
     // The row is as tall as its tallest control; filling it instead of centring keeps the
     // button's top edge on the same line as every other control in the bar.
     m_action->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
-    m_action->setToolTip(tr("当前为界面预览，通信后端尚未接入"));
     row->addWidget(m_action);
     layout->addLayout(row);
 
@@ -326,9 +249,9 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
 
     auto *serverMore = makePage(m_advancedPages);
     addInlineLabel(serverMore, tr("客户端上限"), addNumber("server.clients", 1, 64));
-    auto *peers = new QLabel(tr("暂无客户端；启动监听后在此管理连接与发送目标。"));
-    peers->setObjectName("Muted");
-    serverMore->addWidget(peers);
+    m_peerHint = new QLabel(tr("暂无客户端；启动监听后在此管理连接与发送目标。"));
+    m_peerHint->setObjectName("Muted");
+    serverMore->addWidget(m_peerHint);
     serverMore->addStretch();
 
     auto *udpMore = makePage(m_advancedPages);
@@ -362,9 +285,9 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     connect(m_type, &QComboBox::currentIndexChanged, this, updatePageSize);
     updatePageSize(m_pages->currentIndex());
 
-    connect(m_type, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int kind) {
+    connect(m_type, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         if (m_loading) return;
-        m_draft.kind = kind;
+        m_draft.kind = m_type->currentData().toInt();
         updateActionLabels();
         notifyChange();
     });
@@ -383,12 +306,18 @@ void PortSelectorWidget::setConnectionOpen(bool open)
 {
     if (m_open == open) return;
     m_open = open;
+    // 打开期间锁定类型与参数：连接中的端点不接受"边连边改"，
+    // 想换配置先关闭——状态机因此只需要处理干净的状态边界。
+    m_type->setEnabled(!open);
+    for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it)
+        it.value()->setEnabled(!open);
     updateActionLabels();
+    updateValidation();
 }
 
 void PortSelectorWidget::updateActionLabels()
 {
-    const int kind = m_type->currentIndex();
+    const int kind = m_type->currentData().toInt();
     m_action->setText(portActionName(kind, m_open));
     m_action->setIcon(actionStateIcon(portActionIconName(kind, m_open), ActionIconSize));
     // Blue invites the connect action; red marks the one that tears it down.
@@ -484,6 +413,18 @@ void PortSelectorWidget::commitAddressHistory()
     for (const auto &key : edited) rememberAddress(key);
 }
 
+void PortSelectorWidget::setPeerList(const QStringList &peers)
+{
+    if (!m_peerHint) return;
+    if (peers.isEmpty()) {
+        m_peerHint->setText(tr("暂无客户端；启动监听后在此管理连接与发送目标。"));
+        m_peerHint->setToolTip(QString());
+        return;
+    }
+    m_peerHint->setText(tr("已连接 %1 个客户端").arg(peers.size()));
+    m_peerHint->setToolTip(peers.join('\n'));
+}
+
 void PortSelectorWidget::selectSerialPort(const QString &portName)
 {
     const QSignalBlocker blocker(m_serialPorts);
@@ -552,7 +493,9 @@ void PortSelectorWidget::setDraft(const PortDraft &draft)
     commitAddressHistory();
     m_loading = true;
     m_draft = draft;
-    m_type->setCurrentIndex(draft.kind);
+    // 通过 itemData 定位类型，草稿里的 kind 与下拉框顺序解耦；越界值回落串口。
+    const int typeIndex = m_type->findData(draft.kind);
+    m_type->setCurrentIndex(typeIndex >= 0 ? typeIndex : 0);
     const QVariantMap defaults{{"serial.port", ""}, {"serial.baud", "115200"},
         {"serial.bits", "8"}, {"serial.parity", "None"}, {"serial.stop", "1"}, {"serial.flow", "None"},
         {"client.host", "127.0.0.1"}, {"client.port", 9000}, {"client.timeout", 5000},
@@ -587,7 +530,7 @@ void PortSelectorWidget::setDraft(const PortDraft &draft)
 PortDraft PortSelectorWidget::draft() const
 {
     auto result = m_draft;
-    result.kind = m_type->currentIndex();
+    result.kind = m_type->currentData().toInt();
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it) {
         if (it.key() == "serial.port")
             result.values.insert(it.key(), m_serialPorts->currentData().toString());
@@ -621,7 +564,7 @@ void PortSelectorWidget::updateValidation()
         if (optional && edit->text().isEmpty()) return;
         if (edit->text().trimmed().isEmpty() || !edit->hasAcceptableInput()) errors.insert(field, message);
     };
-    switch (m_type->currentIndex()) {
+    switch (m_type->currentData().toInt()) {
     case 0:
         if (m_serialPorts->currentData().toString().isEmpty())
             errors.insert(m_serialPorts, tr("串口：请选择设备；插入设备后将自动扫描"));
@@ -644,7 +587,7 @@ void PortSelectorWidget::updateValidation()
         requireText("udp.target", tr("目标地址：请输入有效的 IPv4 地址；仅接收时可留空"), true);
         break;
     }
-    const QString prefix = QStringList{"serial.", "client.", "server.", "udp."}.value(m_type->currentIndex());
+    const QString prefix = QStringList{"serial.", "client.", "server.", "udp."}.value(m_type->currentData().toInt());
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it) {
         const auto *spin = qobject_cast<QSpinBox *>(it.value());
         if (spin && it.key().startsWith(prefix) && !spin->hasAcceptableInput()) {
@@ -668,6 +611,9 @@ void PortSelectorWidget::updateValidation()
         if (invalid) messages.append(errors.value(field));
     }
     m_validationError = messages.join('\n');
+    // 动作按钮：配置有效才可打开；已打开时保持可点（用于关闭/取消）。
+    m_action->setEnabled(m_open || m_validationError.isEmpty());
+    m_action->setToolTip(m_open || m_validationError.isEmpty() ? QString() : m_validationError);
     // No inline marker: invalid fields carry a red border, the reason sits on each field.
     // An invalid field hidden behind the collapsed row would leave the message unreachable.
     if (m_initialised && !m_advanced->isChecked()) {

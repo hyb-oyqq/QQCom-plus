@@ -1,11 +1,12 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "version/version.h"
-#include "src/ui/panels/routing/routeeditorwidget.h"
-#include "src/ui/panels/sending/sendpanel.h"
-#include "src/ui/panels/traffic/trafficpanel.h"
-#include "src/discovery/portdiscoveryservice.h"
-#include "src/persistence/preferencesstore.h"
+#include "app/endpointruntime.h"
+#include "ui/panels/routing/routeeditorwidget.h"
+#include "ui/panels/sending/sendpanel.h"
+#include "ui/panels/traffic/trafficpanel.h"
+#include "discovery/portdiscoveryservice.h"
+#include "persistence/preferencesstore.h"
 
 #include <QFile>
 #include <QFrame>
@@ -13,6 +14,7 @@
 #include <QLabel>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -20,6 +22,21 @@ namespace {
 
 // 串口列表的轮询间隔：设备插拔靠周期扫描发现，服务端会合并重叠的扫描。
 constexpr int SerialAutoRefreshMs = 2000;
+// 收发速率的采样节拍：状态栏数字每秒跳一次足够可读，也更省 GUI 时间。
+constexpr int RateTickMs = 1000;
+
+// 状态栏字节数：KB/MB 用一位小数，B 保持整数——速率栏要的是"一眼量级"。
+// 自由函数没有 this 上下文，tr 用 QObject 的全局语境。
+QString formatBytes(qint64 bytes)
+{
+    if (bytes >= 1024 * 1024 * 1024)
+        return QString::number(double(bytes) / (1024.0 * 1024.0 * 1024.0), 'f', 2) + QObject::tr(" GB");
+    if (bytes >= 1024 * 1024)
+        return QString::number(double(bytes) / (1024.0 * 1024.0), 'f', 1) + QObject::tr(" MB");
+    if (bytes >= 1024)
+        return QString::number(double(bytes) / 1024.0, 'f', 1) + QObject::tr(" KB");
+    return QString::number(bytes) + QObject::tr(" B");
+}
 
 } // namespace
 
@@ -57,7 +74,8 @@ MainWindow::MainWindow(QWidget *parent)
     };
 
     for (const auto kind : {PortDraft::Serial, PortDraft::TcpServer}) {
-        const QString label = QString(QChar::fromLatin1('A' + char(m_selectors.size())));
+        const int index = m_selectors.size();
+        const QString label = QString(QChar::fromLatin1('A' + char(index)));
         auto *selector = new PortSelectorWidget;
         selector->setObjectName("endpoint" + label);
         selector->setEndpointLabel(label);
@@ -121,31 +139,66 @@ MainWindow::MainWindow(QWidget *parent)
     auto *statusLayout = new QHBoxLayout(status);
     statusLayout->setContentsMargins(12, 2, 12, 2);
     statusLayout->setSpacing(22);
-    auto *rx = new QLabel(tr("RX   0 B   ·   0 B/s"));
-    rx->setObjectName("RxStatus");
-    auto *tx = new QLabel(tr("TX   0 B   ·   0 B/s"));
-    tx->setObjectName("TxStatus");
-    statusLayout->addWidget(rx);
-    statusLayout->addWidget(tx);
+    m_rxStatus = new QLabel(tr("RX   0 B   ·   0 B/s"));
+    m_rxStatus->setObjectName("RxStatus");
+    m_txStatus = new QLabel(tr("TX   0 B   ·   0 B/s"));
+    m_txStatus->setObjectName("TxStatus");
+    statusLayout->addWidget(m_rxStatus);
+    statusLayout->addWidget(m_txStatus);
     m_routeStatus = new QLabel(tr("桥接  未启动"));
     m_routeStatus->setObjectName("RouteStatus");
     statusLayout->addWidget(m_routeStatus);
     statusLayout->addStretch();
-    auto *statusNote = new QLabel(tr("所有端口未连接  ·  示例不发送到设备"));
-    statusNote->setObjectName("Muted");
-    statusLayout->addWidget(statusNote);
+    m_statusNote = new QLabel(tr("所有端口未连接"));
+    m_statusNote->setObjectName("Muted");
+    statusLayout->addWidget(m_statusNote);
     ui->statusbar->addWidget(status, 1);
 
+    // 通信运行时：对象搬进 I/O 线程，GUI 只通过队列信号与它往来。
+    // 线程结束时运行时在 I/O 线程内自我销毁，串口/socket 的收尾不落在 GUI。
+    m_runtime = new EndpointRuntime;
+    m_ioThread = new QThread(this);
+    m_runtime->moveToThread(m_ioThread);
+    connect(m_ioThread, &QThread::finished, m_runtime, &QObject::deleteLater);
+    m_ioThread->start();
+    connect(m_runtime, &EndpointRuntime::endpointStateChanged, this, &MainWindow::handleEndpointState);
+    connect(m_runtime, &EndpointRuntime::endpointPeersChanged, this, &MainWindow::handleEndpointPeers);
+    connect(m_runtime, &EndpointRuntime::messageReceived, this, &MainWindow::handleMessage);
+
+    for (int index = 0; index < m_selectors.size(); ++index) {
+        connect(m_selectors.at(index), &PortSelectorWidget::actionRequested, this,
+            [this, index] { toggleEndpoint(index); });
+    }
+
     connect(m_traffic, &TrafficPanel::reusePayload, m_sender, &SendPanel::setPayload);
+    connect(m_sender, &SendPanel::sendRequested, this,
+        [this](const QByteArray &payload, int targetMask) {
+            const int origin = int(Traffic::Origin::Manual);
+            for (int index = 0; index < EndpointRuntime::EndpointCount; ++index)
+                if (targetMask & (1 << index))
+                    QMetaObject::invokeMethod(m_runtime, "sendPayload", Qt::QueuedConnection,
+                        Q_ARG(int, index), Q_ARG(QByteArray, payload), Q_ARG(int, origin));
+        });
     connect(m_bridge, &RouteEditorWidget::draftCountChanged, this, [this](int count) {
         m_routeStatus->setText(count > 0 ? tr("桥接  已建立 · 预览") : tr("桥接  未启动"));
     });
+
+    // 速率节拍：与串口扫描一样只在窗口真实显示时运行。
+    m_rateTimer = new QTimer(this);
+    m_rateTimer->setInterval(RateTickMs);
+    connect(m_rateTimer, &QTimer::timeout, this, &MainWindow::updateRateLabels);
     refreshEndpoints();
 }
 
 MainWindow::~MainWindow()
 {
     for (auto *selector : m_selectors) selector->commitAddressHistory();
+    // 先停 I/O 线程再拆 UI：运行时析构在 I/O 线程内完成，端口关闭
+    // 不需要 GUI 参与，也就不会出现退出时的竞态。
+    if (m_ioThread) {
+        m_ioThread->quit();
+        m_ioThread->wait();
+    }
     delete ui;
 }
 
@@ -159,10 +212,97 @@ void MainWindow::refreshEndpoints()
     m_traffic->setPorts(m_ports);
     m_sender->setPorts(m_ports);
     m_bridge->setEndpoints(m_ports, ready);
+    updateEndpointStatus(); // 端点类型变了，状态栏摘要的措辞要跟着换
+}
+
+void MainWindow::toggleEndpoint(int index)
+{
+    if (index < 0 || index >= m_selectors.size()) return;
+    // Closed → 打开；Opening/Open → 关闭（Opening 时即为取消连接）。
+    // 按钮的可用性由配置校验保证，这里不需要重复校验提示。
+    if (m_endpointStates[index] != Transport::State::Closed) {
+        QMetaObject::invokeMethod(m_runtime, "closeEndpoint", Qt::QueuedConnection, Q_ARG(int, index));
+        return;
+    }
+    const auto draft = m_selectors.at(index)->draft();
+    if (!m_selectors.at(index)->hasValidConfiguration()) return;
+    QMetaObject::invokeMethod(m_runtime, "openEndpoint", Qt::QueuedConnection,
+        Q_ARG(int, index), Q_ARG(PortDraft, draft));
+}
+
+void MainWindow::handleEndpointState(int index, int state, const QString &detail)
+{
+    if (index < 0 || index >= m_selectors.size()) return;
+    m_endpointStates[index] = Transport::State(state);
+    m_selectors.at(index)->setConnectionOpen(state == int(Transport::State::Open));
+    updateEndpointStatus();
+    // 打开成功的参数摘要进状态栏短消息；失败原因由独立的 Error 消息承载
+    // （见 handleMessage），这里不重复播报"打开失败"这类没有原因的标题。
+    if (Transport::State(state) == Transport::State::Open && !detail.isEmpty())
+        ui->statusbar->showMessage(detail, 5000);
+}
+
+void MainWindow::handleEndpointPeers(int index, const QStringList &peers)
+{
+    if (index < 0 || index >= m_selectors.size()) return;
+    m_endpointPeers[index] = peers;
+    m_selectors.at(index)->setPeerList(peers);
+    updateEndpointStatus();
+}
+
+void MainWindow::handleMessage(const Traffic::Message &message)
+{
+    // 字节统计与显示分开：暂停、筛选、清空都不改变计数；TX 只在本地
+    // 写出完成/部分完成时计入，Failed 不冒充流量。
+    if (message.isData()) {
+        if (message.direction == Traffic::Direction::Receive)
+            m_rxBytes += message.rawLength;
+        else if (message.state == Traffic::State::LocalCompleted
+            || message.state == Traffic::State::Partial)
+            m_txBytes += message.rawLength;
+    }
+    if (message.direction == Traffic::Direction::Error && !message.statusText.isEmpty())
+        ui->statusbar->showMessage(message.statusText, 5000);
+    m_traffic->appendMessages({message});
+}
+
+void MainWindow::updateEndpointStatus()
+{
+    const auto stateText = [this](int index) {
+        const int kind = m_ports.value(index).kind;
+        switch (m_endpointStates[index]) {
+        case Transport::State::Opening:
+            return tr("连接中");
+        case Transport::State::Open:
+            if (kind == PortDraft::TcpServer)
+                return tr("监听中 · %1 个客户端").arg(m_endpointPeers[index].size());
+            return kind == PortDraft::Udp ? tr("已绑定") : tr("已连接");
+        case Transport::State::Closed:
+            break;
+        }
+        return tr("未连接");
+    };
+    m_statusNote->setText(tr("A %1 · B %2").arg(stateText(0), stateText(1)));
+}
+
+void MainWindow::updateRateLabels()
+{
+    const auto rxRate = qMax<qint64>(0, m_rxBytes - m_rxBytesAtTick);
+    const auto txRate = qMax<qint64>(0, m_txBytes - m_txBytesAtTick);
+    m_rxBytesAtTick = m_rxBytes;
+    m_txBytesAtTick = m_txBytes;
+    m_rxStatus->setText(tr("RX   %1   ·   %2/s").arg(formatBytes(m_rxBytes), formatBytes(rxRate)));
+    m_txStatus->setText(tr("TX   %1   ·   %2/s").arg(formatBytes(m_txBytes), formatBytes(txRate)));
 }
 
 void MainWindow::loadExample() { m_traffic->loadExample(m_ports); }
-void MainWindow::showRoutes() { m_bridge->findChild<QWidget *>("bridgeButton")->setFocus(); }
+
+void MainWindow::showRoutes()
+{
+    // objectName 是跨文件的字符串约定，找不到时静默返回而不是解引用空指针。
+    if (auto *button = m_bridge->findChild<QWidget *>("bridgeButton"))
+        button->setFocus();
+}
 
 void MainWindow::showEvent(QShowEvent *event)
 {
@@ -175,11 +315,15 @@ void MainWindow::showEvent(QShowEvent *event)
         const int send = m_sender->minimumSizeHint().height();
         m_dataSplitter->setSizes({qMax(0, total - send), send});
     }
-    if (!testAttribute(Qt::WA_DontShowOnScreen)) m_autoRefresh->start();
+    if (!testAttribute(Qt::WA_DontShowOnScreen)) {
+        m_autoRefresh->start();
+        m_rateTimer->start();
+    }
 }
 
 void MainWindow::hideEvent(QHideEvent *event)
 {
     QMainWindow::hideEvent(event);
     m_autoRefresh->stop();
+    m_rateTimer->stop();
 }

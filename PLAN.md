@@ -76,29 +76,29 @@ src/
 | 阶段 | 依赖 | 主要交付 | 完成判据 | 状态 |
 | --- | --- | --- | --- | --- |
 | M0 设计基线 | 无 | 阅读核心源码、需求、架构、UI、验收计划、本地 Git 首次提交 | 文档可追溯到参考源码，关键语义无空白 | 完成 |
-| M1 通信基础 | M0 | 值类型、Transport 接口、工厂、I/O 生命周期、有界队列、FakeTransport | 无界面可测试；模拟短写、满队列、退出时资源正确释放 | 待实施 |
-| M2 四种端点 | M1 | 串口、TCP 客户端/服务器、UDP、PortSelectorWidget | A/B 两端点可独立收发，任意类型组合，来源/目标正确 | 待实施 |
-| M3 调试闭环 | M2 | 原始数据监视、批量显示、文本/HEX/转义单次发送、状态统计 | 单端口及双端口可实际调试，二进制与编码用例通过 | 界面原型完成，通信待实施 |
+| M1 通信基础 | M0 | 值类型、Transport 接口、工厂、I/O 生命周期、有界队列、FakeTransport | 无界面可测试；模拟短写、满队列、退出时资源正确释放 | 核心 完成（队列简化，见 M1 清单） |
+| M2 四种端点 | M1 | 串口、TCP 客户端/服务器、UDP、PortSelectorWidget | A/B 两端点可独立收发，任意类型组合，来源/目标正确 | 完成 |
+| M3 调试闭环 | M2 | 原始数据监视、批量显示、文本/HEX/转义单次发送、状态统计 | 单端口及双端口可实际调试，二进制与编码用例通过 | 真实收发/单次/定时发送已接入；批量显示待实施 |
 | M4 桥接闭环 | M3 | A/B 桥接、TCP peer 选择、UDP 分包、拥塞处理 | 串口↔TCP/UDP、TCP↔TCP 及其他组合正确 | 待实施 |
 | M5 工作区能力 | M4 | 周期/顺序命令、配置导入导出、异步记录与轮转 | 任务可停止，无断线重放，配置可恢复，记录可校验 | 待实施 |
 | M6 稳定与发布 | M5 | 性能测量、长稳、异常、重连、打包、用户说明 | TEST_PLAN 必需项通过，产出实测报告和可运行安装包/压缩包 | 待实施 |
 
 ### M1：先固定契约
 
-- [ ] 建立 `src/domain`、`src/transport`、`src/routing`、`src/app` 与独立 Qt Test 工程。
-- [ ] 定义 EndpointId、PeerId、generation、PortState、IngressFrame、SendRequest、SendResult。
-- [ ] 完成 TransportFactory 与 EndpointManager，工厂只创建后端；UI 页工厂独立。
-- [ ] 实现有界命令入口和每目标 FIFO，支持短写、零写、错误与容量预约。
-- [ ] 实现异步启动/停止及旧会话事件过滤；不在 GUI 等待 I/O。
+- [x] 建立 `src/domain`、`src/transport`、`src/app` 与独立 Qt Test 工程（`tests/core`，回环验证传输层）；`src/routing` 留待 M4。
+- [x] 定义端点身份（草稿 QUuid + endpointIndex）与 generation（重开/换代自增，过滤旧会话事件）；IngressFrame/TrafficEvent 按既定决策合并为 `Traffic::Message`。
+- [x] 完成 TransportFactory 与 EndpointRuntime（工厂只创建后端；运行时负责生命周期与消息装配）。
+- [x] 首版简化：每目标队列由 Qt 内部写缓冲 + 有界读写缓冲（256 KiB）承担，write() 返回本地接受字节数并区分 LocalCompleted/Partial/Failed；容量预约与独立 SendQueue 留待压测后再上。
+- [x] 实现异步启动/停止及旧会话事件过滤；GUI 只投递队列命令，不等待 I/O。
 
 ### M2：端口与控件
 
 - [x] 采用参考工程的单行端点形态：A、B 各一行，类型/参数/状态/动作同行，低频参数就地展开；去掉端点列表和独立配置区。
-- [ ] 完成真实通信中的串口拔插检测与错误恢复；设备扫描不在 I/O 热路径执行。
-- [x] 配置界面接入后台串口扫描与手动刷新，显示端口号/友好名称并保留不可用设备选择；TCP/UDP 有效地址历史持久化，按本地/远端分组、去重并各限 20 条。真实通信打开及运行时拔插恢复仍待实施。
-- [ ] 完成 TCP Client Opening/Open 状态及连接取消，界面分别显示“连接中/已连接”。
-- [ ] 完成 TCP Server peer 的唯一身份、连接数限制及每客户端独立队列。
-- [ ] 合并参考 UDP Client/Server 为统一 UdpTransport，收包携带目标来源元数据。
+- [x] 完成真实通信中的串口拔插检测（errorOccurred 事件驱动 → Closed）；自动重连留待 M6。设备扫描不在 I/O 热路径执行。
+- [x] 配置界面接入后台串口扫描与手动刷新，显示端口号/友好名称并保留不可用设备选择；TCP/UDP 有效地址历史持久化，按本地/远端分组、去重并各限 20 条。
+- [x] 完成 TCP Client Opening/Open 状态及连接取消（Opening 期间再次点击动作即取消），界面分别显示“连接中/已连接”。
+- [x] 完成 TCP Server peer 的唯一身份（UUID）与连接数上限（超限拒绝并提示）；每客户端独立队列与慢客户端隔离留待 M4。
+- [x] 合并参考 UDP Client/Server 为统一 UdpTransport，收包携带目标来源元数据并保留数据报边界。
 - [ ] 验证连续切换类型 100 次后一次 RX 仍只触发一次处理。
 
 ### M3–M4：先调试，再转发

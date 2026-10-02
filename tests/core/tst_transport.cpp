@@ -1,0 +1,306 @@
+#include <QtTest>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include "app/endpointruntime.h"
+#include "transport/serialtransport.h"
+#include "transport/tcpclienttransport.h"
+#include "transport/tcpservertransport.h"
+#include "transport/transportfactory.h"
+#include "transport/udptransport.h"
+
+using namespace Qt::StringLiterals;
+
+namespace {
+
+// 传输层无 UI 核心测试：全部走本机回环，不需要真实串口硬件。
+// 覆盖四种端点的打开/关闭/收发语义，以及 EndpointRuntime 的消息装配。
+
+constexpr int PortScanBegin = 45450;
+constexpr int PortScanEnd = 45500;
+
+PortDraft makeDraft(int kind, const QVariantMap &values)
+{
+    PortDraft draft;
+    draft.kind = kind;
+    draft.values = values;
+    return draft;
+}
+
+int lastState(const QSignalSpy &spy)
+{
+    return spy.isEmpty() ? -1 : spy.last().at(1).toInt();
+}
+
+int peerCount(const QSignalSpy &peerSpy)
+{
+    return peerSpy.isEmpty() ? 0
+        : peerSpy.last().at(1).value<QList<Transport::PeerInfo>>().size();
+}
+
+QUuid firstPeerId(const QSignalSpy &peerSpy)
+{
+    if (peerSpy.isEmpty()) return {};
+    const auto peers = peerSpy.last().at(1).value<QList<Transport::PeerInfo>>();
+    return peers.isEmpty() ? QUuid() : peers.constFirst().id;
+}
+
+// 回环端口存在被其他进程占用的可能：从候选区间里挑一个 listen/bind
+// 成功的。start() 的结果是同步发布的，逐个试到成功即可。
+template <typename StartFn>
+int findFreePort(StartFn &&start)
+{
+    for (int candidate = PortScanBegin; candidate <= PortScanEnd; ++candidate)
+        if (start(candidate)) return candidate;
+    return 0;
+}
+
+} // namespace
+
+class TransportTest : public QObject
+{
+    Q_OBJECT
+
+private slots:
+    void factoryCreatesEveryKind()
+    {
+        for (int kind = PortDraft::Serial; kind <= PortDraft::Udp; ++kind) {
+            auto *transport = TransportFactory::create(kind, 0, this);
+            QVERIFY2(transport, qPrintable(QString::number(kind)));
+            delete transport;
+        }
+    }
+
+    void tcpClientAndServerExchange()
+    {
+        TcpServerTransport server(0);
+        QSignalSpy serverState(&server, &AbstractTransport::stateChanged);
+        QSignalSpy serverPeers(&server, &AbstractTransport::peerListChanged);
+        QSignalSpy serverData(&server, &AbstractTransport::dataReceived);
+        QSignalSpy serverErrors(&server, &AbstractTransport::errorOccurred);
+
+        const int port = findFreePort([&server, &serverState](int candidate) {
+            server.start(makeDraft(PortDraft::TcpServer,
+                {{"server.address", "127.0.0.1"}, {"server.port", candidate}, {"server.clients", 8}}), 1);
+            const bool open = lastState(serverState) == int(Transport::State::Open);
+            if (!open) serverState.clear(); // 成功的那次记录保留，供后续断言使用
+            return open;
+        });
+        QVERIFY2(port != 0, "没有可用的回环监听端口");
+
+        TcpClientTransport client(1);
+        QSignalSpy clientState(&client, &AbstractTransport::stateChanged);
+        QSignalSpy clientData(&client, &AbstractTransport::dataReceived);
+        client.start(makeDraft(PortDraft::TcpClient,
+            {{"client.host", "127.0.0.1"}, {"client.port", port}, {"client.timeout", 5000}}), 1);
+        QTRY_COMPARE(lastState(clientState), int(Transport::State::Open));
+        QTRY_COMPARE(peerCount(serverPeers), 1);
+        const auto peerId = firstPeerId(serverPeers);
+        QVERIFY(!peerId.isNull());
+
+        // 客户端 → 服务器：来源携带 peer 身份与地址
+        QCOMPARE(client.write("ping", QUuid()), qint64(4));
+        QTRY_VERIFY(!serverData.isEmpty());
+        QCOMPARE(serverData.last().at(2).toByteArray(), QByteArray("ping"));
+        const auto rxSource = serverData.last().at(1).value<Traffic::Source>();
+        QCOMPARE(rxSource.peerId, peerId);
+        QVERIFY(rxSource.peerAddress.startsWith(u"127.0.0.1:"_s));
+
+        // 服务器 → 指定 peer
+        QCOMPARE(server.write("pong", peerId), qint64(4));
+        QTRY_VERIFY(!clientData.isEmpty());
+        QCOMPARE(clientData.last().at(2).toByteArray(), QByteArray("pong"));
+
+        // 服务器 → 全部客户端（peerId 为空的广播语义）
+        QCOMPARE(server.write("all", QUuid()), qint64(3));
+        QTRY_VERIFY(clientData.count() >= 2);
+        bool broadcastSeen = false;
+        for (int i = 0; i < clientData.count(); ++i)
+            broadcastSeen |= clientData.at(i).at(2).toByteArray() == QByteArray("all");
+        QVERIFY(broadcastSeen);
+
+        // 未知 peer 的定向写是失败而不是静默广播
+        QCOMPARE(server.write("ghost", QUuid::createUuid()), qint64(-1));
+
+        client.stop();
+        QTRY_COMPARE(lastState(clientState), int(Transport::State::Closed));
+        QTRY_COMPARE(peerCount(serverPeers), 0);
+        server.stop();
+        QCOMPARE(lastState(serverState), int(Transport::State::Open)); // stop 不发状态事件，代次由运行时管理
+    }
+
+    void tcpClientReportsConnectionRefused()
+    {
+        TcpClientTransport client(0);
+        QSignalSpy state(&client, &AbstractTransport::stateChanged);
+        QSignalSpy errors(&client, &AbstractTransport::errorOccurred);
+        // 127.0.0.1:1 几乎必然没有监听；拒绝连接要变成显式错误而不是永远 Opening。
+        client.start(makeDraft(PortDraft::TcpClient,
+            {{"client.host", "127.0.0.1"}, {"client.port", 1}, {"client.timeout", 5000}}), 1);
+        QTRY_COMPARE(lastState(state), int(Transport::State::Closed));
+        QVERIFY(errors.count() >= 1);
+        QCOMPARE(client.write("x", QUuid()), qint64(-1));
+    }
+
+    void tcpServerEnforcesClientLimit()
+    {
+        TcpServerTransport server(0);
+        QSignalSpy serverState(&server, &AbstractTransport::stateChanged);
+        QSignalSpy serverPeers(&server, &AbstractTransport::peerListChanged);
+        QSignalSpy serverErrors(&server, &AbstractTransport::errorOccurred);
+        const int port = findFreePort([&server, &serverState](int candidate) {
+            server.start(makeDraft(PortDraft::TcpServer,
+                {{"server.address", "127.0.0.1"}, {"server.port", candidate}, {"server.clients", 1}}), 1);
+            const bool open = lastState(serverState) == int(Transport::State::Open);
+            if (!open) serverState.clear();
+            return open;
+        });
+        QVERIFY(port != 0);
+
+        QTcpSocket first;
+        first.connectToHost(QHostAddress::LocalHost, quint16(port));
+        QTRY_COMPARE(peerCount(serverPeers), 1);
+
+        QTcpSocket second;
+        second.connectToHost(QHostAddress::LocalHost, quint16(port));
+        // 超限连接被立即拒绝：服务器仍只有 1 个 peer，第二个客户端被断开。
+        QTRY_VERIFY(serverErrors.count() >= 1);
+        QTRY_COMPARE(peerCount(serverPeers), 1);
+        QTRY_COMPARE(second.state(), QAbstractSocket::UnconnectedState);
+        first.disconnectFromHost();
+        QTRY_COMPARE(peerCount(serverPeers), 0);
+        server.stop();
+    }
+
+    void udpPreservesDatagramBoundaryAndSource()
+    {
+        UdpTransport receiver(0);
+        QSignalSpy receiverState(&receiver, &AbstractTransport::stateChanged);
+        const int port = findFreePort([&receiver, &receiverState](int candidate) {
+            receiver.start(makeDraft(PortDraft::Udp,
+                {{"udp.address", "127.0.0.1"}, {"udp.port", candidate},
+                 {"udp.target", ""}, {"udp.targetPort", 0}}), 1);
+            const bool open = lastState(receiverState) == int(Transport::State::Open);
+            if (!open) receiverState.clear();
+            return open;
+        });
+        QVERIFY2(port != 0, "没有可用的回环绑定端口");
+
+        UdpTransport sender(1);
+        QSignalSpy senderState(&sender, &AbstractTransport::stateChanged);
+        sender.start(makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
+             {"udp.target", "127.0.0.1"}, {"udp.targetPort", port}}), 1);
+        QCOMPARE(lastState(senderState), int(Transport::State::Open));
+
+        QSignalSpy received(&receiver, &AbstractTransport::dataReceived);
+        // 三个数据报（含一个零长）：边界逐一保留，不合并、不拆分。
+        QCOMPARE(sender.write(QByteArray("ab"), QUuid()), qint64(2));
+        QCOMPARE(sender.write(QByteArray(), QUuid()), qint64(0));
+        QCOMPARE(sender.write(QByteArray("cde"), QUuid()), qint64(3));
+        QTRY_COMPARE(received.count() >= 3, true);
+        QCOMPARE(received.count(), 3);
+        const QList<QByteArray> expected = {QByteArray("ab"), QByteArray(), QByteArray("cde")};
+        for (int i = 0; i < 3; ++i) {
+            QCOMPARE(received.at(i).at(2).toByteArray(), expected.at(i));
+            QCOMPARE(received.at(i).at(3).toInt(), int(Traffic::Framing::Datagram));
+            const auto source = received.at(i).at(1).value<Traffic::Source>();
+            QVERIFY(source.peerAddress.startsWith(u"127.0.0.1:"_s));
+        }
+        sender.stop();
+        receiver.stop();
+    }
+
+    void udpWithoutTargetRejectsSend()
+    {
+        UdpTransport receiver(0);
+        QSignalSpy state(&receiver, &AbstractTransport::stateChanged);
+        receiver.start(makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
+             {"udp.target", ""}, {"udp.targetPort", 0}}), 1);
+        QCOMPARE(lastState(state), int(Transport::State::Open));
+        // 仅接收的端点没有发送目标：写操作显式失败，不悄悄挑选目的地。
+        QCOMPARE(receiver.write("x", QUuid()), qint64(-1));
+        receiver.stop();
+    }
+
+    void serialRejectsInvalidPortName()
+    {
+        SerialTransport transport(0);
+        QSignalSpy state(&transport, &AbstractTransport::stateChanged);
+        QSignalSpy errors(&transport, &AbstractTransport::errorOccurred);
+        transport.start(makeDraft(PortDraft::Serial,
+            {{"serial.port", "__not_a_serial_port__"}, {"serial.baud", "115200"},
+             {"serial.bits", "8"}, {"serial.parity", "None"}, {"serial.stop", "1"},
+             {"serial.flow", "None"}}), 1);
+        QTRY_COMPARE(lastState(state), int(Transport::State::Closed));
+        QVERIFY(errors.count() >= 1);
+        QCOMPARE(transport.write("x", QUuid()), qint64(-1));
+    }
+
+    void endpointRuntimeAssemblesAndRoutesMessages()
+    {
+        EndpointRuntime runtime;
+        QSignalSpy states(&runtime, &EndpointRuntime::endpointStateChanged);
+        QSignalSpy messages(&runtime, &EndpointRuntime::messageReceived);
+        QSignalSpy peers(&runtime, &EndpointRuntime::endpointPeersChanged);
+
+        // A 端：UDP 仅接收；逐个候选端口直到打开成功。
+        int port = 0;
+        for (int candidate = PortScanBegin; candidate <= PortScanEnd && port == 0; ++candidate) {
+            runtime.openEndpoint(0, makeDraft(PortDraft::Udp,
+                {{"udp.address", "127.0.0.1"}, {"udp.port", candidate},
+                 {"udp.target", ""}, {"udp.targetPort", 0}}));
+            if (lastState(states) == int(Transport::State::Open)) {
+                port = candidate;
+            } else {
+                runtime.closeEndpoint(0);
+                states.clear();
+            }
+        }
+        QVERIFY(port != 0);
+
+        // B 端：UDP 发往 A。
+        runtime.openEndpoint(1, makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
+             {"udp.target", "127.0.0.1"}, {"udp.targetPort", port}}));
+        QCOMPARE(lastState(states), int(Transport::State::Open));
+
+        // 手动发送：B 出现 TX LocalCompleted 消息，A 收到 RX 消息。
+        runtime.sendPayload(1, "ping", int(Traffic::Origin::Manual));
+        const auto findMessage = [&messages](Traffic::Direction dir, int idx, const QByteArray &raw) {
+            for (const auto &params : messages) {
+                const auto m = params.at(0).value<Traffic::Message>();
+                if (m.direction == dir && m.source.endpointIndex == idx && m.raw == raw)
+                    return m;
+            }
+            return Traffic::Message{};
+        };
+        // TX：已打开且目标是明确地址 → 本地写出完成；身份与单调时钟已打戳。
+        const auto tx = findMessage(Traffic::Direction::Transmit, 1, "ping");
+        QCOMPARE(tx.state, Traffic::State::LocalCompleted);
+        QVERIFY(tx.id != 0 && tx.monotonicNs > 0);
+        // RX：轮询重查 spy（QTRY 的表达式每次迭代都重新执行 findMessage）。
+        QTRY_VERIFY(!findMessage(Traffic::Direction::Receive, 0, "ping").frameId.isNull());
+        const auto rx = findMessage(Traffic::Direction::Receive, 0, "ping");
+        QCOMPARE(rx.framing, Traffic::Framing::Datagram);
+        QVERIFY(!rx.source.peerAddress.isEmpty());
+        QVERIFY(!rx.frameId.isNull());
+
+        // 仅接收端点（已打开但没有发送目标）发送：显式 Failed，不静默丢弃。
+        const int baseline = messages.count();
+        runtime.sendPayload(0, "nope", int(Traffic::Origin::Manual));
+        QCOMPARE(messages.count(), baseline + 1);
+        const auto failed = messages.last().at(0).value<Traffic::Message>();
+        QCOMPARE(failed.state, Traffic::State::Failed);
+
+        runtime.closeEndpoint(1);
+        runtime.closeEndpoint(0);
+        QTRY_COMPARE(lastState(states), int(Transport::State::Closed));
+        // UDP 平时不发 peer 事件；关闭时的空列表广播用于复位界面显示。
+        for (const auto &params : peers)
+            QVERIFY(params.at(1).toStringList().isEmpty());
+    }
+};
+
+QTEST_MAIN(TransportTest)
+#include "tst_transport.moc"

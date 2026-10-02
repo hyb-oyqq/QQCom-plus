@@ -2,13 +2,17 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
-#include "src/ui/panels/portselector/portselectorwidget.h"
+#include "domain/trafficmessage.h"
+#include "ui/panels/portselector/portselectorwidget.h"
+#include "transport/transporttypes.h"
 
 class QLabel;
 class QHideEvent;
 class QShowEvent;
 class QTimer;
 class QSplitter;
+class QThread;
+class EndpointRuntime;
 class RouteEditorWidget;
 class SendPanel;
 class TrafficPanel;
@@ -36,6 +40,12 @@ protected:
 
 private:
     void refreshEndpoints();
+    void toggleEndpoint(int index);
+    void handleEndpointState(int index, int state, const QString &detail);
+    void handleEndpointPeers(int index, const QStringList &peers);
+    void handleMessage(const Traffic::Message &message);
+    void updateEndpointStatus();
+    void updateRateLabels();
     Ui::MainWindow *ui;
     QList<PortDraft> m_ports;
     QList<PortSelectorWidget *> m_selectors;
@@ -46,5 +56,19 @@ private:
     TrafficPanel *m_traffic;
     SendPanel *m_sender;
     QLabel *m_routeStatus;
+
+    // 通信运行时：GUI 组装与观察，命令与数据都经 Qt 队列跨线程。
+    QThread *m_ioThread = nullptr;
+    EndpointRuntime *m_runtime = nullptr;
+    Transport::State m_endpointStates[2] = {Transport::State::Closed, Transport::State::Closed};
+    QStringList m_endpointPeers[2];
+    qint64 m_rxBytes = 0;
+    qint64 m_txBytes = 0;
+    qint64 m_rxBytesAtTick = 0;
+    qint64 m_txBytesAtTick = 0;
+    QTimer *m_rateTimer = nullptr;
+    QLabel *m_rxStatus = nullptr;
+    QLabel *m_txStatus = nullptr;
+    QLabel *m_statusNote = nullptr;
 };
 #endif // MAINWINDOW_H

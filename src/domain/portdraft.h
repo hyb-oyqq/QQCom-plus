@@ -23,4 +23,7 @@ struct PortDraft
     QVariantMap values;
 };
 
+// 跨线程命令（GUI → I/O 线程的 openEndpoint）按值携带草稿，需要元类型。
+Q_DECLARE_METATYPE(PortDraft)
+
 #endif

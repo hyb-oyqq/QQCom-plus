@@ -4,8 +4,8 @@
 #include <QIcon>
 #include <QWidget>
 #include <QSet>
-#include "../../../domain/portdraft.h"
-#include "../../../domain/serialportdescriptor.h"
+#include "domain/portdraft.h"
+#include "domain/serialportdescriptor.h"
 
 class QComboBox;
 class QLineEdit;
@@ -15,15 +15,8 @@ class QSpinBox;
 class QStackedWidget;
 class QToolButton;
 
-QString portKindName(int kind);
-// Endpoint identity is derived from the row position and type ("A · 串口"). It is
-// displayed, never edited, so no configuration field holds a user-supplied name.
-QString endpointLabel(int index, int kind);
-QString portDraftSummary(const PortDraft &draft);
-QString portDraftDetails(const PortDraft &draft);
-QString portActionName(int kind, bool open);
-QString portActionIconName(int kind, bool open);
-void fitComboToItems(QComboBox *box);
+// 端点标识与草稿摘要的格式化在 ui/common/endpointformat.h；
+// 下拉框内容自适应在 ui/common/combometrics.h，面板间共用，不必 include 本控件。
 
 // One endpoint per horizontal row: badge, type, inline parameters, state and action.
 class PortSelectorWidget : public QWidget
@@ -37,15 +30,21 @@ public:
     QString validationError() const { return m_validationError; }
     void setEndpointLabel(const QString &label);
     // Set once a transport reports its state; the action button reflects it.
+    // 打开期间锁定类型与参数，避免"边连边改"造成配置与运行态不一致。
     void setConnectionOpen(bool open);
     bool isConnectionOpen() const { return m_open; }
     void setSerialPorts(const QList<SerialPortDescriptor> &ports);
     void setAddressHistory(const QStringList &remote, const QStringList &local);
     void commitAddressHistory();
+    // TCP 服务器客户端列表（显示用）；其他类型传空列表即可。
+    void setPeerList(const QStringList &peers);
 
 signals:
     void configurationChanged();
     void addressCommitted(const QString &address, bool localAddress);
+    // 动作按钮被点击：打开/关闭/取消连接都发这一个信号，方向由上层根据
+    // 运行状态决定——控件自己不持有通信状态机。
+    void actionRequested();
 
 private:
     void notifyChange();
@@ -76,6 +75,7 @@ private:
     QList<SerialPortDescriptor> m_availablePorts;
     bool m_serialScanComplete = false;
     QSet<QString> m_editedAddresses;
+    QLabel *m_peerHint = nullptr; // TCP 服务器高级参数页的客户端提示行
 };
 
 #endif
