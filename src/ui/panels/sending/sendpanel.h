@@ -62,6 +62,7 @@ private:
     bool m_payloadValid = false;
     QByteArray m_payloadBytes;
     PreferencesStore *m_preferences = nullptr;
+    bool m_loading = false; // 加载偏好期间联动触发的保存要抑制，与 TrafficPanel 同一模式
 };
 
 #endif

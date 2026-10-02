@@ -110,6 +110,8 @@ private:
     void flushPending();
     // 换行查看模式：开启后数据内容列按列宽折行，行高钳制交给委托。
     void applyWrapMode(bool wrap);
+    // m_format 下标 → 格式枚举的唯一换算点，格式切换联动与日志落盘共用。
+    PayloadCodec::Format currentDisplayFormat() const;
     // 日志记录：把入模的每条消息按当前显示格式写成一行，持续追加到用户选定的文件。
     // 记录跟随显示流：暂停显示即暂停记录；切换编码格式后，新行跟随新格式。
     void toggleLogRecording(bool enabled);

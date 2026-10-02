@@ -46,6 +46,9 @@ constexpr int FlushIntervalMs = 16;
 // 换行查看模式下数据内容列的最大行高（以文本行数计）。
 constexpr int WrappedRowLines = 6;
 
+// 钳制行高在文本高度之外保留的绘制余量：交替行底色、焦点框与上下留白。
+constexpr int WrappedRowPaddingPx = 8;
+
 // 行高钳制委托。换行开启时 QTableView 会按内容给出行高，4096 字节的 HEX
 // 折行能有上百行，直接把滚动体验顶穿；这里把单行钳在几行文本以内，
 // 更长的内容走悬停提示——换行是查看模式，不是排版模式。
@@ -58,7 +61,7 @@ public:
     {
         auto size = QStyledItemDelegate::sizeHint(option, index);
         if (index.column() == TrafficModel::DataColumn)
-            size.setHeight(qMin(size.height(), option.fontMetrics.height() * WrappedRowLines + 8));
+            size.setHeight(qMin(size.height(), option.fontMetrics.height() * WrappedRowLines + WrappedRowPaddingPx));
         return size;
     }
 };
@@ -347,7 +350,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_wrapAction = displayMenu->addAction(tr("自动换行"));
     m_wrapAction->setObjectName("wrapTraffic");
     m_wrapAction->setCheckable(true);
-    m_wrapAction->setToolTip(tr("数据内容超出列宽时折行显示（行高最多 6 行，更多内容见悬停提示）"));
+    m_wrapAction->setToolTip(tr("数据内容超出列宽时折行显示（行高最多 6 行，更多内容见悬停提示）；大流量时按内容计算行高的开销较大，建议关闭"));
     connect(m_wrapAction, &QAction::toggled, this, [this](bool checked) {
         applyWrapMode(checked);
         savePreferences();
@@ -445,8 +448,8 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
 
     // RX/TX 的过滤连接在创建菜单动作时已完成，这里不再重复 connect。
     connect(m_search, &QLineEdit::textChanged, this, &TrafficPanel::updateFilter);
-    connect(m_format, &QComboBox::currentIndexChanged, this, [this](int index) {
-        const auto format = PayloadCodec::formats().value(index, PayloadCodec::Format::Hex);
+    connect(m_format, &QComboBox::currentIndexChanged, this, [this](int) {
+        const auto format = currentDisplayFormat();
         m_model->setFormat(format);
         m_filter->setDisplayFormat(format);
         updateFilter(); // 搜索匹配当前格式的渲染文本，切格式后需要重新过滤。
@@ -583,9 +586,16 @@ void TrafficPanel::applyWrapMode(bool wrap)
     header->setSectionResizeMode(wrap ? QHeaderView::ResizeToContents : QHeaderView::Interactive);
     if (!wrap) header->setDefaultSectionSize(33);
     // 数据不动，只让行高按当前模式整体重算：开启后长内容折行（委托钳到 6 行），
-    // 关闭后回到统一的 33px 单行省略。
+    // 关闭后回到统一的 33px 单行省略。行高由 ResizeToContents 模式切换与本次
+    // 模型重置各自触发重算，无需再手动 resizeRowsToContents 重复算一遍。
     m_model->refreshLayout();
-    if (wrap) m_table->resizeRowsToContents();
+}
+
+// m_format 下标 → 格式枚举的唯一换算点：格式切换的过滤联动与日志落盘都从这里取，
+// 换算规则（越界退回 HEX）只维护这一份。
+PayloadCodec::Format TrafficPanel::currentDisplayFormat() const
+{
+    return PayloadCodec::formats().value(m_format->currentIndex(), PayloadCodec::Format::Hex);
 }
 
 void TrafficPanel::toggleLogRecording(bool enabled)
@@ -607,7 +617,7 @@ void TrafficPanel::toggleLogRecording(bool enabled)
     }
     m_logFile = new QFile(m_logPath, this);
     if (!m_logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        updateSummary(); // 先刷新掉"显示 0/0 条"之类的旧摘要
+        // 错误提示直接顶替摘要文本；界面状态没有其他变化，不需要走 updateSummary。
         m_summary->setText(tr("日志文件无法打开：%1").arg(m_logFile->errorString()));
         delete m_logFile;
         m_logFile = nullptr;
@@ -615,14 +625,13 @@ void TrafficPanel::toggleLogRecording(bool enabled)
         m_recordAction->setChecked(false);
         return;
     }
-    updateSummary();
 }
 
 void TrafficPanel::writeLog(const QList<Traffic::Message> &messages)
 {
     if (!m_logFile || messages.isEmpty()) return;
     // 一条一行，与监视区同源渲染：方向是事实字段，内容由当前显示格式决定。
-    const auto format = PayloadCodec::formats().value(m_format->currentIndex(), PayloadCodec::Format::Hex);
+    const auto format = currentDisplayFormat();
     QTextStream out(m_logFile);
     for (const auto &r : messages) {
         out << r.timestamp.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))

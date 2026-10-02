@@ -161,7 +161,7 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     connect(m_editor, &QPlainTextEdit::textChanged, this, &SendPanel::updatePreview);
     connect(m_format, &QComboBox::currentIndexChanged, this, &SendPanel::updatePreview);
     connect(m_suffix, &QComboBox::currentIndexChanged, this, &SendPanel::updatePreview);
-    // 两个选择器任一变化即落盘；loadPreferences 的回写也会触发（同值无害）。
+    // 两个选择器任一变化即落盘；加载偏好期间由 m_loading 抑制（见 loadPreferences）。
     connect(m_format, &QComboBox::currentIndexChanged, this, &SendPanel::savePreferences);
     connect(m_suffix, &QComboBox::currentIndexChanged, this, &SendPanel::savePreferences);
     for (auto *button : {m_targetA, m_targetB, m_targetBoth})
@@ -268,16 +268,20 @@ void SendPanel::setPreferences(PreferencesStore *store)
 void SendPanel::loadPreferences()
 {
     if (!m_preferences) return;
+    // 恢复过程中 setCurrentIndex 会联动 savePreferences；不抑制的话，
+    // "恢复了格式才轮到行尾"的中间状态会把已存的行尾值覆盖掉（与 TrafficPanel 同一模式）。
+    m_loading = true;
     // 存的是格式名而不是下标：格式列表顺序将来变了，旧配置仍然有效。
     const auto format = m_preferences->value("send/format").toString();
     if (m_format->findText(format) >= 0)
         m_format->setCurrentText(format);
     m_suffix->setCurrentIndex(m_preferences->value("send/suffix", 0).toInt());
+    m_loading = false;
 }
 
 void SendPanel::savePreferences()
 {
-    if (!m_preferences) return;
+    if (!m_preferences || m_loading) return;
     m_preferences->setValue("send/format", m_format->currentText());
     m_preferences->setValue("send/suffix", m_suffix->currentIndex());
 }
