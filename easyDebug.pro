@@ -5,7 +5,18 @@ greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 CONFIG += c++17
 msvc: QMAKE_CXXFLAGS += /utf-8
 
+include(version/version.pri)
+
+win32 {
+    VERSION_UPDATE_SCRIPT = $$shell_path($$PWD/scripts/update_version.ps1)
+    VERSION_UPDATE_ROOT = $$shell_path($$PWD)
+    !system(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$VERSION_UPDATE_SCRIPT" -Root "$$VERSION_UPDATE_ROOT" -Mode build) {
+        error("Unable to update version metadata before build")
+    }
+}
+
 include(src/ui/ui.pri)
+include(src/services.pri)
 RESOURCES += resources/resources.qrc
 
 # You can make your code fail to compile if it uses deprecated APIs.
@@ -26,6 +37,8 @@ TRANSLATIONS += \
     easyDebug_zh_CN.ts
 CONFIG += lrelease
 CONFIG += embed_translations
+
+include(scripts/deploy_qt_windows.pri)
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

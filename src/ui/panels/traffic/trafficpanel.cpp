@@ -1,7 +1,8 @@
 #include "trafficpanel.h"
+#include "../../common/tintedicon.h"
 
+#include <QActionGroup>
 #include <QApplication>
-#include <QCheckBox>
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
@@ -14,10 +15,16 @@
 #include <QPushButton>
 #include <QSaveFile>
 #include <QScrollBar>
-#include <QSignalBlocker>
 #include <QStackedWidget>
 #include <QTableView>
 #include <QVBoxLayout>
+
+namespace {
+
+// 顶栏按钮与菜单条目的字形尺寸，与动作按钮一致。
+constexpr int BarIconSize = 16;
+
+} // namespace
 
 TrafficModel::TrafficModel(QObject *parent) : QAbstractTableModel(parent) {}
 int TrafficModel::rowCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : m_records.size(); }
@@ -40,26 +47,14 @@ QVariant TrafficModel::data(const QModelIndex &index, int role) const
     if (role == Qt::TextAlignmentRole && (index.column() == 2 || index.column() == 3))
         return int(Qt::AlignCenter);
     if (role == Qt::ToolTipRole)
-        return tr("示例数据，仅用于界面预览\n原始字节：%1").arg(QString(r.payload.toHex(' ').toUpper()));
+        return tr("示例数据，仅用于界面预览\n原始字节：%1").arg(PayloadCodec::render(r.payload, PayloadCodec::Format::Hex));
     if (role != Qt::DisplayRole) return {};
     switch (index.column()) {
     case 0: return r.time.toString("HH:mm:ss.zzz");
-    case 1: return r.name;
+    case 1: return r.portLabel;
     case 2: return r.tx ? QStringLiteral("↑ TX") : QStringLiteral("↓ RX");
     case 3: return r.payload.size();
-    case 4: {
-        if (m_hex) return QString(r.payload.toHex(' ').toUpper());
-        QString text;
-        for (const QChar c : QString::fromUtf8(r.payload)) {
-            if (c == '\r') text += "\\r";
-            else if (c == '\n') text += "\\n";
-            else if (c == '\t') text += "\\t";
-            else if (c.unicode() < 32 || c.unicode() == 127)
-                text += QString("\\x%1").arg(int(c.unicode()), 2, 16, QLatin1Char('0')).toUpper();
-            else text += c;
-        }
-        return text;
-    }
+    case 4: return PayloadCodec::render(r.payload, m_format);
     case 5: return tr("示例");
     default: return {};
     }
@@ -87,17 +82,23 @@ void TrafficModel::replaceRecords(QList<TrafficRecord> records)
     endResetModel();
 }
 
-void TrafficModel::setHex(bool hex)
+void TrafficModel::setFormat(PayloadCodec::Format format)
 {
-    m_hex = hex;
-    if (!m_records.isEmpty()) emit dataChanged(index(0, 4), index(m_records.size() - 1, 4));
+    // 渲染格式只影响显示列，原始字节始终是事实依据。
+    m_format = format;
+    if (!m_records.isEmpty())
+        emit dataChanged(index(0, 4), index(m_records.size() - 1, 4));
 }
 
 TrafficFilter::TrafficFilter(QObject *parent) : QSortFilterProxyModel(parent) {}
-void TrafficFilter::setOptions(const QUuid &endpoint, bool rx, bool tx, const QString &search)
+void TrafficFilter::setDisplayFormat(PayloadCodec::Format format)
+{
+    m_format = format;
+}
+void TrafficFilter::setOptions(const QSet<QUuid> &endpoints, bool rx, bool tx, const QString &search)
 {
     beginFilterChange();
-    m_endpoint = endpoint;
+    m_endpoints = endpoints;
     m_rx = rx;
     m_tx = tx;
     m_search = search.trimmed();
@@ -107,12 +108,17 @@ void TrafficFilter::setOptions(const QUuid &endpoint, bool rx, bool tx, const QS
 bool TrafficFilter::filterAcceptsRow(int row, const QModelIndex &) const
 {
     const auto &r = static_cast<TrafficModel *>(sourceModel())->record(row);
-    if ((!m_endpoint.isNull() && m_endpoint != r.endpoint) || (r.tx ? !m_tx : !m_rx)) return false;
-    const QString hex = r.payload.toHex(' ');
-    return m_search.isEmpty() || r.name.contains(m_search, Qt::CaseInsensitive)
-           || QString::fromUtf8(r.payload).contains(m_search, Qt::CaseInsensitive)
-           || hex.contains(m_search, Qt::CaseInsensitive)
-           || QString(r.payload.toHex()).contains(m_search, Qt::CaseInsensitive);
+    // 一个端点都不勾选时不显示任何记录。
+    if (m_endpoints.isEmpty() || !m_endpoints.contains(r.endpoint)) return false;
+    if (r.tx ? !m_tx : !m_rx) return false;
+    if (m_search.isEmpty()) return true;
+    // 搜索匹配当前显示格式的渲染文本、UTF-8 文本与两种 HEX 写法，所见即可搜。
+    // 逐项短路，命中即返回，避免对每行做无谓的渲染与 HEX 展开。
+    if (r.portLabel.contains(m_search, Qt::CaseInsensitive)) return true;
+    if (PayloadCodec::render(r.payload, m_format).contains(m_search, Qt::CaseInsensitive)) return true;
+    if (PayloadCodec::render(r.payload, PayloadCodec::Format::Utf8).contains(m_search, Qt::CaseInsensitive)) return true;
+    if (QString(r.payload.toHex()).contains(m_search, Qt::CaseInsensitive)) return true;
+    return QString::fromLatin1(r.payload.toHex(' ')).contains(m_search, Qt::CaseInsensitive);
 }
 
 TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
@@ -122,53 +128,90 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(16, 14, 16, 12);
     layout->setSpacing(12);
+
+    // 单行顶栏：示例数据标记、A/B 端点开关、编码切换、过滤关键词、显示设置、导出、
+    // 滚动到底、清空。
     auto *top = new QHBoxLayout;
-    auto *title = new QLabel(tr("接收监视"));
-    title->setObjectName("SectionTitle");
-    top->addWidget(title);
+    top->setSpacing(6);
     m_exampleBadge = new QLabel(tr("等待数据"));
     m_exampleBadge->setObjectName("Muted");
     top->addWidget(m_exampleBadge);
-    top->addStretch();
-    auto *pause = new QPushButton(tr("暂停显示"));
-    pause->setObjectName("pauseDisplay");
-    pause->setCheckable(true);
-    auto *clear = new QPushButton(tr("清空"));
-    clear->setObjectName("clearTraffic");
-    auto *exportButton = new QPushButton(tr("导出"));
-    top->addWidget(pause);
-    top->addWidget(clear);
-    top->addWidget(exportButton);
-    layout->addLayout(top);
 
-    auto *filters = new QHBoxLayout;
-    m_source = new QComboBox;
-    m_source->setObjectName("trafficSource");
-    m_source->setMinimumWidth(150);
-    m_rx = new QCheckBox("RX");
-    m_rx->setObjectName("showRx");
-    m_tx = new QCheckBox("TX");
-    m_tx->setObjectName("showTx");
-    m_rx->setChecked(true);
-    m_tx->setChecked(true);
+    // A/B 端点开关直接放在选项栏里：点哪个看哪个，都点看全部，无需进菜单。
+    const auto portToggle = [this](const QString &letter, const QString &name) {
+        auto *button = new QPushButton(letter, this);
+        button->setObjectName(name);
+        button->setCheckable(true);
+        button->setChecked(true);
+        button->setToolTip(tr("显示端点 %1 的记录").arg(letter));
+        connect(button, &QPushButton::toggled, this, &TrafficPanel::updatePortVisibility);
+        return button;
+    };
+    m_portAButton = portToggle(QStringLiteral("A"), QStringLiteral("showPortA"));
+    top->addWidget(m_portAButton);
+    m_portBButton = portToggle(QStringLiteral("B"), QStringLiteral("showPortB"));
+    top->addWidget(m_portBButton);
+
     m_format = new QComboBox;
     m_format->setObjectName("trafficFormat");
-    m_format->addItems({tr("HEX"), tr("文本 · UTF-8")});
-    auto *time = new QCheckBox(tr("时间戳"));
-    time->setChecked(true);
+    // 显示格式与发送区共用 PayloadCodec 的同一套解析/渲染规则。
+    for (const auto format : PayloadCodec::formats())
+        m_format->addItem(PayloadCodec::formatName(format));
+    fitComboToItems(m_format);
+    top->addWidget(m_format);
+
     m_search = new QLineEdit;
     m_search->setObjectName("trafficSearch");
     m_search->setPlaceholderText(tr("搜索文本 / HEX / 端口"));
     m_search->setClearButtonEnabled(true);
-    filters->addWidget(m_source);
-    filters->addSpacing(4);
-    filters->addWidget(m_rx);
-    filters->addWidget(m_tx);
-    filters->addSpacing(4);
-    filters->addWidget(m_format);
-    filters->addWidget(time);
-    filters->addWidget(m_search, 1);
-    layout->addLayout(filters);
+    top->addWidget(m_search, 1);
+
+    // 日志显示设置：方向、时间戳列与暂停收进菜单，顶栏只留一个入口。
+    auto *settings = new QPushButton(tr("显示设置"));
+    settings->setObjectName("displaySettings");
+    settings->setIcon(mutedIcon(QStringLiteral(":/icons/cog.svg"), BarIconSize));
+    settings->setToolTip(tr("日志显示选项：RX/TX、时间戳列、暂停显示"));
+    auto *displayMenu = new QMenu(settings);
+    m_rxAction = displayMenu->addAction(tr("显示 RX"));
+    m_rxAction->setObjectName("showRx");
+    m_rxAction->setCheckable(true);
+    m_rxAction->setChecked(true);
+    connect(m_rxAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
+    m_txAction = displayMenu->addAction(tr("显示 TX"));
+    m_txAction->setObjectName("showTx");
+    m_txAction->setCheckable(true);
+    m_txAction->setChecked(true);
+    connect(m_txAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
+    auto *timeAction = displayMenu->addAction(tr("时间戳列"));
+    timeAction->setCheckable(true);
+    timeAction->setChecked(true);
+    connect(timeAction, &QAction::toggled, this,
+            [this](bool checked) { m_table->setColumnHidden(0, !checked); });
+    displayMenu->addSeparator();
+    auto *pauseAction = displayMenu->addAction(tr("暂停显示"));
+    pauseAction->setCheckable(true);
+    connect(pauseAction, &QAction::toggled, this, [this](bool checked) {
+        m_paused = checked;
+        updateSummary();
+    });
+    settings->setMenu(displayMenu);
+    top->addWidget(settings);
+
+    auto *exportButton = new QPushButton(tr("导出"));
+    top->addWidget(exportButton);
+
+    m_follow = new QPushButton(tr("滚动到底"));
+    m_follow->setObjectName("followTraffic");
+    m_follow->setCheckable(true);
+    m_follow->setChecked(true);
+    m_follow->setIcon(mutedIcon(QStringLiteral(":/icons/arrow-down.svg"), BarIconSize));
+    m_follow->setToolTip(tr("始终滚动到最新记录；向上翻阅时自动取消"));
+    top->addWidget(m_follow);
+
+    auto *clear = new QPushButton(tr("清空"));
+    clear->setObjectName("clearTraffic");
+    top->addWidget(clear);
+    layout->addLayout(top);
 
     m_model = new TrafficModel(this);
     m_filter = new TrafficFilter(this);
@@ -194,9 +237,10 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_table->setColumnWidth(5, 58);
     m_stack = new QStackedWidget;
     m_stack->addWidget(m_table);
-    auto *empty = new QLabel(tr("等待接收数据\n\n选择并配置左侧端口，收发记录将在这里显示。\n可点击顶部“载入示例”预览数据布局。"));
+    auto *empty = new QLabel(tr("等待接收数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。"));
     empty->setAlignment(Qt::AlignCenter);
     empty->setObjectName("EmptyState");
+    empty->setWordWrap(true);
     m_stack->addWidget(empty);
     layout->addWidget(m_stack, 1);
 
@@ -204,26 +248,21 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_summary = new QLabel;
     m_summary->setObjectName("Muted");
     bottom->addWidget(m_summary, 1);
-    m_follow = new QCheckBox(tr("跟随最新"));
-    m_follow->setChecked(true);
-    bottom->addWidget(m_follow);
     layout->addLayout(bottom);
 
-    connect(m_source, &QComboBox::currentIndexChanged, this, &TrafficPanel::updateFilter);
-    connect(m_rx, &QCheckBox::toggled, this, &TrafficPanel::updateFilter);
-    connect(m_tx, &QCheckBox::toggled, this, &TrafficPanel::updateFilter);
+    // RX/TX 的过滤连接在创建菜单动作时已完成，这里不再重复 connect。
     connect(m_search, &QLineEdit::textChanged, this, &TrafficPanel::updateFilter);
-    connect(m_format, &QComboBox::currentIndexChanged, this, [this](int index) { m_model->setHex(index == 0); });
-    connect(time, &QCheckBox::toggled, this, [this](bool checked) { m_table->setColumnHidden(0, !checked); });
-    connect(pause, &QPushButton::toggled, this, [this, pause](bool checked) {
-        m_paused = checked;
-        pause->setText(checked ? tr("恢复显示") : tr("暂停显示"));
-        updateSummary();
+    connect(m_format, &QComboBox::currentIndexChanged, this, [this](int index) {
+        const auto format = PayloadCodec::formats().value(index, PayloadCodec::Format::Hex);
+        m_model->setFormat(format);
+        m_filter->setDisplayFormat(format);
+        updateFilter(); // 搜索匹配当前格式的渲染文本，切格式后需要重新过滤。
     });
     connect(clear, &QPushButton::clicked, this, [this] { m_model->replaceRecords({}); updateSummary(); });
     connect(exportButton, &QPushButton::clicked, this, &TrafficPanel::exportVisible);
-    connect(m_follow, &QCheckBox::toggled, this, [this](bool follow) { if (follow) m_table->scrollToBottom(); });
-    connect(m_table->verticalScrollBar(), &QScrollBar::sliderMoved, this, [this](int position) {
+    connect(m_follow, &QPushButton::toggled, this, [this](bool follow) { if (follow) m_table->scrollToBottom(); });
+    // 任何形式的向上翻阅（拖动、滚轮、翻页）都解除“滚动到底”，与悬停提示的承诺一致。
+    connect(m_table->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int position) {
         if (position < m_table->verticalScrollBar()->maximum()) m_follow->setChecked(false);
     });
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -235,7 +274,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         auto *copy = menu.addAction(tr("复制 HEX"));
         auto *reuse = menu.addAction(tr("填入发送区"));
         const auto *chosen = menu.exec(m_table->viewport()->mapToGlobal(point));
-        if (chosen == copy) QApplication::clipboard()->setText(bytes.toHex(' ').toUpper());
+        if (chosen == copy) QApplication::clipboard()->setText(PayloadCodec::render(bytes, PayloadCodec::Format::Hex));
         if (chosen == reuse) emit reusePayload(bytes);
     });
     updateSummary();
@@ -243,13 +282,10 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
 
 void TrafficPanel::setPorts(const QList<PortDraft> &ports)
 {
-    const auto selected = m_source->currentData().toUuid();
-    const QSignalBlocker blocker(m_source);
-    m_source->clear();
-    m_source->addItem(tr("所有端口"), QUuid());
-    for (const auto &port : ports) m_source->addItem(port.name, port.id);
-    m_source->setCurrentIndex(qMax(0, m_source->findData(selected)));
-    updateFilter();
+    // 端点身份在会话内稳定；这里只刷新两个开关携带的身份并重算可见集合。
+    m_portAButton->setProperty("endpoint", ports.value(0).id);
+    m_portBButton->setProperty("endpoint", ports.value(1).id);
+    updatePortVisibility();
 }
 
 void TrafficPanel::loadExample(const QList<PortDraft> &ports)
@@ -263,17 +299,28 @@ void TrafficPanel::loadExample(const QList<PortDraft> &ports)
         QByteArray::fromHex("01060001000119ca"), QByteArray::fromHex("01060001000119ca"),
         QStringLiteral("温度: 25.0 C\r\n").toUtf8(), QByteArray("heartbeat: 128\r\n"), QByteArray("OK\r\n")};
     for (int i = 0; i < data.size(); ++i) {
-        const auto &port = ports.at((i / 3) % ports.size());
-        records.append({start.addMSecs(i * 137), port.id, port.name, i % 3 == 0, data.at(i)});
+        const int index = (i / 3) % ports.size();
+        const auto &port = ports.at(index);
+        records.append({start.addMSecs(i * 137), port.id, endpointLabel(index, port.kind),
+                        i % 3 == 0, data.at(i)});
     }
     m_model->replaceRecords(records);
     updateSummary();
     if (m_follow->isChecked()) m_table->scrollToBottom();
 }
 
+void TrafficPanel::updatePortVisibility()
+{
+    // A/B 为独立开关：勾选集合即当前显示范围，两个都勾相当于看全部。
+    m_visibleEndpoints.clear();
+    for (auto *button : {m_portAButton, m_portBButton})
+        if (button->isChecked()) m_visibleEndpoints.insert(button->property("endpoint").toUuid());
+    updateFilter();
+}
+
 void TrafficPanel::updateFilter()
 {
-    m_filter->setOptions(m_source->currentData().toUuid(), m_rx->isChecked(), m_tx->isChecked(), m_search->text());
+    m_filter->setOptions(m_visibleEndpoints, m_rxAction->isChecked(), m_txAction->isChecked(), m_search->text());
     updateSummary();
 }
 
@@ -281,7 +328,9 @@ void TrafficPanel::updateSummary()
 {
     const int count = m_model->rowCount();
     m_stack->setCurrentIndex(count == 0 ? 1 : 0);
-    m_exampleBadge->setText(count ? tr("示例数据 · 不计入收发统计") : tr("等待数据"));
+    // 空态提示由表格区的空态文案承担；顶栏标记只提醒示例数据不计入统计。
+    m_exampleBadge->setText(tr("示例数据 · 不计入收发统计"));
+    m_exampleBadge->setVisible(count > 0);
     m_summary->setText(m_paused ? tr("显示已暂停 · 恢复后可重新载入示例")
                               : tr("显示 %1 / %2 条  ·  右键记录可复制或填入发送区").arg(m_filter->rowCount()).arg(count));
 }
@@ -294,10 +343,10 @@ void TrafficPanel::exportVisible()
     QByteArray output("# easyDebug UI preview - sample data only\nTime\tPort\tDirection\tBytes\tHEX\n");
     for (int i = 0; i < m_filter->rowCount(); ++i) {
         const auto &r = m_model->record(m_filter->mapToSource(m_filter->index(i, 0)).row());
-        QString name = r.name;
-        name.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ');
-        output += QString("%1\t%2\t%3\t%4\t%5\n").arg(r.time.toString(Qt::ISODateWithMs), name,
-            r.tx ? "TX" : "RX", QString::number(r.payload.size()), QString(r.payload.toHex(' ').toUpper())).toUtf8();
+        QString label = r.portLabel;
+        label.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ');
+        output += QString("%1\t%2\t%3\t%4\t%5\n").arg(r.time.toString(Qt::ISODateWithMs), label,
+            r.tx ? "TX" : "RX", QString::number(r.payload.size()), PayloadCodec::render(r.payload, PayloadCodec::Format::Hex)).toUtf8();
     }
     QSaveFile file(path);
     const bool ok = file.open(QIODevice::WriteOnly) && file.write(output) == output.size() && file.commit();

@@ -5,6 +5,7 @@ TARGET = easyDebug_ui_tests
 msvc: QMAKE_CXXFLAGS += /utf-8
 INCLUDEPATH += ../..
 include(../../src/ui/ui.pri)
+include(../../src/services.pri)
 SOURCES += tst_ui.cpp ../../mainwindow.cpp
 HEADERS += ../../mainwindow.h
 FORMS += ../../mainwindow.ui

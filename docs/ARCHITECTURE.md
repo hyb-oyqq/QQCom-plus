@@ -1,10 +1,10 @@
 # easyDebug 架构设计
 
-版本：0.1 设计基线，2026-10-01。本文规定未来实现的职责和行为；当前已落地的界面原型位于 `src/ui`，通信接口和运行时仍按下文设计逐步实现。
+版本：0.1 设计基线，2026-10-01。本文规定未来实现的职责和行为；当前已落地的界面原型按 `src/ui/panels`、`src/ui/common` 组织，通信接口和运行时仍按下文设计逐步实现。
 
 ## 1. 架构目标与依赖方向
 
-采用分层的模块化单体。核心原则是通信不访问 QWidget，原始字节转发不经过文本转换，所有高频入口都有容量限制。以 Qt 的事件驱动 I/O 为基础，先用一个通信线程维持清晰的顺序和所有权，再依据性能报告决定是否拆分。
+采用分层的模块化单体。核心原则是通信不访问 QWidget，原始字节桥接不经过文本转换，所有高频入口都有容量限制。运行时固定管理 A、B 两个端点；以 Qt 的事件驱动 I/O 为基础，先用一个通信线程维持清晰的顺序和所有权，再依据性能报告决定是否拆分。
 
 ```mermaid
 flowchart TB
@@ -45,7 +45,7 @@ flowchart TB
 | 模块/对象 | 责任 | 不承担的责任 |
 | --- | --- | --- |
 | domain | 配置、标识、数据事件、错误、发送结果、规则等值类型 | 控件与 I/O 生命周期 |
-| PortSelectorWidget | 端口类型、参数、校验提示、打开/关闭意图 | 创建 socket、写数据、保存文件 |
+| PortSelectorWidget | 一个端点行：类型、参数、校验提示、状态与打开/关闭意图 | 创建 socket、写数据、保存文件 |
 | PortConfigPageFactory | 按 PortType 创建 Serial/TcpClient/TcpServer/Udp 参数页 | 持有通信后端 |
 | WorkspaceController | 工作区意图、配置快照、向 I/O 发命令、接收状态 | 字节转发与逐包显示格式化 |
 | IoRuntime | 通信线程入口、处理命令批次、协调关闭 | GUI 交互 |
@@ -63,8 +63,18 @@ flowchart TB
 | CaptureWriter | 异步保存原始数据和元数据、轮转、错误报告 | 占用 I/O 线程写磁盘 |
 | SessionStore | 版本化配置、校验、原子保存、导入导出 | 持有运行时 peer/socket 指针 |
 | PortDiscoveryService | 后台发现串口/网卡并发布列表快照 | 自动更改已打开端口的配置 |
+| PageRegistry / PageHost | 注册、创建和切换功能页面 | 持有传输或协议业务状态 |
+| MessageEditorPage | 编辑消息、命令列表和发送参数 | 编码实现、发送队列和端口写入 |
+| ProtocolInspectorPage | 展示解析结果、字段和错误 | 修改原始字节或影响透明转发 |
+| YmodemTransferPage | 选择文件、目标和传输控制 | 实现 YMODEM 状态机和文件 I/O |
+| ProtocolRegistry / ProtocolSession | 注册协议、维护按端口/peer 隔离的解析会话 | QWidget、页面导航和配置落盘 |
+| TransferManager | 管理文件任务、进度、取消和结果 | 直接操作页面控件 |
+| PreferencesStore | 保存地址输入历史、主题、语言、窗口和快捷键偏好 | 保存端口运行时状态 |
+| AboutDialog | 展示版本、许可证和构建信息 | 访问通信对象 |
 
 对象由组合根显式注入，避免 Global::port、全局单例或主窗口承担业务中转。轻量 DTO 可用 QtCore 类型；地址在传输边界使用 QHostAddress 校验。首版不引入动态插件框架。
+
+已实现的界面服务：`discovery/PortDiscoveryService` 在线程池枚举串口并发布 `SerialPortDescriptor` 值对象快照；`persistence/PreferencesStore` 通过 QSettings 保存用户级地址历史，过滤无效值、去重并限制为每类 20 条。`domain/networkaddress` 提供历史与输入共用的地址完整性规则。MainWindow 仅装配服务和控件信号，不执行扫描或存储：它持有两个 `PortSelectorWidget`，把发现服务和偏好存储同时接到两者，并在任一端点变更时汇总校验结果下发给桥接行；服务不依赖 QWidget。轻量偏好在编辑提交时保存，后续通信记录和工作区大文件仍使用独立 worker。
 
 ## 3. 类型、身份和时间
 
@@ -198,7 +208,7 @@ IPv4 UDP payload 最大 65507 字节；配置的最大报文更小时以配置�
 
 以下均是可配置初值，需经 M6 校准。MiB 按 1024² 字节计算。
 
-工作区初始限制为 16 个端口、128 条路由、512 条自定义命令；每个 TCP Server 最多 64 个客户端，工作区全部 TCP 连接合计最多 128 个。UDP 最近来源列表最多 256 项，按最近活动淘汰。连接与配置数量同样需要上限，避免仅约束 payload 而遗漏对象/读缓冲开销。
+工作区固定为 2 个端点、1 条 A/B 桥接草稿、512 条自定义命令；每个 TCP Server 最多 64 个客户端。UDP 最近来源列表最多 256 项，按最近活动淘汰。连接与配置数量同样需要上限，避免仅约束 payload 而遗漏对象/读缓冲开销。
 
 | 位置 | 初始上限 | 满时行为 |
 | --- | --- | --- |
@@ -308,8 +318,16 @@ easyDebug/
 │   ├── monitoring/              # 缓冲、统计、模型
 │   ├── persistence/             # SessionStore、CaptureWriter
 │   ├── discovery/               # 串口与网卡发现
-│   └── ui/                      # 已有端口控件、监视/发送/路由页面原型；后续接入控制器
+│   └── ui/
+│       ├── shell/               # PageHost、PageRegistry；当前 MainWindow 仍在项目根目录
+│       ├── panels/              # portselector、traffic、sending、routing
+│       ├── pages/               # messageeditor、protocolinspector、transfer
+│       ├── settings/            # SettingsDialog 和设置分组页面
+│       ├── dialogs/             # AboutDialog 等低频对话框
+│       └── common/              # PayloadPreview 等复用组件
+├── version/                     # 版本清单、生成头文件和 qmake 版本入口
 ├── resources/                   # 图标、翻译、样式
+├── scripts/                     # 构建、部署和版本脚本
 ├── tests/                       # FakeTransport、Qt Test、集成与性能驱动
 └── docs/                        # 设计及验收记录
 ```

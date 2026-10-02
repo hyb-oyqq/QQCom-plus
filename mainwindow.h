@@ -2,10 +2,14 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
-#include "src/ui/portselectorwidget.h"
+#include "src/ui/panels/portselector/portselectorwidget.h"
 
-class QListWidget;
 class QLabel;
+class QHideEvent;
+class QShowEvent;
+class QTimer;
+class QSplitter;
+class RouteEditorWidget;
 class SendPanel;
 class TrafficPanel;
 
@@ -25,20 +29,22 @@ public:
     void loadExample();
     void showRoutes();
 
+protected:
+    // 轮询只在窗口真实显示时运行；离屏实例（快照、自动化测试）不扫描硬件。
+    void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
+
 private:
-    void addPort(int kind);
-    void updatePortList();
-    void synchronizePorts();
-    void selectPort(int row);
+    void refreshEndpoints();
     Ui::MainWindow *ui;
     QList<PortDraft> m_ports;
-    QListWidget *m_portList;
-    PortSelectorWidget *m_selector;
+    QList<PortSelectorWidget *> m_selectors;
+    QTimer *m_autoRefresh;
+    QSplitter *m_dataSplitter;
+    bool m_dataRatioApplied = false;
+    RouteEditorWidget *m_bridge;
     TrafficPanel *m_traffic;
     SendPanel *m_sender;
-    QLabel *m_portCount;
     QLabel *m_routeStatus;
-    QLabel *m_selectedTitle;
-    int m_portSequence = 0;
 };
 #endif // MAINWINDOW_H

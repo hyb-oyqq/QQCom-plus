@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "version/version.h"
 
 #include <QApplication>
 #include <QLocale>
@@ -12,6 +13,7 @@ int main(int argc, char *argv[])
     QApplication a(argc, argv);
     a.setApplicationName("easyDebug");
     a.setOrganizationName("easyDebug");
+    a.setApplicationVersion(QStringLiteral(EASYDEBUG_VERSION_STR));
     a.setStyle("Fusion");
     QFile stylesheet(":/styles/workbench.qss");
     if (stylesheet.open(QIODevice::ReadOnly))

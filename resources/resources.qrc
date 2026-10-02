@@ -1,5 +1,15 @@
 <RCC>
     <qresource prefix="/">
         <file>styles/workbench.qss</file>
+        <file>icons/chevron-down.xpm</file>
+        <file>icons/tune.svg</file>
+        <file>icons/link-variant.svg</file>
+        <file>icons/link-off.svg</file>
+        <file>icons/access-point.svg</file>
+        <file>icons/swap-horizontal.svg</file>
+        <file>icons/arrow-right.svg</file>
+        <file>icons/arrow-left.svg</file>
+        <file>icons/cog.svg</file>
+        <file>icons/arrow-down.svg</file>
     </qresource>
 </RCC>

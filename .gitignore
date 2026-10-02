@@ -87,3 +87,9 @@ CMakeLists.txt.user*
 /logs/
 /captures/
 /config-local/
+
+# Generated version header (scripts/update_version.ps1)
+/version/version.h
+
+# Local AI assistant workspace data
+/.workbuddy/
