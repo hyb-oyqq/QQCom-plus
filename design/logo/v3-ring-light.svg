@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- V3「环点」：端点由实心圆改为 22px 圆环（12px 描边）。
+       环内是空的，两个圆环像两个端口口，语义更贴"两个串口"；
+       圆环外缘 86，箭杆起点 100，净空 7px。整体通透度最高。 -->
+  <rect width="256" height="256" rx="56" fill="#1d4ed8"/>
+
+  <g fill="none" stroke="#ffffff" stroke-width="14">
+    <path d="M100 104 H140" stroke-linecap="round"/>
+    <path d="M140 90 L152 104 L140 118" stroke-linejoin="miter" stroke-linecap="butt"/>
+    <path d="M116 152 H156" stroke-linecap="round"/>
+    <path d="M116 136 L104 152 L116 168" stroke-linejoin="miter" stroke-linecap="butt"/>
+  </g>
+
+  <circle cx="58" cy="128" r="22" fill="none" stroke="#ffffff" stroke-width="12"/>
+  <circle cx="198" cy="128" r="22" fill="none" stroke="#ffffff" stroke-width="12"/>
+</svg>

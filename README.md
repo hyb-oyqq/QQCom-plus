@@ -9,7 +9,10 @@
 | 文档 | 内容 |
 | --- | --- |
 | [PLAN.md](PLAN.md) | 需求范围、阶段安排、交付清单与实施顺序 |
-| [参考工程分析](docs/REFERENCE_REVIEW.md) | 两个参考工程的实际结构、复用点和需改进的问题 |
+| [参考工程索引](docs/REFERENCES.md) | 三个参考工程的入口、借鉴维度与按需求查表 |
+| [参考工程分析](docs/REFERENCE_REVIEW.md) | debugTool/YmodemTool 两个本地工程的结构、复用点和需改进的问题 |
+| [BLE 调试工具参考](docs/REFERENCE_BLE_TOOL.md) | 同作者 iOS BLE 调试工具：消息模型、过滤、显示设置、接收组帧的对照 |
+| [架构评审](docs/ARCHITECTURE_REVIEW.md) | 对比参考工程的架构评审结论、分级问题清单与修复记录 |
 | [架构设计](docs/ARCHITECTURE.md) | 模块边界、接口契约、线程、转发、缓冲与配置 |
 | [界面与交互](docs/UI_DESIGN.md) | 端口选择控件扩展、监视区、路由和自定义发送 |
 | [验收与性能计划](docs/TEST_PLAN.md) | 功能矩阵、异常测试、性能目标与测量方法 |
@@ -44,9 +47,10 @@ pwsh -File scripts/deploy_qt_windows.ps1 -Binary build/Desktop_Qt_6_10_1_MSVC202
 
 数据在专用 I/O 线程中直接进入转发引擎；监视显示和文件记录使用独立的有界旁路。转发保留原始字节，文本与 HEX 只是显示/发送编码选项。TCP 客户端身份、UDP 目标及数据报边界都显式建模。
 
-参考工程位置：
+参考工程位置（总索引与按需求查表见 [docs/REFERENCES.md](docs/REFERENCES.md)）：
 
 - `D:/AWork/myself/QTProject/debugTool`
 - `D:/AWork/myself/QTProject/YmodemTool`
+- https://gitee.com/qinjmin/ble-debug-tool-ios.git（BLE 调试工具，功能与交互参考）
 
 界面原型对应 [PLAN.md](PLAN.md) 的 M0/M2/M3 交互准备工作；后续实现从 M1 通信契约开始。每个阶段完成后更新任务状态、测试记录和设计偏差。

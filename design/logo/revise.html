@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>easyDebug 图标 — 基于原图标的改良</title>
+<style>
+  :root{--ink:#182334;--muted:#6b7787;--line:#dfe5ee;--bg:#f4f6fa;--blue:#1d4ed8;--red:#c0392b;}
+  *{box-sizing:border-box;}
+  body{margin:0;padding:36px;background:var(--bg);color:var(--ink);
+       font-family:"Microsoft YaHei UI","Microsoft YaHei","Segoe UI",sans-serif;}
+  h1{font-size:21px;font-weight:700;margin:0 0 6px;}
+  .sub{font-size:13px;color:var(--muted);margin:0 0 22px;line-height:1.75;max-width:980px;}
+  .sub b{color:var(--ink);}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;max-width:1300px;}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;}
+  .tag{display:inline-block;font-size:11px;font-weight:700;color:var(--blue);background:#e8eefb;
+       border-radius:4px;padding:2px 7px;margin-bottom:9px;}
+  .name{font-size:15px;font-weight:700;margin:0 0 2px;}
+  .en{font-size:10px;color:#9aa5b5;letter-spacing:1px;text-transform:uppercase;margin:0 0 12px;}
+  .desc{font-size:12px;color:var(--muted);line-height:1.7;margin:0 0 13px;min-height:104px;}
+  .desc em{font-style:normal;color:var(--blue);font-weight:600;}
+  .row{display:flex;align-items:flex-end;gap:13px;padding:11px 0;border-top:1px solid var(--line);}
+  .row .lbl{font-size:10px;color:#9aa5b5;width:28px;flex:none;}
+  .row img{display:block;image-rendering:pixelated;}
+  .dark{background:#111827;border-radius:8px;padding:9px;display:flex;align-items:center;gap:11px;}
+  .dark .lbl{color:#7c8798;}
+  .mono{background:#f7f9fc;border:1px dashed #c8d1e0;border-radius:8px;padding:9px;
+        display:flex;align-items:center;gap:11px;}
+  .panel{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px;margin-top:20px;}
+  .panel h2{font-size:15px;font-weight:700;margin:0 0 4px;}
+  .panel p{font-size:12px;color:var(--muted);margin:0 0 14px;line-height:1.75;}
+  .zgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;}
+  .zitem{text-align:center;}
+  .zitem .cap{font-size:11px;color:var(--muted);margin-top:6px;}
+  .zbox{background:#eef2f9;border:1px solid var(--line);border-radius:8px;padding:7px;
+        display:flex;justify-content:center;}
+  .zbox img{image-rendering:pixelated;width:180px;height:180px;}
+  /* 间隙标注 */
+  .gwrap{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;}
+  .gitem{text-align:center;}
+  .gitem svg{display:block;margin:0 auto;border-radius:8px;}
+  .gitem .cap{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5;}
+  .gitem .v{font-weight:700;font-size:12px;}
+  .bad{color:var(--red);} .good{color:#15803d;}
+  .apps{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;}
+  .cell{text-align:center;}
+  .taskbar{background:#1f2430;border-radius:8px;padding:9px 11px;display:flex;gap:9px;align-items:center;justify-content:center;}
+  .taskbar img{width:20px;height:20px;border-radius:4px;}
+  .taskbar .dim{opacity:.4;}
+  .sheet{background:#f7f9fc;border:1px solid var(--line);border-radius:10px;padding:14px;
+         display:flex;align-items:center;justify-content:center;gap:18px;}
+  .cell .t{font-size:11px;color:var(--muted);margin-top:8px;}
+</style>
+</head>
+<body>
+
+<h1>基于原图标的改良 — 四个比例方案</h1>
+<p class="sub">
+  构图完全沿用你的原图标：圆角方底 + 两个端点圆 + 上下双向箭头，只调比例关系。
+  原图标的「箭头贴圆」是几何必然——箭杆起点 <code>M86</code>，而圆右缘是 <code>56+30=86</code>，
+  <b>净空恰好为 0</b>。所以这一轮只做三件事：<b>让出净空、减轻笔触、收正比例</b>，不换概念。
+</p>
+
+<div class="grid">
+  <div class="card">
+    <span class="tag">V1</span><p class="name">匀净</p><p class="en">Clean</p>
+    <p class="desc">
+      圆 r30→26，箭杆起点 86→100，<em>净空 9px</em>。
+      箭头从实心块改为 14px 等宽描边，笔触变轻。
+      保留原版 180° 旋转对称，这是原图标唯一的灵动来源。
+    </p>
+    <div class="row"><span class="lbl">256</span><img src="v1-clean.svg" width="112" height="112"></div>
+    <div class="row"><span class="lbl">64</span><img src="v1-clean.svg" width="64" height="64">
+      <span class="lbl">32</span><img src="v1-clean.svg" width="32" height="32">
+      <span class="lbl">16</span><img src="v1-clean.svg" width="16" height="16"></div>
+    <div class="dark"><span class="lbl">反白</span><img src="v1-clean-light.svg" width="56" height="56"></div>
+    <div class="mono"><span class="lbl">单色</span><img src="v1-clean-mono.svg" width="56" height="56">
+      <span class="lbl">16</span><img src="v1-clean-mono.svg" width="16" height="16"></div>
+  </div>
+
+  <div class="card">
+    <span class="tag">V2</span><p class="name">实心 · 改良</p><p class="en">Solid, refined</p>
+    <p class="desc">
+      完整保留原图标的实心箭头语言。圆 r30→27，箭杆高 16→14，
+      箭头 40×40 改 22×36 更修长，起点 86→100 <em>净空 13px</em>。
+      垂直跨度 44→56，比例由 2.43:1 收到 2.11:1。
+    </p>
+    <div class="row"><span class="lbl">256</span><img src="v2-solid.svg" width="112" height="112"></div>
+    <div class="row"><span class="lbl">64</span><img src="v2-solid.svg" width="64" height="64">
+      <span class="lbl">32</span><img src="v2-solid.svg" width="32" height="32">
+      <span class="lbl">16</span><img src="v2-solid.svg" width="16" height="16"></div>
+    <div class="dark"><span class="lbl">反白</span><img src="v2-solid-light.svg" width="56" height="56"></div>
+    <div class="mono"><span class="lbl">单色</span><img src="v2-solid-mono.svg" width="56" height="56">
+      <span class="lbl">16</span><img src="v2-solid-mono.svg" width="16" height="16"></div>
+  </div>
+
+  <div class="card">
+    <span class="tag">V3</span><p class="name">环点</p><p class="en">Ring</p>
+    <p class="desc">
+      端点由实心圆改为 22px 圆环（12px 描边），环内是空的，
+      两个圆环读起来像两个端口口，语义更贴「两个串口」。
+      环外缘 86，箭杆起点 100，<em>净空 7px</em>。通透度最高。
+    </p>
+    <div class="row"><span class="lbl">256</span><img src="v3-ring.svg" width="112" height="112"></div>
+    <div class="row"><span class="lbl">64</span><img src="v3-ring.svg" width="64" height="64">
+      <span class="lbl">32</span><img src="v3-ring.svg" width="32" height="32">
+      <span class="lbl">16</span><img src="v3-ring.svg" width="16" height="16"></div>
+    <div class="dark"><span class="lbl">反白</span><img src="v3-ring-light.svg" width="56" height="56"></div>
+    <div class="mono"><span class="lbl">单色</span><img src="v3-ring-mono.svg" width="56" height="56">
+      <span class="lbl">16</span><img src="v3-ring-mono.svg" width="16" height="16"></div>
+  </div>
+
+  <div class="card">
+    <span class="tag">V4</span><p class="name">斜流</p><p class="en">Flow</p>
+    <p class="desc">
+      圆保持严格对称与水平，仅让上下两条箭杆平行倾斜约 11°。
+      打破死板水平镜像产生流向感，但两线严格平行、整体居中，所以不会歪。
+      垂直跨度增到 96px，比例收至 <em>2:1</em>。四个里最「灵动」。
+    </p>
+    <div class="row"><span class="lbl">256</span><img src="v4-flow.svg" width="112" height="112"></div>
+    <div class="row"><span class="lbl">64</span><img src="v4-flow.svg" width="64" height="64">
+      <span class="lbl">32</span><img src="v4-flow.svg" width="32" height="32">
+      <span class="lbl">16</span><img src="v4-flow.svg" width="16" height="16"></div>
+    <div class="dark"><span class="lbl">反白</span><img src="v4-flow-light.svg" width="56" height="56"></div>
+    <div class="mono"><span class="lbl">单色</span><img src="v4-flow-mono.svg" width="56" height="56">
+      <span class="lbl">16</span><img src="v4-flow-mono.svg" width="16" height="16"></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>间隙实测 — 箭头起点到圆缘的距离</h2>
+  <p>
+    灰线是圆心水平轴，蓝点是箭杆起点的圆帽中心，红色标注段是两者之间的实际净空。
+    原图标这一段长度为 0，所以圆和箭头看起来是粘在一起的。
+  </p>
+  <div class="gwrap">
+    <div class="gitem">
+      <svg width="200" height="86" viewBox="0 0 200 86">
+        <rect width="200" height="86" fill="#eef2f9"/>
+        <line x1="14" y1="43" x2="186" y2="43" stroke="#9aa5b5" stroke-width="1" stroke-dasharray="3 3"/>
+        <circle cx="44" cy="43" r="30" fill="none" stroke="#1d4ed8" stroke-width="2"/>
+        <rect x="73" y="31" width="6" height="24" fill="#1d4ed8"/>
+        <line x1="74" y1="60" x2="74" y2="72" stroke="#c0392b" stroke-width="2"/>
+        <text x="112" y="52" fill="#c0392b" font-size="13" font-weight="700">0px 接触</text>
+      </svg>
+      <div class="cap bad">旧图标 · <span class="v">0px</span></div>
+    </div>
+    <div class="gitem">
+      <svg width="200" height="86" viewBox="0 0 200 86">
+        <rect width="200" height="86" fill="#eef2f9"/>
+        <line x1="14" y1="43" x2="186" y2="43" stroke="#9aa5b5" stroke-width="1" stroke-dasharray="3 3"/>
+        <circle cx="45" cy="43" r="26" fill="none" stroke="#1d4ed8" stroke-width="2"/>
+        <rect x="78" y="36" width="6" height="14" fill="#1d4ed8"/>
+        <line x1="71" y1="62" x2="78" y2="62" stroke="#15803d" stroke-width="2"/>
+        <line x1="71" y1="57" x2="71" y2="67" stroke="#15803d" stroke-width="1"/>
+        <line x1="78" y1="57" x2="78" y2="67" stroke="#15803d" stroke-width="1"/>
+        <text x="108" y="52" fill="#15803d" font-size="13" font-weight="700">9px 净空</text>
+      </svg>
+      <div class="cap">V1 匀净 · <span class="v good">9px</span></div>
+    </div>
+    <div class="gitem">
+      <svg width="200" height="86" viewBox="0 0 200 86">
+        <rect width="200" height="86" fill="#eef2f9"/>
+        <line x1="14" y1="43" x2="186" y2="43" stroke="#9aa5b5" stroke-width="1" stroke-dasharray="3 3"/>
+        <circle cx="45" cy="43" r="27" fill="none" stroke="#1d4ed8" stroke-width="2"/>
+        <rect x="79" y="36" width="6" height="14" fill="#1d4ed8"/>
+        <line x1="72" y1="62" x2="79" y2="62" stroke="#15803d" stroke-width="2"/>
+        <line x1="72" y1="57" x2="72" y2="67" stroke="#15803d" stroke-width="1"/>
+        <line x1="79" y1="57" x2="79" y2="67" stroke="#15803d" stroke-width="1"/>
+        <text x="108" y="52" fill="#15803d" font-size="13" font-weight="700">13px 净空</text>
+      </svg>
+      <div class="cap">V2 实心 · <span class="v good">13px</span></div>
+    </div>
+    <div class="gitem">
+      <svg width="200" height="86" viewBox="0 0 200 86">
+        <rect width="200" height="86" fill="#eef2f9"/>
+        <line x1="14" y1="43" x2="186" y2="43" stroke="#9aa5b5" stroke-width="1" stroke-dasharray="3 3"/>
+        <circle cx="45" cy="43" r="28" fill="none" stroke="#1d4ed8" stroke-width="2"/>
+        <rect x="78" y="36" width="6" height="14" fill="#1d4ed8"/>
+        <line x1="73" y1="62" x2="78" y2="62" stroke="#15803d" stroke-width="2"/>
+        <line x1="73" y1="57" x2="73" y2="67" stroke="#15803d" stroke-width="1"/>
+        <line x1="78" y1="57" x2="78" y2="67" stroke="#15803d" stroke-width="1"/>
+        <text x="108" y="52" fill="#15803d" font-size="13" font-weight="700">7px 净空</text>
+      </svg>
+      <div class="cap">V3 环点 · <span class="v good">7px</span></div>
+    </div>
+    <div class="gitem">
+      <svg width="200" height="86" viewBox="0 0 200 86">
+        <rect width="200" height="86" fill="#eef2f9"/>
+        <line x1="14" y1="43" x2="186" y2="43" stroke="#9aa5b5" stroke-width="1" stroke-dasharray="3 3"/>
+        <circle cx="45" cy="43" r="26" fill="none" stroke="#1d4ed8" stroke-width="2"/>
+        <line x1="71" y1="36" x2="78" y2="33" stroke="#1d4ed8" stroke-width="6" stroke-linecap="round"/>
+        <line x1="72" y1="62" x2="78" y2="59" stroke="#15803d" stroke-width="2"/>
+        <text x="108" y="52" fill="#15803d" font-size="13" font-weight="700">7px 净空</text>
+      </svg>
+      <div class="cap">V4 斜流 · <span class="v good">7px</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>像素级体检 — 32px 最近邻放大 5.6×</h2>
+  <p>重点看圆与箭头之间的缝隙是否真的存在，以及箭头在小尺寸下是否还认得出。</p>
+  <div class="zgrid">
+    <div class="zitem"><div class="zbox"><img src="v1-clean.svg" width="32" height="32"></div>
+      <div class="cap">V1 匀净</div></div>
+    <div class="zitem"><div class="zbox"><img src="v2-solid.svg" width="32" height="32"></div>
+      <div class="cap">V2 实心</div></div>
+    <div class="zitem"><div class="zbox"><img src="v3-ring.svg" width="32" height="32"></div>
+      <div class="cap">V3 环点</div></div>
+    <div class="zitem"><div class="zbox"><img src="v4-flow.svg" width="32" height="32"></div>
+      <div class="cap">V4 斜流</div></div>
+    <div class="zitem"><div class="zbox"><img src="old.svg" width="32" height="32"></div>
+      <div class="cap">旧图标（对照）</div></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>真实场景 — 任务栏 20px / 文档 16px</h2>
+  <p>顺序：V1 / V2 / V3 / V4 / 旧（半透明对照）。</p>
+  <div class="apps">
+    <div class="cell">
+      <div class="taskbar">
+        <img src="v1-clean-light.svg"><img src="v2-solid-light.svg">
+        <img src="v3-ring-light.svg"><img src="v4-flow-light.svg"><img src="old.svg" class="dim">
+      </div>
+      <div class="t">Windows 任务栏 20px · 深色底</div>
+    </div>
+    <div class="cell">
+      <div class="sheet">
+        <img src="v1-clean.svg" width="20" height="20"><img src="v2-solid.svg" width="20" height="20">
+        <img src="v3-ring.svg" width="20" height="20"><img src="v4-flow.svg" width="20" height="20">
+        <img src="old.svg" width="20" height="20" style="opacity:.4">
+      </div>
+      <div class="t">20px 浅色底</div>
+    </div>
+    <div class="cell">
+      <div class="sheet">
+        <img src="v1-clean.svg" width="16" height="16"><img src="v2-solid.svg" width="16" height="16">
+        <img src="v3-ring.svg" width="16" height="16"><img src="v4-flow.svg" width="16" height="16">
+        <img src="old.svg" width="16" height="16" style="opacity:.4">
+      </div>
+      <div class="t">16px 文档内嵌</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

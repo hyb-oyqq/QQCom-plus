@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- 方案 C「信号」：单笔方波，一根线条画完，不做任何填充块。
+       语义：串口/总线上的字节流。最抽象、最轻，缩到 16px 仍是一道清晰的波。 -->
+  <rect width="256" height="256" rx="56" fill="#1d4ed8"/>
+
+  <path d="M46 172 H87 V84 H128 V172 H169 V84 H210"
+        fill="none" stroke="#ffffff" stroke-width="16"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

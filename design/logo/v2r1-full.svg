@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- V2R1「实心·撑满」：V2 为基底，核心修正是把内容从 y82-174(92px) 撑到 y56-200(144px)。
+       圆 r 27 -> 33、上下箭头中心 y 100/156 -> 88/168、箭杆加长到 66px。
+       上下留白由 82px 降到 56px，与左右 40px 接近，构图从「扁」变为「方」。 -->
+  <rect width="256" height="256" rx="56" fill="#1d4ed8"/>
+
+  <path d="M106 81 A7 7 0 0 0 106 95 L160 95 L160 108 L190 88 L160 68 L160 81 Z" fill="#ffffff"/>
+  <path d="M150 175 A7 7 0 0 0 150 161 L96 161 L96 148 L66 168 L96 188 L96 175 Z" fill="#ffffff"/>
+
+  <circle cx="50" cy="128" r="33" fill="#ffffff"/>
+  <circle cx="206" cy="128" r="33" fill="#ffffff"/>
+</svg>

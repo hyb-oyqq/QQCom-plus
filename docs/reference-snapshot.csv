@@ -57,3 +57,7 @@
 "YmodemTool","README.md","27dc04eae012831397b686e9b8af142ad760638a316d71a1a1184ce1298cee18"
 "YmodemTool","YMODEM_FIXES.md","d61d4a561387be76c7fa8d4632e4041e1c32c450212f8baca4475acea8a6ad38"
 "YmodemTool","YmodemTool.pro","e47f5dfdab20432c706b4f545ed7c182da616e5b788dc966f3821dc9018c3d53"
+"bleTool","BLEDebugger/Features/Scan/DataTransfer/Models/DataTransferModels.swift","c1b28d9998317f59fe6d65b4ffd07d8ed2c5cd798acb04292769c99ad7c1b24e"
+"bleTool","BLEDebugger/Shared/Logging/LogProcessing.swift","b3bbe0ed79b96e7f4b4b07e2eef6aee234e26d654ba757bbee24f8790e795056"
+"bleTool","BLEDebugger/Models/UserSettings.swift","92ab8e8fb0fcce65bddaa6bff02f4f11e673097a33bef86dfb849091b634c7de"
+"bleTool","BLEDebugger/BLE/Peripheral/Models/PeripheralTransmissionLog.swift","30ca6f525f3d638f80a6c8b042b6d86881749d58c589bada995297a0954bf78f"

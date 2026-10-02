@@ -6,6 +6,7 @@
 #include <QTranslator>
 #include <QCommandLineParser>
 #include <QFile>
+#include <QIcon>
 #include <QTimer>
 
 int main(int argc, char *argv[])
@@ -15,6 +16,7 @@ int main(int argc, char *argv[])
     a.setOrganizationName("easyDebug");
     a.setApplicationVersion(QStringLiteral(EASYDEBUG_VERSION_STR));
     a.setStyle("Fusion");
+    a.setWindowIcon(QIcon(":/icons/app-logo.svg"));
     QFile stylesheet(":/styles/workbench.qss");
     if (stylesheet.open(QIODevice::ReadOnly))
         a.setStyleSheet(QString::fromUtf8(stylesheet.readAll()));

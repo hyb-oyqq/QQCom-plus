@@ -1,7 +1,8 @@
 #ifndef ROUTEEDITORWIDGET_H
 #define ROUTEEDITORWIDGET_H
 
-#include "../portselector/portselectorwidget.h"
+#include <QWidget>
+#include "domain/portdraft.h"
 
 class QComboBox;
 class QPushButton;

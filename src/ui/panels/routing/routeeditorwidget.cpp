@@ -1,5 +1,7 @@
 #include "routeeditorwidget.h"
-#include "../../../ui/common/tintedicon.h"
+#include "ui/common/combometrics.h"
+#include "ui/common/endpointformat.h"
+#include "ui/common/tintedicon.h"
 
 #include <QComboBox>
 #include <QFrame>

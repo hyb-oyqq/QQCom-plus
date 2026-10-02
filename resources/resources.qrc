@@ -11,5 +11,6 @@
         <file>icons/arrow-left.svg</file>
         <file>icons/cog.svg</file>
         <file>icons/arrow-down.svg</file>
+        <file>icons/app-logo.svg</file>
     </qresource>
 </RCC>

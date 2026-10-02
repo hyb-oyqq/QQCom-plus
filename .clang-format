@@ -1,0 +1,23 @@
+# easyDebug C++ 风格：与现有代码一致（4 空格、指针右对齐、120 列）。
+# 新文件与重构过的文件用本配置格式化；历史文件（如 trafficpanel.cpp 的
+# 2 空格缩进）在下次整文件重构时统一，不做无行为变更的大批量重排。
+BasedOnStyle: LLVM
+Standard: c++17
+ColumnLimit: 120
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+PointerAlignment: Right
+DerivePointerAlignment: false
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: Inline
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+FixNamespaceComments: true
+SortIncludes: false
+IncludeBlocks: Preserve
+IndentPPDirectives: None
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1

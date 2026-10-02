@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- 方案 D2「终端·居中」：命令行提示符 ">_" 放大成图形。
+       修正点：整体几何中心对齐到 x=128（原稿偏右 4px），线宽 18px，笔画只有两下。 -->
+  
+
+  <g fill="none" stroke="#1d4ed8" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M60 80 L108 128 L60 176"/>
+    <path d="M132 176 H196"/>
+  </g>
+</svg>

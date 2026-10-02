@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- 方案 C2「信号·平衡」：单笔方波，4 次跃迁（奇数次会导致首尾不在同一电平，视觉头重脚轻）。
+       修正后首尾同高，线宽 16px 统一，缩至 16px 仍是一道可辨的方波。 -->
+  <rect width="256" height="256" rx="56" fill="#1d4ed8"/>
+
+  <path d="M44 84 H78 V172 H112 V84 H146 V172 H180 V84 H212"
+        fill="none" stroke="#ffffff" stroke-width="16"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

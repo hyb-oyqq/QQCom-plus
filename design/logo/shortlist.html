@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>easyDebug 图标 — 收敛终选</title>
+<style>
+  :root{--ink:#182334;--muted:#6b7787;--line:#dfe5ee;--bg:#f4f6fa;--blue:#1d4ed8;}
+  *{box-sizing:border-box;}
+  body{margin:0;padding:36px;background:var(--bg);color:var(--ink);
+       font-family:"Microsoft YaHei UI","Microsoft YaHei","Segoe UI",sans-serif;}
+  h1{font-size:21px;font-weight:700;margin:0 0 6px;}
+  .sub{font-size:13px;color:var(--muted);margin:0 0 24px;line-height:1.75;max-width:940px;}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;max-width:1180px;}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px;}
+  .card.win{border-color:var(--blue);box-shadow:0 0 0 3px rgba(29,78,216,.10);}
+  .tag{display:inline-block;font-size:11px;font-weight:700;color:var(--blue);background:#e8eefb;
+       border-radius:4px;padding:2px 7px;margin-bottom:9px;}
+  .badge{display:inline-block;font-size:10px;font-weight:700;color:#fff;background:var(--blue);
+       border-radius:4px;padding:2px 7px;margin-left:6px;vertical-align:2px;}
+  .name{font-size:16px;font-weight:700;margin:0 0 2px;}
+  .en{font-size:10px;color:#9aa5b5;letter-spacing:1px;text-transform:uppercase;margin:0 0 13px;}
+  .desc{font-size:12px;color:var(--muted);line-height:1.7;margin:0 0 15px;min-height:84px;}
+  .row{display:flex;align-items:flex-end;gap:14px;padding:12px 0;border-top:1px solid var(--line);}
+  .row .lbl{font-size:10px;color:#9aa5b5;width:30px;flex:none;}
+  .row img{display:block;image-rendering:pixelated;}
+  .dark{background:#111827;border-radius:8px;padding:10px;display:flex;align-items:center;gap:12px;}
+  .dark .lbl{color:#7c8798;}
+  .mono{background:#f7f9fc;border:1px dashed #c8d1e0;border-radius:8px;padding:10px;
+        display:flex;align-items:center;gap:12px;}
+  .panel{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px;margin-top:22px;max-width:1180px;}
+  .panel h2{font-size:15px;font-weight:700;margin:0 0 4px;}
+  .panel p{font-size:12px;color:var(--muted);margin:0 0 14px;line-height:1.75;}
+  .zgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;}
+  .zitem{text-align:center;}
+  .zitem .cap{font-size:11px;color:var(--muted);margin-top:6px;}
+  .zbox{background:#eef2f9;border:1px solid var(--line);border-radius:8px;padding:8px;
+        display:flex;justify-content:center;}
+  .zbox img{image-rendering:pixelated;width:190px;height:190px;}
+  /* 应用场景模拟 */
+  .apps{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+  .app{background:#f7f9fc;border:1px solid var(--line);border-radius:10px;padding:14px;text-align:center;}
+  .app .t{font-size:11px;color:var(--muted);margin-top:8px;}
+  .taskbar{background:#1f2430;border-radius:8px;padding:10px 12px;display:flex;gap:10px;align-items:center;}
+  .taskbar img{width:20px;height:20px;border-radius:4px;}
+  .taskbar .dim{opacity:.45;}
+</style>
+</head>
+<body>
+
+<h1>收敛终选 — 三个方案</h1>
+<p class="sub">
+  前两轮共 7 个方案里，带箭头的（A/A2）、带内部空洞的（B）、带双端点+波形叠加的（E）全部在 32px 体检中淘汰。
+  剩下三个的共性是：<b>没有细小附属结构、没有内部空洞</b>。本轮修正了 C 的首尾电平不平衡、D 的几何中心偏移，
+  并新增一个把箭头彻底删掉的 G。
+</p>
+
+<div class="grid">
+  <div class="card win">
+    <span class="tag">C2<span class="badge">推荐</span></span>
+    <p class="name">信号</p><p class="en">Signal · refined</p>
+    <p class="desc">
+      单笔方波，一根线条画完，零填充块。4 次跃迁保证首尾同高，构图完全平衡。
+      四个尺寸全部清晰，单色剪影完美，16px 仍是一道可辨的方波。
+      语义直指串口总线上的字节流，最贴合工具本质。
+    </p>
+    <div class="row"><span class="lbl">256</span><img src="c2-signal.svg" width="112" height="112"></div>
+    <div class="row"><span class="lbl">64</span><img src="c2-signal.svg" width="64" height="64">
+      <span class="lbl">32</span><img src="c2-signal.svg" width="32" height="32">
+      <span class="lbl">16</span><img src="c2-signal.svg" width="16" height="16"></div>
+    <div class="dark"><span class="lbl">暗底</span><img src="c2-signal-dark.svg" width="56" height="56">
+      <span class="lbl">32</span><img src="c2-signal-dark.svg" width="32" height="32"></div>
+    <div class="mono"><span class="lbl">单色</span><img src="c2-signal-mono.svg" width="56" height="56">
+      <span class="lbl">16</span><img src="c2-signal-mono.svg" width="16" height="16"></div>
+  </div>
+
+  <div class="card">
+    <span class="tag">D2</span>
+    <p class="name">终端</p><p class="en">Terminal · refined</p>
+    <p class="desc">
+      命令行提示符 "&gt;_" 放大成图形，只有两笔。几何中心已对齐到 x=128。
+      识别度最高、留白最舒服，小尺寸表现优秀。
+      代价是语义偏向「终端」而非「双端调试」。
+    </p>
+    <div class="row"><span class="lbl">256</span><img src="d2-terminal.svg" width="112" height="112"></div>
+    <div class="row"><span class="lbl">64</span><img src="d2-terminal.svg" width="64" height="64">
+      <span class="lbl">32</span><img src="d2-terminal.svg" width="32" height="32">
+      <span class="lbl">16</span><img src="d2-terminal.svg" width="16" height="16"></div>
+    <div class="dark"><span class="lbl">暗底</span><img src="d2-terminal-dark.svg" width="56" height="56">
+      <span class="lbl">32</span><img src="d2-terminal-dark.svg" width="32" height="32"></div>
+    <div class="mono"><span class="lbl">单色</span><img src="d2-terminal-mono.svg" width="56" height="56">
+      <span class="lbl">16</span><img src="d2-terminal-mono.svg" width="16" height="16"></div>
+  </div>
+
+  <div class="card">
+    <span class="tag">G</span>
+    <p class="name">连接</p><p class="en">Connect · minimal</p>
+    <p class="desc">
+      两个端点 + 一根连接线，箭头全部删掉。语义是「两端已连通」——
+      正是 easyDebug 连接成功后的状态，也是工具最核心的那个瞬间。
+      构成最简：2 圆 + 1 线，左右净空各 22px 完全对称。
+    </p>
+    <div class="row"><span class="lbl">256</span><img src="g-connect.svg" width="112" height="112"></div>
+    <div class="row"><span class="lbl">64</span><img src="g-connect.svg" width="64" height="64">
+      <span class="lbl">32</span><img src="g-connect.svg" width="32" height="32">
+      <span class="lbl">16</span><img src="g-connect.svg" width="16" height="16"></div>
+    <div class="dark"><span class="lbl">暗底</span><img src="g-connect-dark.svg" width="56" height="56">
+      <span class="lbl">32</span><img src="g-connect-dark.svg" width="32" height="32"></div>
+    <div class="mono"><span class="lbl">单色</span><img src="g-connect-mono.svg" width="56" height="56">
+      <span class="lbl">16</span><img src="g-connect-mono.svg" width="16" height="16"></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>像素级体检 — 32px 最近邻放大 6×</h2>
+  <p>把 32px 实际渲染结果用最近邻插值拉到 190px，逐格检查边缘。元素之间必须能看到清晰的背景色缝隙。</p>
+  <div class="zgrid">
+    <div class="zitem"><div class="zbox"><img src="c2-signal.svg" width="32" height="32"></div>
+      <div class="cap">C2 信号 — 通透</div></div>
+    <div class="zitem"><div class="zbox"><img src="d2-terminal.svg" width="32" height="32"></div>
+      <div class="cap">D2 终端 — 通透</div></div>
+    <div class="zitem"><div class="zbox"><img src="g-connect.svg" width="32" height="32"></div>
+      <div class="cap">G 连接 — 通透</div></div>
+    <div class="zitem"><div class="zbox"><img src="old.svg" width="32" height="32"></div>
+      <div class="cap">旧图标 — 箭头与圆粘连</div></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>真实场景模拟 — Windows 任务栏 20px</h2>
+  <p>任务栏图标实际只有 20px 左右，且深色底。这是三个方案最严苛的战场。</p>
+  <div class="apps">
+    <div class="app">
+      <div class="taskbar">
+        <img src="c2-signal-dark.svg"><img src="d2-terminal-dark.svg" class="dim">
+        <img src="g-connect-dark.svg" class="dim"><img src="old.svg" class="dim">
+      </div>
+      <div class="t">C2 / D2 / G / 旧</div>
+    </div>
+    <div class="app" style="display:flex;align-items:center;justify-content:center;gap:26px;">
+      <img src="c2-signal.svg" width="20" height="20">
+      <img src="d2-terminal.svg" width="20" height="20">
+      <img src="g-connect.svg" width="20" height="20">
+      <img src="old.svg" width="20" height="20">
+    </div>
+    <div class="app" style="display:flex;align-items:center;justify-content:center;gap:22px;">
+      <img src="c2-signal.svg" width="16" height="16">
+      <img src="d2-terminal.svg" width="16" height="16">
+      <img src="g-connect.svg" width="16" height="16">
+      <img src="old.svg" width="16" height="16">
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- 方案 A「链路」：两个端点节点 + 一枚居中的双向箭头。
+       做法：节点做实心大圆点，箭头全部改为等宽描边（stroke 16），四周留出 10px 净空，永不接触。 -->
+  <rect width="256" height="256" rx="56" fill="#1d4ed8"/>
+
+  <g fill="none" stroke="#ffffff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M102 128 H154"/>
+    <path d="M102 128 L117 111"/>
+    <path d="M102 128 L117 145"/>
+    <path d="M154 128 L139 111"/>
+    <path d="M154 128 L139 145"/>
+  </g>
+
+  <circle cx="58" cy="128" r="26" fill="#ffffff"/>
+  <circle cx="198" cy="128" r="26" fill="#ffffff"/>
+</svg>

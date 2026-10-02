@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- 方案 E「端点·方波」：两个端点圆点 + 中间一道方波。
+       语义最完整：两端 = 两个串口/网口，中间方波 = 双向流动的字节。
+       只有 2 类元素（点 + 线），没有箭头，没有内部空洞，缩到 16px 依然完整。 -->
+  
+
+  <circle cx="56" cy="128" r="24" fill="#1d4ed8"/>
+  <circle cx="200" cy="128" r="24" fill="#1d4ed8"/>
+
+  <path d="M96 104 H112 V152 H128 V104 H144 V152 H160"
+        fill="none" stroke="#1d4ed8" stroke-width="14"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
