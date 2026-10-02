@@ -1,5 +1,6 @@
 #include "sendpanel.h"
 #include "ui/common/payloadcodec.h"
+#include "persistence/preferencesstore.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -160,6 +161,9 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     connect(m_editor, &QPlainTextEdit::textChanged, this, &SendPanel::updatePreview);
     connect(m_format, &QComboBox::currentIndexChanged, this, &SendPanel::updatePreview);
     connect(m_suffix, &QComboBox::currentIndexChanged, this, &SendPanel::updatePreview);
+    // 两个选择器任一变化即落盘；loadPreferences 的回写也会触发（同值无害）。
+    connect(m_format, &QComboBox::currentIndexChanged, this, &SendPanel::savePreferences);
+    connect(m_suffix, &QComboBox::currentIndexChanged, this, &SendPanel::savePreferences);
     for (auto *button : {m_targetA, m_targetB, m_targetBoth})
         connect(button, &QPushButton::toggled, this, &SendPanel::updateSendAvailability);
     updatePreview();
@@ -246,11 +250,34 @@ void SendPanel::issueSend()
 
 void SendPanel::setPayload(const QByteArray &bytes)
 {
-    // 阻断三个控件的中间信号，整次“填入发送区”只解析一次。
+    // 阻断三个控件的中间信号，整次"填入发送区"只解析一次。
     const QSignalBlocker formatBlocker(m_format), suffixBlocker(m_suffix), editorBlocker(m_editor);
     m_format->setCurrentIndex(PayloadCodec::formats().indexOf(PayloadCodec::Format::Hex));
     m_suffix->setCurrentIndex(0);
     m_editor->setPlainText(PayloadCodec::render(bytes, PayloadCodec::Format::Hex));
     updatePreview();
     m_editor->setFocus();
+}
+
+void SendPanel::setPreferences(PreferencesStore *store)
+{
+    m_preferences = store;
+    loadPreferences();
+}
+
+void SendPanel::loadPreferences()
+{
+    if (!m_preferences) return;
+    // 存的是格式名而不是下标：格式列表顺序将来变了，旧配置仍然有效。
+    const auto format = m_preferences->value("send/format").toString();
+    if (m_format->findText(format) >= 0)
+        m_format->setCurrentText(format);
+    m_suffix->setCurrentIndex(m_preferences->value("send/suffix", 0).toInt());
+}
+
+void SendPanel::savePreferences()
+{
+    if (!m_preferences) return;
+    m_preferences->setValue("send/format", m_format->currentText());
+    m_preferences->setValue("send/suffix", m_suffix->currentIndex());
 }

@@ -120,6 +120,9 @@ MainWindow::MainWindow(QWidget *parent)
     // Minimums stay at each panel's own floor so the expanded endpoint rows have room.
     m_traffic = new TrafficPanel;
     m_sender = new SendPanel;
+    // 显示选项持久化：监视区开关/列状态与发送区格式/行尾记进 preferences.ini。
+    m_traffic->setPreferences(preferences);
+    m_sender->setPreferences(preferences);
     dataSplitter->addWidget(m_traffic);
     dataSplitter->addWidget(m_sender);
     // 显示区承载更多内容：发送区正文固定约三行、贴着自身内容高度，

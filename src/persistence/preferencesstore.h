@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QStringList>
+#include <QVariant>
 
 class QSettings;
 
@@ -14,6 +15,11 @@ public:
     QStringList addressHistory(bool localAddress) const;
     void rememberAddress(const QString &address, bool localAddress);
     static constexpr int MaxAddressHistory = 20;
+
+    // 显示偏好的通用键值通道（监视区开关、编码格式等）。地址历史有领域语义走上面的
+    // 方法；这里只承载"记住用户上次的界面选择"这类无结构偏好的存取。
+    QVariant value(const QString &key, const QVariant &fallback = {}) const;
+    void setValue(const QString &key, const QVariant &value);
 
 signals:
     void addressHistoryChanged();

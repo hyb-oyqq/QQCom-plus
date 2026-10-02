@@ -8,6 +8,7 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QPlainTextEdit;
+class PreferencesStore;
 class QPushButton;
 class QSpinBox;
 class QTimer;
@@ -24,6 +25,8 @@ public:
     // 端点连接状态：发送按钮只在"选中目标里有已连接的"时可用。
     void setEndpointOpen(int index, bool open);
     void setPayload(const QByteArray &bytes);
+    // 组合根注入的偏好存储：编码格式与行尾在会话间保持用户上次的选择。
+    void setPreferences(PreferencesStore *store);
 
 signals:
     // payload 已按当前格式/末尾解析为原始字节；targetMask 位 1/2 表示 A/B。
@@ -35,6 +38,8 @@ private:
     void updateTargets();
     void updateSendAvailability();
     void issueSend();
+    void loadPreferences();
+    void savePreferences();
 
     QList<PortDraft> m_ports;
     QPushButton *m_targetA;
@@ -56,6 +61,7 @@ private:
     bool m_openFlags[2] = {false, false};
     bool m_payloadValid = false;
     QByteArray m_payloadBytes;
+    PreferencesStore *m_preferences = nullptr;
 };
 
 #endif

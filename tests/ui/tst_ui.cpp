@@ -13,6 +13,7 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
+#include <QHeaderView>
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QLineEdit>
@@ -96,6 +97,11 @@ private slots:
     void initTestCase()
     {
         QApplication::setStyle("Fusion");
+        // 显示选项现在会经 PreferencesStore 落盘（测试模式重定向到 qttest 目录），
+        // 但该文件在两次运行之间残留：上一次的格式切换会改变这一次的默认值。
+        // 每次从干净配置开始，用例的"默认状态"假设才稳定成立。
+        QFile::remove(QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+                      + QStringLiteral("/preferences.ini"));
         QFile style(":/styles/workbench.qss");
         QVERIFY(style.open(QIODevice::ReadOnly));
         qApp->setStyleSheet(QString::fromUtf8(style.readAll()));
@@ -666,6 +672,124 @@ private slots:
         QVERIFY(reopened.findChild<QComboBox *>("client.host")->findText("10.20.30.40") >= 0);
     }
 
+    void trafficWrapSwitchAdjustsView()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        window.loadExample();
+        // 摘除组合根注入的偏好存储：本用例改显示开关，不该写进真实用户的 preferences.ini。
+        window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
+        auto *table = window.findChild<QTableView *>(QStringLiteral("trafficTable"));
+        QVERIFY(wrapAction && table);
+        QCOMPARE(wrapAction->isChecked(), false);
+        QCOMPARE(table->wordWrap(), false);
+        wrapAction->setChecked(true);
+        QTRY_COMPARE(table->wordWrap(), true);
+        QCOMPARE(table->verticalHeader()->sectionResizeMode(0), QHeaderView::ResizeToContents);
+        // 折行是阅读模式：切回后恢复单行省略与固定行高，行高模式也随之还原。
+        wrapAction->setChecked(false);
+        QTRY_COMPARE(table->wordWrap(), false);
+        QCOMPARE(table->verticalHeader()->sectionResizeMode(0), QHeaderView::Interactive);
+    }
+
+    void displayPreferencesPersistAcrossPanels()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto fileName = directory.filePath("preferences.ini");
+        // 第一组面板：改显示开关即落盘（PreferencesStore::setValue 带 sync）。
+        PreferencesStore firstStore(nullptr, fileName);
+        TrafficPanel firstTraffic;
+        firstTraffic.setPreferences(&firstStore);
+        SendPanel firstSender;
+        firstSender.setPreferences(&firstStore);
+        auto *wrap = firstTraffic.findChild<QAction *>(QStringLiteral("wrapTraffic"));
+        auto *rx = firstTraffic.findChild<QAction *>(QStringLiteral("showRx"));
+        auto *format = firstTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
+        auto *sendFormat = firstSender.findChild<QComboBox *>(QStringLiteral("sendFormat"));
+        QVERIFY(wrap && rx && format && sendFormat);
+        wrap->setChecked(true);
+        rx->setChecked(false);
+        format->setCurrentText(QStringLiteral("UTF-8"));
+        sendFormat->setCurrentText(QStringLiteral("GBK"));
+        // 第二组面板：从同一份配置读回，用户上次的选择原样恢复。
+        PreferencesStore secondStore(nullptr, fileName);
+        TrafficPanel secondTraffic;
+        secondTraffic.setPreferences(&secondStore);
+        SendPanel secondSender;
+        secondSender.setPreferences(&secondStore);
+        QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("wrapTraffic"))->isChecked(), true);
+        QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("showRx"))->isChecked(), false);
+        QCOMPARE(secondTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->currentText(),
+                 QStringLiteral("UTF-8"));
+        QCOMPARE(secondSender.findChild<QComboBox *>(QStringLiteral("sendFormat"))->currentText(),
+                 QStringLiteral("GBK"));
+    }
+
+    void logRecordingFollowsDisplayFormat()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto logPath = directory.filePath(QStringLiteral("traffic.log"));
+        PreferencesStore store(nullptr, directory.filePath(QStringLiteral("preferences.ini")));
+        // 预置路径：记录开关开启时若无路径会弹文件对话框，注入路径绕开交互。
+        store.setValue(QStringLiteral("traffic/recordPath"), logPath);
+        TrafficPanel panel;
+        panel.setPreferences(&store);
+        auto *record = panel.findChild<QAction *>(QStringLiteral("recordTraffic"));
+        auto *format = panel.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
+        QVERIFY(record && format);
+        QCOMPARE(format->currentText(), QStringLiteral("HEX"));
+        record->setChecked(true);
+
+        Traffic::Message rx;
+        rx.direction = Traffic::Direction::Receive;
+        rx.source.endpointIndex = 0;
+        rx.source.endpointKind = PortDraft::Serial;
+        rx.source.endpointId = QUuid::createUuid();
+        rx.raw = QByteArray::fromHex("0102");
+        Traffic::Message tx;
+        tx.direction = Traffic::Direction::Transmit;
+        tx.origin = Traffic::Origin::Manual;
+        tx.source.endpointIndex = 1;
+        tx.source.endpointKind = PortDraft::TcpServer;
+        tx.source.endpointId = QUuid::createUuid();
+        tx.raw = QByteArray::fromHex("FF");
+        panel.appendMessages({rx, tx});
+        // 批入模是 16ms 异步的，轮询模型行数即等到了写日志的同一拍。
+        auto *model = panel.findChild<TrafficModel *>();
+        QVERIFY(model);
+        QTRY_COMPARE(model->rowCount(), 2);
+
+        QFile log(logPath);
+        QVERIFY(log.open(QIODevice::ReadOnly | QIODevice::Text));
+        const auto hexLines = QString::fromUtf8(log.readAll()).trimmed().split(QLatin1Char('\n'));
+        QCOMPARE(hexLines.size(), 2);
+        QVERIFY(hexLines.at(0).contains(QStringLiteral("A · 串口")));
+        QVERIFY(hexLines.at(0).contains(QStringLiteral("RX")));
+        QVERIFY(hexLines.at(0).endsWith(QStringLiteral("01 02"))); // HEX 模式记 HEX
+        QVERIFY(hexLines.at(1).endsWith(QStringLiteral("FF")));
+        log.close();
+
+        // 切换显示格式后新行跟随新模式：所见即所记。
+        format->setCurrentText(QStringLiteral("UTF-8"));
+        Traffic::Message text;
+        text.direction = Traffic::Direction::Receive;
+        text.source.endpointIndex = 0;
+        text.source.endpointKind = PortDraft::Serial;
+        text.source.endpointId = QUuid::createUuid();
+        text.raw = "ok";
+        panel.appendMessages({text});
+        QTRY_COMPARE(model->rowCount(), 3);
+        QVERIFY(log.open(QIODevice::ReadOnly | QIODevice::Text));
+        const auto all = QString::fromUtf8(log.readAll()).trimmed().split(QLatin1Char('\n'));
+        QCOMPARE(all.size(), 3);
+        QVERIFY(all.at(2).endsWith(QStringLiteral("ok")));
+    }
+
     void endpointRowsStayVisibleAndInline()
     {
         MainWindow window;
@@ -901,6 +1025,7 @@ private slots:
         window.findChild<QComboBox *>("sendSuffix")->setCurrentIndex(0);
         window.findChild<QComboBox *>("sendFormat")->setCurrentIndex(3); // UTF-8：正文按文本编码
         QCOMPARE(length->text(), QStringLiteral("23 字节"));
+        window.findChild<QComboBox *>("sendFormat")->setCurrentIndex(0); // 恢复默认，不留跨用例状态
     }
 
     void sendTargetsMatchDisplayToggles()

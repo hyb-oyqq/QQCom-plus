@@ -2,6 +2,7 @@
 #include "ui/common/combometrics.h"
 #include "ui/common/endpointformat.h"
 #include "ui/common/tintedicon.h"
+#include "persistence/preferencesstore.h"
 
 #include <QActionGroup>
 #include <QApplication>
@@ -9,6 +10,7 @@
 #include <QColor>
 #include <QComboBox>
 #include <QFileDialog>
+#include <QFile>
 #include <QFontDatabase>
 #include <QHeaderView>
 #include <QLabel>
@@ -19,7 +21,9 @@
 #include <QScrollBar>
 #include <QStackedWidget>
 #include <QStyle>
+#include <QStyledItemDelegate>
 #include <QTableView>
+#include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -35,9 +39,32 @@ constexpr int PreviewLimit = 4096;
 // 整个模型保留的原始字节预算，与 ARCHITECTURE.md §7 的 GUI 历史模型上限一致。
 constexpr qint64 HistoryByteBudget = 4 * 1024 * 1024;
 
-// 丢弃最旧记录直到回到预算内。逐条移除而不是整体截断，保留最新的连续上下文。
-void enforceBudget(QList<Traffic::Message> &records)
+// 真实消息到达的攒批窗口：一帧左右的时间足够把同一次 readyRead 的多条消息
+// 合成一个插入通知；再长会让人感觉记录"迟一拍"。
+constexpr int FlushIntervalMs = 16;
+
+// 换行查看模式下数据内容列的最大行高（以文本行数计）。
+constexpr int WrappedRowLines = 6;
+
+// 行高钳制委托。换行开启时 QTableView 会按内容给出行高，4096 字节的 HEX
+// 折行能有上百行，直接把滚动体验顶穿；这里把单行钳在几行文本以内，
+// 更长的内容走悬停提示——换行是查看模式，不是排版模式。
+// 关闭换行时单行高度远小于钳制值，常驻无副作用。
+class TrafficRowDelegate final : public QStyledItemDelegate
 {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        auto size = QStyledItemDelegate::sizeHint(option, index);
+        if (index.column() == TrafficModel::DataColumn)
+            size.setHeight(qMin(size.height(), option.fontMetrics.height() * WrappedRowLines + 8));
+        return size;
+    }
+};
+
+// 丢弃最旧记录直到回到预算内。逐条移除而不是整体截断，保留最新的连续上下文。
+void enforceBudget(QList<Traffic::Message> &records){
     qint64 bytes = 0;
     for (const auto &record : records)
         bytes += record.raw.size();
@@ -312,9 +339,30 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     auto *timeAction = displayMenu->addAction(tr("时间戳列"));
     timeAction->setCheckable(true);
     timeAction->setChecked(true);
-    connect(timeAction, &QAction::toggled, this,
-            [this](bool checked) { m_table->setColumnHidden(TrafficModel::TimeColumn, !checked); });
+    connect(timeAction, &QAction::toggled, this, [this](bool checked) {
+        m_table->setColumnHidden(TrafficModel::TimeColumn, !checked);
+        savePreferences();
+    });
+    // 自动换行默认关：单行省略是扫描模式，折行是阅读模式，两者切换是明确的用户意图。
+    m_wrapAction = displayMenu->addAction(tr("自动换行"));
+    m_wrapAction->setObjectName("wrapTraffic");
+    m_wrapAction->setCheckable(true);
+    m_wrapAction->setToolTip(tr("数据内容超出列宽时折行显示（行高最多 6 行，更多内容见悬停提示）"));
+    connect(m_wrapAction, &QAction::toggled, this, [this](bool checked) {
+        applyWrapMode(checked);
+        savePreferences();
+    });
     displayMenu->addSeparator();
+    // 记录到文件：与"导出"互补。导出是"把当前所见存一份"，记录是"边看边记"——
+    // 记录行跟随当前显示格式（HEX 模式记 HEX、文本模式记文本），所见即所记。
+    m_recordAction = displayMenu->addAction(tr("记录到文件"));
+    m_recordAction->setObjectName("recordTraffic");
+    m_recordAction->setCheckable(true);
+    m_recordAction->setToolTip(tr("把新到达的消息按当前显示格式持续写入日志文件"));
+    connect(m_recordAction, &QAction::toggled, this, [this](bool enabled) {
+        toggleLogRecording(enabled);
+        savePreferences();
+    });
     auto *pauseAction = displayMenu->addAction(tr("暂停显示"));
     pauseAction->setCheckable(true);
     connect(pauseAction, &QAction::toggled, this, [this](bool checked) {
@@ -349,10 +397,16 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_fitDebounce->setSingleShot(true);
     m_fitDebounce->setInterval(200);
     connect(m_fitDebounce, &QTimer::timeout, this, &TrafficPanel::fitFixedColumns);
+    // 攒批入模：16ms 一拍把同批消息合成一次插入通知，事件开销与消息速率解耦。
+    m_flushTimer = new QTimer(this);
+    m_flushTimer->setSingleShot(true);
+    m_flushTimer->setInterval(FlushIntervalMs);
+    connect(m_flushTimer, &QTimer::timeout, this, &TrafficPanel::flushPending);
     m_filter->setSourceModel(m_model);
     m_table = new QTableView;
     m_table->setObjectName("trafficTable");
     m_table->setModel(m_filter);
+    m_table->setItemDelegate(new TrafficRowDelegate(m_table));
     m_table->setAlternatingRowColors(true);
     m_table->setShowGrid(false);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -396,10 +450,18 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         m_model->setFormat(format);
         m_filter->setDisplayFormat(format);
         updateFilter(); // 搜索匹配当前格式的渲染文本，切格式后需要重新过滤。
+        savePreferences();
     });
-    connect(clear, &QPushButton::clicked, this, [this] { m_model->replaceRecords({}); updateSummary(); });
+    connect(clear, &QPushButton::clicked, this, [this] {
+        m_pending.clear();
+        m_model->replaceRecords({});
+        updateSummary();
+    });
     connect(exportButton, &QPushButton::clicked, this, &TrafficPanel::exportVisible);
-    connect(m_follow, &QPushButton::toggled, this, [this](bool follow) { if (follow) m_table->scrollToBottom(); });
+    connect(m_follow, &QPushButton::toggled, this, [this](bool follow) {
+        if (follow) m_table->scrollToBottom();
+        savePreferences();
+    });
     // 任何形式的向上翻阅（拖动、滚轮、翻页）都解除“滚动到底”，与悬停提示的承诺一致。
     connect(m_table->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int position) {
         if (position < m_table->verticalScrollBar()->maximum()) m_follow->setChecked(false);
@@ -496,10 +558,164 @@ void TrafficPanel::appendMessages(const QList<Traffic::Message> &messages)
         updateSummary();
         return;
     }
-    m_model->appendRecords(messages);
+    // 逐条 beginInsertRows + scrollToBottom 的事件开销与消息速率成正比；
+    // 先攒进缓冲，16ms 一拍整批入模，插入通知次数与消息速率解耦。
+    m_pending += messages;
+    if (!m_flushTimer->isActive()) m_flushTimer->start();
+}
+
+void TrafficPanel::flushPending()
+{
+    if (m_pending.isEmpty()) return;
+    const auto batch = m_pending;
+    m_pending.clear();
+    m_model->appendRecords(batch);
     m_fitDebounce->start(); // 列宽自适应限流执行，见构造处的说明
     updateSummary();
+    writeLog(batch); // 记录与显示同流：进模型的批次才落日志，暂停即同停
     if (m_follow->isChecked()) m_table->scrollToBottom();
+}
+
+void TrafficPanel::applyWrapMode(bool wrap)
+{
+    m_table->setWordWrap(wrap);
+    auto *header = m_table->verticalHeader();
+    header->setSectionResizeMode(wrap ? QHeaderView::ResizeToContents : QHeaderView::Interactive);
+    if (!wrap) header->setDefaultSectionSize(33);
+    // 数据不动，只让行高按当前模式整体重算：开启后长内容折行（委托钳到 6 行），
+    // 关闭后回到统一的 33px 单行省略。
+    m_model->refreshLayout();
+    if (wrap) m_table->resizeRowsToContents();
+}
+
+void TrafficPanel::toggleLogRecording(bool enabled)
+{
+    if (!enabled) {
+        closeLogFile();
+        return;
+    }
+    if (m_logPath.isEmpty()) {
+        // 首次开启才选择文件；之后重新勾选沿用上次路径，继续追加而不是另起文件。
+        m_logPath = QFileDialog::getSaveFileName(this, tr("选择日志文件"),
+            QStringLiteral("easyDebug-log.txt"), tr("文本文件 (*.txt *.log *.tsv)"));
+        if (m_logPath.isEmpty()) {
+            // 用户取消 = 不开启；阻断信号复位勾选，避免显示与实际状态不一致。
+            const QSignalBlocker blocker(m_recordAction);
+            m_recordAction->setChecked(false);
+            return;
+        }
+    }
+    m_logFile = new QFile(m_logPath, this);
+    if (!m_logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        updateSummary(); // 先刷新掉"显示 0/0 条"之类的旧摘要
+        m_summary->setText(tr("日志文件无法打开：%1").arg(m_logFile->errorString()));
+        delete m_logFile;
+        m_logFile = nullptr;
+        const QSignalBlocker blocker(m_recordAction);
+        m_recordAction->setChecked(false);
+        return;
+    }
+    updateSummary();
+}
+
+void TrafficPanel::writeLog(const QList<Traffic::Message> &messages)
+{
+    if (!m_logFile || messages.isEmpty()) return;
+    // 一条一行，与监视区同源渲染：方向是事实字段，内容由当前显示格式决定。
+    const auto format = PayloadCodec::formats().value(m_format->currentIndex(), PayloadCodec::Format::Hex);
+    QTextStream out(m_logFile);
+    for (const auto &r : messages) {
+        out << r.timestamp.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
+            << '\t' << endpointLabel(r.source.endpointIndex, r.source.endpointKind)
+            << '\t' << (r.source.hasPeer() ? r.source.peerAddress : QStringLiteral("-"))
+            << '\t' << Traffic::directionName(r.direction)
+            << '\t' << PayloadCodec::render(r.raw, format)
+            << '\n';
+    }
+    out.flush();
+    if (out.status() != QTextStream::Ok) {
+        m_summary->setText(tr("日志写入失败，记录已停止：%1").arg(m_logFile->errorString()));
+        m_logFile->close();
+        delete m_logFile;
+        m_logFile = nullptr;
+        const QSignalBlocker blocker(m_recordAction);
+        m_recordAction->setChecked(false);
+    }
+}
+
+void TrafficPanel::closeLogFile()
+{
+    if (m_logFile) {
+        m_logFile->close();
+        delete m_logFile;
+        m_logFile = nullptr;
+    }
+}
+
+void TrafficPanel::setPreferences(PreferencesStore *store)
+{
+    m_preferences = store;
+    loadPreferences();
+}
+
+void TrafficPanel::loadPreferences()
+{
+    if (!m_preferences) return;
+    // 恢复过程中每个 setChecked 都会联动 updateFilter→savePreferences；
+    // 若不抑制，"恢复了 rx 才轮到 wrap"的中间状态会把已存的 wrap 值覆盖掉。
+    m_loading = true;
+    // 只在值能对上现有格式时恢复，配置里残留的无效文本不动当前选择。
+    const auto format = m_preferences->value("traffic/format").toString();
+    if (m_format->findText(format) >= 0)
+        m_format->setCurrentText(format);
+    m_rxAction->setChecked(m_preferences->value("traffic/rx", true).toBool());
+    m_txAction->setChecked(m_preferences->value("traffic/tx", true).toBool());
+    m_sampleAction->setChecked(m_preferences->value("traffic/sample", true).toBool());
+    m_wholeAction->setChecked(m_preferences->value("traffic/whole", false).toBool());
+    m_wrapAction->setChecked(m_preferences->value("traffic/wrap", false).toBool());
+    m_follow->setChecked(m_preferences->value("traffic/follow", true).toBool());
+    m_portAButton->setChecked(m_preferences->value("traffic/portA", true).toBool());
+    m_portBButton->setChecked(m_preferences->value("traffic/portB", true).toBool());
+    m_logPath = m_preferences->value("traffic/recordPath").toString();
+    const bool recordOn = m_preferences->value("traffic/record", false).toBool();
+    if (recordOn) {
+        // 上次开着记录：沿用原文件继续追加；文件不可用则复位勾选（含提示）。
+        m_recordAction->setChecked(true);
+    }
+    const auto minBytes = m_preferences->value("traffic/minBytes", 0).toInt();
+    for (auto *action : m_lengthMenu->actions())
+        if (action->data().toInt() == minBytes) action->setChecked(true);
+    // 列宽与隐藏列（含时间戳列开关的实际效果）一起恢复；Stretch 模式也在状态里。
+    const auto headerState = m_preferences->value("traffic/header").toByteArray();
+    if (!headerState.isEmpty()) m_table->horizontalHeader()->restoreState(headerState);
+    m_loading = false;
+    updatePortVisibility();
+    updateFilter(); // 恢复完成后统一刷新一次过滤
+}
+
+void TrafficPanel::savePreferences()
+{
+    if (!m_preferences || m_loading) return;
+    m_preferences->setValue("traffic/format", m_format->currentText());
+    m_preferences->setValue("traffic/rx", m_rxAction->isChecked());
+    m_preferences->setValue("traffic/tx", m_txAction->isChecked());
+    m_preferences->setValue("traffic/sample", m_sampleAction->isChecked());
+    m_preferences->setValue("traffic/whole", m_wholeAction->isChecked());
+    m_preferences->setValue("traffic/wrap", m_wrapAction->isChecked());
+    m_preferences->setValue("traffic/follow", m_follow->isChecked());
+    m_preferences->setValue("traffic/portA", m_portAButton->isChecked());
+    m_preferences->setValue("traffic/portB", m_portBButton->isChecked());
+    m_preferences->setValue("traffic/record", m_recordAction->isChecked());
+    if (!m_logPath.isEmpty()) m_preferences->setValue("traffic/recordPath", m_logPath);
+    for (auto *action : m_lengthMenu->actions())
+        if (action->isChecked()) m_preferences->setValue("traffic/minBytes", action->data().toInt());
+    m_preferences->setValue("traffic/header", m_table->horizontalHeader()->saveState());
+}
+
+TrafficPanel::~TrafficPanel()
+{
+    savePreferences();
+    closeLogFile();
 }
 
 void TrafficPanel::updatePortVisibility()
@@ -563,6 +779,7 @@ void TrafficPanel::updateFilter()
         if (action->isChecked()) options.minBytes = action->data().toInt();
     m_filter->setOptions(options);
     updateSummary();
+    savePreferences(); // 过滤开关的汇聚点：任一开关变化即落盘
 }
 
 void TrafficPanel::updateSummary()
