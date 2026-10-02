@@ -35,7 +35,6 @@ public:
         DirectionColumn,
         BytesColumn,
         DataColumn,
-        OriginColumn,
         ColumnCount
     };
 

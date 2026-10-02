@@ -1138,7 +1138,8 @@ private slots:
         QCOMPARE(table->model()->rowCount(), 12);
         // 对端独占一列并按 Source.peerAddress 渲染。串口行没有对端概念，显示占位破折号；
         // 挤进端口列的第二行会被 33px 行高裁掉，所以它必须是独立的一列。
-        QCOMPARE(TrafficModel::ColumnCount, 7);
+        // 来源列已并入方向（TX·手动/定时）：RX 恒为自动来源，独立列与方向高度绑定。
+        QCOMPARE(TrafficModel::ColumnCount, 6);
         QCOMPARE(table->model()->index(0, TrafficModel::SourceColumn).data().toString(),
                  QStringLiteral("A · 串口"));
         QCOMPARE(table->model()->index(0, TrafficModel::PeerColumn).data().toString(),

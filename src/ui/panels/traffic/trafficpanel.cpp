@@ -70,8 +70,6 @@ QVariant TrafficModel::data(const QModelIndex &index, int role) const
     const auto &r = m_records.at(index.row());
     if (role == Qt::ForegroundRole && index.column() == DirectionColumn)
         return QColor(r.direction == Traffic::Direction::Transmit ? "#3565ce" : "#008577");
-    if (role == Qt::ForegroundRole && index.column() == OriginColumn)
-        return QColor("#8591a2");
     // 对端地址用等宽字体：IP:port 的数字要能上下对齐着扫，比例字体会让 52344 和 52345 看着一样长。
     if (role == Qt::FontRole && (index.column() == TimeColumn || index.column() == BytesColumn
             || index.column() == PeerColumn)) {
@@ -109,7 +107,12 @@ QVariant TrafficModel::data(const QModelIndex &index, int role) const
     // "哪个客户端发来的"恰恰是排障时最先要看的信息，不能因为放不下就不显示。
     case PeerColumn: return r.source.hasPeer() ? r.source.peerAddress : QStringLiteral("—");
     case DirectionColumn: {
-        const auto name = Traffic::directionName(r.direction);
+        // 方向是主语义。来源只在"与方向不绑定"的场合才有信息量（手动/定时/转发/
+        // 示例），以复合标记挂在方向上；RX 恒为自动来源，"接收"不重复播报——
+        // 单独的来源列在转发落地前与方向高度绑定，只是屏幕宽度的净浪费。
+        auto name = Traffic::directionName(r.direction);
+        if (r.isData() && r.origin != Traffic::Origin::Automatic)
+            name += QStringLiteral("·") + Traffic::originName(r.origin);
         if (r.state == Traffic::State::None || r.state == Traffic::State::LocalCompleted) return name;
         return QStringLiteral("%1 %2").arg(name, Traffic::stateName(r.state));
     }
@@ -121,7 +124,6 @@ QVariant TrafficModel::data(const QModelIndex &index, int role) const
         if (r.isFragment() && r.hasMoreFragments) text += QObject::tr(" ⏎");
         return text;
     }
-    case OriginColumn: return Traffic::originName(r.origin);
     default: return {};
     }
 }
@@ -129,7 +131,7 @@ QVariant TrafficModel::data(const QModelIndex &index, int role) const
 QVariant TrafficModel::headerData(int section, Qt::Orientation orientation, int role) const
 {
     if (orientation != Qt::Horizontal || role != Qt::DisplayRole) return {};
-    return QStringList{tr("时间"), tr("端口"), tr("对端"), tr("方向"), tr("字节"), tr("数据内容"), tr("来源")}.value(section);
+    return QStringList{tr("时间"), tr("端口"), tr("对端"), tr("方向"), tr("字节"), tr("数据内容")}.value(section);
 }
 
 void TrafficModel::replaceRecords(QList<Traffic::Message> records)
@@ -365,9 +367,9 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 枚举让"宽度跟着哪一列走"这件事在代码里是显式的。
     header->setSectionResizeMode(TrafficModel::DataColumn, QHeaderView::Stretch);
     m_table->setColumnWidth(TrafficModel::TimeColumn, 116);
-    m_table->setColumnWidth(TrafficModel::DirectionColumn, 64);
+    // 方向列要容得下复合标记"TX·定时"（转发/示例同理），64px 是纯 RX/TX 时代的宽度。
+    m_table->setColumnWidth(TrafficModel::DirectionColumn, 88);
     m_table->setColumnWidth(TrafficModel::BytesColumn, 52);
-    m_table->setColumnWidth(TrafficModel::OriginColumn, 58);
     // 端口与对端两列由 fitFixedColumns() 按实际内容定宽，构造时先给个下限。
     m_table->setColumnWidth(TrafficModel::SourceColumn, 96);
     m_table->setColumnWidth(TrafficModel::PeerColumn, 120);
