@@ -498,33 +498,59 @@ QSpinBox *PortSelectorWidget::addNumber(const QString &key, int minimum, int max
 QWidget *PortSelectorWidget::buildFramingRow()
 {
     auto *row = new QWidget;
-    auto *layout = new QHBoxLayout(row);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
+    auto *column = new QVBoxLayout(row);
+    column->setContentsMargins(0, 0, 0, 0);
+    column->setSpacing(4);
+
+    // 第一行：怎么切（模式 + 结束符）。放一行是因为这两个是"互斥选择"的一组。
+    auto *modeRow = new QWidget;
+    auto *modeLayout = new QHBoxLayout(modeRow);
+    modeLayout->setContentsMargins(0, 0, 0, 0);
+    modeLayout->setSpacing(8);
 
     auto *label = new QLabel(tr("接收组帧"));
     label->setObjectName("Muted");
-    layout->addWidget(label);
+    modeLayout->addWidget(label);
 
+    // 三种模式的命名直说"怎么切"，不使用"兜底输出"这类内部术语：
+    // 用户关心的是"数据按什么规则分成一条条"，不是实现上的后备路径；
+    // 括号里的补充说明由下方说明行承担，这里保持短语，避免下拉框过宽。
     m_framingMode = new QComboBox;
     m_framingMode->setObjectName(QStringLiteral("framingMode"));
-    m_framingMode->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-    m_framingMode->addItem(tr("仅兜底输出"), int(ReceiveFraming::Passthrough));
-    m_framingMode->addItem(tr("结束符拆分"), int(ReceiveFraming::Delimiter));
-    m_framingMode->addItem(tr("长度前缀 u16 小端"), int(ReceiveFraming::LengthPrefixU16LE));
-    layout->addWidget(m_framingMode);
+    m_framingMode->addItem(tr("不拆分"), int(ReceiveFraming::Passthrough));
+    m_framingMode->addItem(tr("按结束符拆分"), int(ReceiveFraming::Delimiter));
+    m_framingMode->addItem(tr("按长度前缀拆分"), int(ReceiveFraming::LengthPrefixU16LE));
+    m_framingMode->setToolTip(tr("决定字节流怎样切分成一条条记录；UDP 数据报自带边界，不经过组帧。"));
+    // 非编辑型下拉框一律按内容定宽（AdjustToContents+Fixed），否则 QSS 的箭头内边距
+    // 会把最宽项截掉——tests/ui 的 portControlsShowTheirOwnContent 就是这条底线。
+    fitComboToItems(m_framingMode);
+    modeLayout->addWidget(m_framingMode);
 
     // 结束符按 HEX 输入（0D 0A / 0D0A 均可）：不可见字节必须能被精确表达。
     m_framingDelimiter = new QLineEdit;
     m_framingDelimiter->setObjectName(QStringLiteral("framingDelimiter"));
     m_framingDelimiter->setPlaceholderText(tr("结束符 HEX，如 0D 0A"));
+    m_framingDelimiter->setToolTip(tr("结束符按 HEX 输入，可多字节（如 0D 0A、7E）"));
     m_framingDelimiter->setMaximumWidth(170);
-    layout->addWidget(m_framingDelimiter);
+    modeLayout->addWidget(m_framingDelimiter);
+    modeLayout->addStretch();
+    column->addWidget(modeRow);
+
+    // 第二行：兜底设置与边界保留。两个数字框各带短标签——光看数字猜不出含义，
+    // 这正是原先"不够直观"的根源。
+    auto *optionRow = new QWidget;
+    auto *optionLayout = new QHBoxLayout(optionRow);
+    optionLayout->setContentsMargins(0, 0, 0, 0);
+    optionLayout->setSpacing(8);
 
     // 用 PortSpinBox（sizeHint 覆盖量程两端）：写死宽度会让最大值显示不全，
     // tests/ui 的 portControlsShowTheirOwnContent 就是这条底线。
     auto numericLocale = QLocale::c();
     numericLocale.setNumberOptions(QLocale::RejectGroupSeparator);
+
+    m_framingIdleLabel = new QLabel(tr("空闲超时"));
+    m_framingIdleLabel->setObjectName("Muted");
+    optionLayout->addWidget(m_framingIdleLabel);
     m_framingIdle = new PortSpinBox;
     m_framingIdle->setObjectName(QStringLiteral("framingIdle"));
     m_framingIdle->setRange(10, 60000);
@@ -532,8 +558,12 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingIdle->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_framingIdle->setLocale(numericLocale);
     m_framingIdle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    layout->addWidget(m_framingIdle);
+    m_framingIdle->setToolTip(tr("超过该时长没有新数据，就把已缓冲的字节作为一条输出"));
+    optionLayout->addWidget(m_framingIdle);
 
+    m_framingThresholdLabel = new QLabel(tr("缓冲阈值"));
+    m_framingThresholdLabel->setObjectName("Muted");
+    optionLayout->addWidget(m_framingThresholdLabel);
     m_framingThreshold = new PortSpinBox;
     m_framingThreshold->setObjectName(QStringLiteral("framingThreshold"));
     m_framingThreshold->setRange(16, 65536);
@@ -541,17 +571,26 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingThreshold->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_framingThreshold->setLocale(numericLocale);
     m_framingThreshold->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    layout->addWidget(m_framingThreshold);
+    m_framingThreshold->setToolTip(tr("缓冲达到该字节数即强制输出，避免无定界的数据一直滞留"));
+    optionLayout->addWidget(m_framingThreshold);
 
     m_framingKeepBoundary = new QCheckBox(tr("保留结束符"));
     m_framingKeepBoundary->setObjectName(QStringLiteral("framingKeepBoundary"));
-    layout->addWidget(m_framingKeepBoundary);
+    optionLayout->addWidget(m_framingKeepBoundary);
 
     m_framingLogHints = new QCheckBox(tr("记录组帧提示日志"));
     m_framingLogHints->setObjectName(QStringLiteral("framingLogHints"));
-    m_framingLogHints->setToolTip(tr("兜底输出（空闲超时、缓冲阈值、关闭收尾）时发一条警告事件"));
-    layout->addWidget(m_framingLogHints);
-    layout->addStretch();
+    m_framingLogHints->setToolTip(tr("兜底输出（空闲超时、缓冲阈值、关闭收尾）时向监视区发一条警告事件"));
+    optionLayout->addWidget(m_framingLogHints);
+    optionLayout->addStretch();
+    column->addWidget(optionRow);
+
+    // 第三行：白话说明，跟随模式切换，讲清"这条规则怎么工作"以及
+    // 两个兜底设置在什么情况下介入。
+    m_framingHint = new QLabel;
+    m_framingHint->setObjectName("Muted");
+    m_framingHint->setWordWrap(true);
+    column->addWidget(m_framingHint);
 
     const auto changed = [this] { notifyChange(); };
     connect(m_framingMode, &QComboBox::currentIndexChanged, this, [this] {
@@ -571,11 +610,30 @@ void PortSelectorWidget::syncFramingControls()
     const auto mode = ReceiveFraming::Mode(m_framingMode->currentData().toInt());
     const bool delimiter = mode == ReceiveFraming::Delimiter;
     const bool length = mode == ReceiveFraming::LengthPrefixU16LE;
+    const bool splitting = delimiter || length; // 只有拆分模式才缓冲，兜底设置才有效
     m_framingDelimiter->setVisible(delimiter);
-    m_framingKeepBoundary->setVisible(delimiter || length);
+    m_framingKeepBoundary->setVisible(splitting);
     // 同一个开关在两种模式下语义不同：结束符模式下是"保留结束符"，
     // 长度前缀模式下是"保留长度帧头"。
     m_framingKeepBoundary->setText(delimiter ? tr("保留结束符") : tr("保留长度帧头"));
+    // 不拆分模式收到即输出、不做缓冲：两个兜底设置在该模式下没有作用，置灰避免误解。
+    m_framingIdle->setEnabled(splitting);
+    m_framingThreshold->setEnabled(splitting);
+    m_framingIdleLabel->setEnabled(splitting);
+    m_framingThresholdLabel->setEnabled(splitting);
+
+    QString hint;
+    if (delimiter)
+        hint = tr("每遇到结束符就切出一条完整帧；结束符之后的剩余字节继续缓冲，等待下一帧。");
+    else if (length)
+        hint = tr("帧头 2 字节（小端）表示其后数据的字节数，凑满即输出一条完整帧。");
+    else
+        hint = tr("收到的数据原样作为一条输出（可能一次收到半帧或多帧），不拆分也不缓冲；"
+                  "适合协议自带边界、或不需要按帧查看的场景。");
+    if (splitting)
+        hint += tr(" 兜底：等待超过“空闲超时”、或缓冲达到“缓冲阈值”时，即使还没等到定界也会把已有字节输出，"
+                   "保证数据不会一直滞留在缓冲里。");
+    m_framingHint->setText(hint);
 }
 
 void PortSelectorWidget::applyFramingToDraft(PortDraft &draft) const

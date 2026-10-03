@@ -61,10 +61,13 @@ private:
     void applyFramingToDraft(PortDraft &draft) const;
     QComboBox *m_framingMode = nullptr;
     QLineEdit *m_framingDelimiter = nullptr;
+    QLabel *m_framingIdleLabel = nullptr;
     QSpinBox *m_framingIdle = nullptr;
+    QLabel *m_framingThresholdLabel = nullptr;
     QSpinBox *m_framingThreshold = nullptr;
     QCheckBox *m_framingKeepBoundary = nullptr;
     QCheckBox *m_framingLogHints = nullptr;
+    QLabel *m_framingHint = nullptr; // 组帧模式的白话说明（跟随模式切换）
     PortDraft m_draft;
     bool m_loading = false;
     bool m_initialised = false;

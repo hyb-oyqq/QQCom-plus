@@ -1597,6 +1597,16 @@ private slots:
         QVERIFY(!delimiter->isVisible());
         QVERIFY(selector->hasValidConfiguration());
         QCOMPARE(selector->draft().framing.mode, ReceiveFraming::LengthPrefixU16LE);
+
+        // 截图产物：结束符模式下的组帧行（模式 + 结束符 + 兜底设置 + 说明文字），
+        // 供目视检查排版与文案清晰度。
+        mode->setCurrentIndex(mode->findData(int(ReceiveFraming::Delimiter)));
+        QTest::qWait(20);
+        const auto artifactDir = qEnvironmentVariable("EASYDEBUG_UI_ARTIFACT_DIR");
+        if (!artifactDir.isEmpty()) {
+            QDir().mkpath(artifactDir);
+            QVERIFY(selector->grab().save(artifactDir + "/framing-row.png"));
+        }
     }
 
     // 自动换行开关：勾选后按视口宽度折行（横向滚动随之失效），取消后恢复水平滚动。

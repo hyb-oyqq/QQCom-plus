@@ -19,10 +19,13 @@ constexpr int BlockBudget = 1000000;
 constexpr qint64 CharBudget = 256LL * 1024 * 1024;
 constexpr int CharTrimReservePercent = 10; // 一次淘汰到预算的 90%，避免逐批都做头部搬移
 
-const QColor MetaColor(0x5C, 0x6B, 0x7A);
+// 浅底（#ffffff）上的可读性优先：前缀三元色都取深一档，
+// 元信息约 8.8:1、发送蓝约 6.8:1、接收青约 6.0:1 的对比度，
+// 既比正文（近黑）轻，又不会淡到需要凑近看。
+const QColor MetaColor(0x3E, 0x4A, 0x5C);
 const QColor BodyColor(0x1C, 0x24, 0x30);
-const QColor TxColor(0x35, 0x65, 0xce);
-const QColor RxColor(0x00, 0x85, 0x77);
+const QColor TxColor(0x2B, 0x54, 0xBC);
+const QColor RxColor(0x00, 0x70, 0x5F);
 
 // 行号顶格左对齐：右对齐补的空格在自动换行下看起来像首行缩进，
 // 与不带前缀的续行/HEX 对照行错位。数字位数不同带来的列微差
