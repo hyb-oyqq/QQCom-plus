@@ -843,6 +843,60 @@ private slots:
     // A（串口）与 B（TCP 服务器）的参数列必须落在同一条竖线上：主字段右缘一致，
     // 尾部标签右缘一致、尾部字段左缘与宽度一致。原先各页的尾部组宽窄不同
     // （波特率 vs 监听端口）且串口页多一个尾部 stretch，行间看着参差。
+    // 语义配色：方向令牌按类型分色（RX 饱和绿 / TX 主蓝 / 状态紫 / 警告琥珀 / 错误红），
+    // 错误与警告整行同色——这是"一眼分辨消息类型"的落点，改动必须被这里挡住。
+    void directionTokensCarrySemanticColors()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        QVERIFY(text && model);
+        // 正文断言依赖文本渲染：显式切 UTF-8，不依赖共享配置里的残留格式。
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        const auto make = [endpointId](quint64 id, Traffic::Direction direction, const char *body) {
+            Traffic::Message message;
+            message.id = id;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = direction;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray(body);
+            message.rawLength = message.raw.size();
+            return message;
+        };
+        panel->appendMessages({make(1, Traffic::Direction::Receive, "rx-body"),
+            make(2, Traffic::Direction::Transmit, "tx-body"),
+            make(3, Traffic::Direction::State, "state-body"),
+            make(4, Traffic::Direction::Warning, "warning-body"),
+            make(5, Traffic::Direction::Error, "error-body")});
+        QTRY_COMPARE(model->rowCount(), 5);
+        const auto fragmentColor = [text](int blockIndex, const QString &needle) {
+            const QTextBlock block = text->document()->findBlockByNumber(blockIndex);
+            for (auto it = block.begin(); !it.atEnd(); ++it)
+                if (it.fragment().text().contains(needle))
+                    return it.fragment().charFormat().foreground().color();
+            return QColor();
+        };
+        QCOMPARE(fragmentColor(0, QStringLiteral("RX")), QColor(0x04, 0x78, 0x57));
+        QCOMPARE(fragmentColor(1, QStringLiteral("TX")), QColor(0x1D, 0x4E, 0xD8));
+        QCOMPARE(fragmentColor(2, QStringLiteral("状态")), QColor(0x6D, 0x28, 0xD9));
+        QCOMPARE(fragmentColor(3, QStringLiteral("警告")), QColor(0xB4, 0x53, 0x09));
+        QCOMPARE(fragmentColor(4, QStringLiteral("错误")), QColor(0xC6, 0x28, 0x28));
+        // 数据行的正文保持近黑（数据是主体）；错误/警告整行随类型着色。
+        QCOMPARE(fragmentColor(0, QStringLiteral("rx-body")), QColor(0x1C, 0x24, 0x30));
+        QCOMPARE(fragmentColor(3, QStringLiteral("warning-body")), QColor(0xB4, 0x53, 0x09));
+        QCOMPARE(fragmentColor(4, QStringLiteral("error-body")), QColor(0xC6, 0x28, 0x28));
+    }
+
     void endpointParameterColumnsAlign()
     {
         clearEndpointDrafts();

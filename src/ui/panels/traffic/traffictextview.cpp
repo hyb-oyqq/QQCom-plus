@@ -19,13 +19,37 @@ constexpr int BlockBudget = 1000000;
 constexpr qint64 CharBudget = 256LL * 1024 * 1024;
 constexpr int CharTrimReservePercent = 10; // 一次淘汰到预算的 90%，避免逐批都做头部搬移
 
-// 浅底（#ffffff）上的可读性优先：前缀三元色都取深一档，
-// 元信息约 8.8:1、发送蓝约 6.8:1、接收青约 6.0:1 的对比度，
-// 既比正文（近黑）轻，又不会淡到需要凑近看。
-const QColor MetaColor(0x3E, 0x4A, 0x5C);
+// 语义配色：与工作台主色（连接按钮 #1D4ED8）同一族的高饱和色，浅底上都够深、够清楚。
+// 前缀元信息（行号/时间/长度）用深中性色；方向令牌按类型分色并加粗，
+// RX/TX/状态/警告/错误扫一眼即可分辨，不必去读文字。
+const QColor MetaColor(0x33, 0x3B, 0x47);
 const QColor BodyColor(0x1C, 0x24, 0x30);
-const QColor TxColor(0x2B, 0x54, 0xBC);
-const QColor RxColor(0x00, 0x70, 0x5F);
+const QColor TxColor(0x1D, 0x4E, 0xD8);     // 发送：工作台主蓝
+const QColor RxColor(0x04, 0x78, 0x57);     // 接收：饱和绿
+const QColor StateColor(0x6D, 0x28, 0xD9);  // 状态迁移：紫
+const QColor WarningColor(0xB4, 0x53, 0x09); // 警告：琥珀
+const QColor ErrorColor(0xC6, 0x28, 0x28);  // 错误：饱和红
+
+QColor directionColor(Traffic::Direction direction)
+{
+    switch (direction) {
+    case Traffic::Direction::Transmit: return TxColor;
+    case Traffic::Direction::Receive: return RxColor;
+    case Traffic::Direction::State: return StateColor;
+    case Traffic::Direction::Warning: return WarningColor;
+    case Traffic::Direction::Error: return ErrorColor;
+    }
+    return MetaColor;
+}
+
+// 正文底色：数据行保持近黑（数据是主体），错误/警告行整行着色——
+// 这两类是排障时的第一目标，颜色比文字更快被眼睛抓住。
+QColor bodyColorFor(Traffic::Direction direction)
+{
+    if (direction == Traffic::Direction::Error) return ErrorColor;
+    if (direction == Traffic::Direction::Warning) return WarningColor;
+    return BodyColor;
+}
 
 // 行号顶格左对齐：右对齐补的空格在自动换行下看起来像首行缩进，
 // 与不带前缀的续行/HEX 对照行错位。数字位数不同带来的列微差
@@ -147,8 +171,6 @@ void TrafficTextView::appendMessages(
 
     QTextCharFormat metaFormat;
     metaFormat.setForeground(MetaColor);
-    QTextCharFormat bodyFormat;
-    bodyFormat.setForeground(BodyColor);
 
     // 空文档只有一个空块：首行直接写进它；之后每行先补一个块分隔符。
     // QChar::ParagraphSeparator 是 QTextDocument 的块分隔符（appendPlainText 内部同款），
@@ -166,6 +188,9 @@ void TrafficTextView::appendMessages(
         payload.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
         payload.replace(QLatin1Char('\r'), QLatin1Char('\n'));
 
+        // 正文底色随方向：错误/警告整行着色，数据行保持近黑。
+        QTextCharFormat bodyFormat;
+        bodyFormat.setForeground(bodyColorFor(r.direction));
         const auto runs = toRuns(payload, bodyFormat);
 
         bool atMessageStart = true;
@@ -209,8 +234,9 @@ void TrafficTextView::appendMessages(
                                 ? QStringLiteral("%1·%2").arg(name, Traffic::originName(r.origin))
                                 : name;
                             QTextCharFormat dirFormat;
-                            dirFormat.setForeground(
-                                r.direction == Traffic::Direction::Transmit ? TxColor : RxColor);
+                            dirFormat.setForeground(directionColor(r.direction));
+                            // 方向令牌加粗：与元信息和数据的分界一眼可辨。
+                            dirFormat.setFontWeight(QFont::DemiBold);
                             cursor.setCharFormat(dirFormat);
                             cursor.insertText(dir);
                             separatorFormat = dirFormat;
