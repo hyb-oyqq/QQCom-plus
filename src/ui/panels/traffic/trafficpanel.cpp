@@ -8,9 +8,11 @@
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFile>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QScrollBar>
@@ -24,6 +26,39 @@ namespace {
 
 // 顶栏按钮与菜单条目的字形尺寸，与动作按钮一致。
 constexpr int BarIconSize = 16;
+
+// 显示设置菜单：勾选型条目点击后保持展开，便于连续调整多个开关；
+// 只有点击菜单外、再点按钮或按 Esc 才关闭。非勾选条目保持系统默认行为。
+class StayOpenMenu final : public QMenu
+{
+public:
+    using QMenu::QMenu;
+
+protected:
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (auto *action = activeAction(); action && action->isEnabled() && action->isCheckable()
+            && !action->menu()) {
+            action->setChecked(!action->isChecked());
+            update();
+            return;
+        }
+        QMenu::mouseReleaseEvent(event);
+    }
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        // 键盘激活（Return/Space）同样只切换勾选、不关闭。
+        if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Space)
+            && activeAction() && activeAction()->isEnabled() && activeAction()->isCheckable()
+            && !activeAction()->menu()) {
+            activeAction()->setChecked(!activeAction()->isChecked());
+            update();
+            return;
+        }
+        QMenu::keyPressEvent(event);
+    }
+};
+
 
 // 单条消息最多保留的预览字节数。原始长度另存于 rawLength，显示的是"本条实际有多大"，
 // 而不是"我们留下了多少"——两者不等即说明发生了截断。
@@ -204,7 +239,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     settings->setObjectName("displaySettings");
     settings->setIcon(mutedIcon(QStringLiteral(":/icons/cog.svg"), BarIconSize));
     settings->setToolTip(tr("日志显示选项：RX/TX、行前缀、自动换行"));
-    auto *displayMenu = new QMenu(settings);
+    auto *displayMenu = new StayOpenMenu(settings);
     m_rxAction = displayMenu->addAction(tr("显示 RX"));
     m_rxAction->setObjectName("showRx");
     m_rxAction->setCheckable(true);

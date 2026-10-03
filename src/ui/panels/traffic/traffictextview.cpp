@@ -13,13 +13,9 @@ namespace {
 // 100 万行的追加与绘制成本同样与总行数无关，剩下的只是文本内存。
 // 淘汰由文档自己完成：从头部整块删除，"停止跟随回滚第 1 条"始终成立。
 constexpr int BlockBudget = 1000000;
-// 单行载荷的字符上限。4KB 报文 HEX 渲染 8192 字符，不设限的话
-// 1M 行 × 8KB 字符能把内存推到不可接受。控制台只保留可见的那一份，
-// 超出的尾部以省略号示意；字节事实仍在原始记录里，导出与悬停不受影响。
-constexpr int MaxPayloadChars = 4096;
-// 全文档的总字符预算（UTF-16 下约 512MB 的文本量）。行数上限挡不住
-// "行数不多但每行极长"的会话，两个预算先到者为准；超限从头部整块淘汰，
-// 与 maximumBlockCount 的淘汰方向一致，行号因此始终连续。
+// 不再设单行载荷字符上限：完整显示是显式需求（HEX 对照尤其需要看到全部字节），
+// 内存由下面两个总预算兜底——行数上限挡堆行，字符预算挡"行少但极长"的会话，
+// 超限都从头部整块淘汰，总内存永远有界。
 constexpr qint64 CharBudget = 256LL * 1024 * 1024;
 constexpr int CharTrimReservePercent = 10; // 一次淘汰到预算的 90%，避免逐批都做头部搬移
 
@@ -42,10 +38,6 @@ const QColor AnsiBrightPalette[8] = {
     QColor(0x6B, 0x76, 0x86), QColor(0xE0, 0x52, 0x52), QColor(0x2D, 0xA4, 0x4E),
     QColor(0xB0, 0x88, 0x00), QColor(0x4D, 0x7F, 0xE3), QColor(0xC0, 0x4A, 0xD4),
     QColor(0x00, 0xA0, 0xBB), QColor(0x8A, 0x94, 0xA6)};
-
-// 行尾 HEX 附注最多展开的字节数：无界展开会让一条 4KB 报文拖出 12K 字符，
-// 对照用途看前几十字节足够，更多字节仍以省略号示意。
-constexpr int HexTailBytes = 64;
 
 // 文本分片：一段文本 + 它的字符格式。ANSI 解析按颜色边界切分载荷，
 // 同格式连续文本合并成一片；无 ANSI 的载荷整体是一片（快速路径）。
@@ -168,10 +160,6 @@ void TrafficTextView::appendMessages(
         QString payload = PayloadCodec::renderMultiline(r.raw, format);
         if (r.truncated) payload += tr(" …");
         if (r.isFragment() && r.hasMoreFragments) payload += tr(" ⏎");
-        if (payload.size() > MaxPayloadChars) {
-            payload.truncate(MaxPayloadChars);
-            payload += tr(" …");
-        }
         payload.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
         payload.replace(QLatin1Char('\r'), QLatin1Char('\n'));
 
@@ -193,6 +181,8 @@ void TrafficTextView::appendMessages(
                     // 纯数据模式省略一切前缀；其余模式行号/时间/长度各自独立开关、
                     // 同为元色，拼成一段一次插入：插入次数决定追加成本，
                     // 每条消息多一次文档插入都会直接吃掉刷新预算。
+                    // 前缀与数据以冒号收尾分界（方向存在时冒号随方向色）：
+                    // "1 12:00:00.000 [12 B] RX: 数据"，比裸空格的分隔清晰得多。
                     if (!options.pure) {
                         QString metaPrefix;
                         if (options.number)
@@ -201,10 +191,13 @@ void TrafficTextView::appendMessages(
                             metaPrefix += r.timestamp.toString(QStringLiteral("HH:mm:ss.zzz "));
                         if (options.length)
                             metaPrefix += QStringLiteral("[%1 B] ").arg(r.displayBytes());
+                        if (!options.direction && !metaPrefix.isEmpty())
+                            metaPrefix.chop(1); // 末尾空格让位给冒号
                         if (!metaPrefix.isEmpty()) {
                             cursor.setCharFormat(metaFormat);
                             cursor.insertText(metaPrefix);
                         }
+                        QTextCharFormat separatorFormat = metaFormat;
                         if (options.direction) {
                             // 方向是主语义；非自动来源（手动/定时/转发/示例）以复合标记
                             // 挂在方向上，与导出的方向列同一套规则。
@@ -216,7 +209,12 @@ void TrafficTextView::appendMessages(
                             dirFormat.setForeground(
                                 r.direction == Traffic::Direction::Transmit ? TxColor : RxColor);
                             cursor.setCharFormat(dirFormat);
-                            cursor.insertText(dir + QLatin1Char(' '));
+                            cursor.insertText(dir);
+                            separatorFormat = dirFormat;
+                        }
+                        if (options.direction || !metaPrefix.isEmpty()) {
+                            cursor.setCharFormat(separatorFormat);
+                            cursor.insertText(QStringLiteral(": "));
                         }
                     }
                 }
@@ -230,9 +228,9 @@ void TrafficTextView::appendMessages(
         }
         // HEX 对照另起一行：与数据行头尾相接会把两条信息挤在一行，
         // 长报文下根本看不到对照；独占一行才便于上下比对字节。
+        // 完整展开全部字节——对照的意义就在于看全，内存由文档总预算兜底。
         if (!options.pure && options.hex && format != PayloadCodec::Format::Hex && !r.raw.isEmpty()) {
-            auto hex = QString::fromLatin1(r.raw.left(HexTailBytes).toHex(' ')).toUpper();
-            if (r.raw.size() > HexTailBytes) hex += tr(" …");
+            const auto hex = QString::fromLatin1(r.raw.toHex(' ')).toUpper();
             if (needSeparator) needSeparator = false; // 载荷以换行收尾：续块此时是空的
             else cursor.insertText(QString(QChar::ParagraphSeparator));
             cursor.setCharFormat(metaFormat);

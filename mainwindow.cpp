@@ -25,6 +25,45 @@ constexpr int SerialAutoRefreshMs = 2000;
 // 收发速率的采样节拍：状态栏数字每秒跳一次足够可读，也更省 GUI 时间。
 constexpr int RateTickMs = 1000;
 
+// 端点草稿 ↔ QVariantMap：preferences.ini 的存取都吃 QVariantMap，
+// 领域值对象在这里做唯一一次形状转换，存取两侧共用同一份字段名。
+QVariantMap framingToVariant(const ReceiveFraming &f)
+{
+    return {{"mode", int(f.mode)}, {"delimiter", f.delimiter}, {"idle", f.idleTimeoutMs},
+        {"threshold", f.bufferThresholdBytes}, {"includeDelimiter", f.includeDelimiter},
+        {"includeLengthPrefix", f.includeLengthPrefix}, {"logHints", f.logHints}};
+}
+
+ReceiveFraming framingFromVariant(const QVariantMap &m)
+{
+    ReceiveFraming f;
+    f.mode = ReceiveFraming::Mode(m.value("mode", int(f.mode)).toInt());
+    f.delimiter = m.value("delimiter").toByteArray();
+    f.idleTimeoutMs = m.value("idle", f.idleTimeoutMs).toInt();
+    f.bufferThresholdBytes = m.value("threshold", f.bufferThresholdBytes).toInt();
+    f.includeDelimiter = m.value("includeDelimiter", f.includeDelimiter).toBool();
+    f.includeLengthPrefix = m.value("includeLengthPrefix", f.includeLengthPrefix).toBool();
+    f.logHints = m.value("logHints", f.logHints).toBool();
+    return f;
+}
+
+QVariantMap draftToVariant(const PortDraft &d)
+{
+    return {{"id", d.id.toString()}, {"kind", d.kind}, {"values", d.values},
+        {"framing", framingToVariant(d.framing)}};
+}
+
+PortDraft draftFromVariant(const QVariantMap &m)
+{
+    PortDraft d;
+    const auto id = QUuid::fromString(m.value("id").toString());
+    if (!id.isNull()) d.id = id; // 端点身份跨会话稳定：监视区开关、桥接预览都认它
+    d.kind = m.value("kind", d.kind).toInt();
+    d.values = m.value("values").toMap();
+    d.framing = framingFromVariant(m.value("framing").toMap());
+    return d;
+}
+
 // 状态栏字节数：KB/MB 用一位小数，B 保持整数——速率栏要的是"一眼量级"。
 // 自由函数没有 this 上下文，tr 用 QObject 的全局语境。
 QString formatBytes(qint64 bytes)
@@ -67,6 +106,7 @@ MainWindow::MainWindow(QWidget *parent)
     barLayout->addWidget(endpointColumn, 1);
 
     auto *preferences = new PreferencesStore(this);
+    m_preferences = preferences;
     auto *discovery = new PortDiscoveryService(this);
     const auto reloadHistory = [this, preferences] {
         for (auto *selector : m_selectors)
@@ -95,6 +135,9 @@ MainWindow::MainWindow(QWidget *parent)
         connect(selector, &PortSelectorWidget::addressCommitted, preferences, &PreferencesStore::rememberAddress);
         connect(discovery, &PortDiscoveryService::portsChanged, selector, &PortSelectorWidget::setSerialPorts);
     }
+    // 端点草稿持久化：启动时恢复上次的串口选择与全部参数（含接收组帧）。
+    // 串口名先以"待扫描"占位，设备列表扫描到位后自动对齐。
+    restoreEndpointDrafts(preferences);
     reloadHistory();
     connect(preferences, &PreferencesStore::addressHistoryChanged, this, reloadHistory);
     connect(preferences, &PreferencesStore::saveFailed, this, [this](const QString &message) {
@@ -221,6 +264,29 @@ void MainWindow::refreshEndpoints()
     m_sender->setPorts(m_ports);
     m_bridge->setEndpoints(m_ports, ready);
     updateEndpointStatus(); // 端点类型变了，状态栏摘要的措辞要跟着换
+    saveEndpointDrafts();   // 配置变化即落盘：任何改动都即时记住，无需等退出
+}
+
+void MainWindow::restoreEndpointDrafts(PreferencesStore *preferences)
+{
+    for (int index = 0; index < m_selectors.size(); ++index) {
+        const auto saved = preferences
+            ->value(QStringLiteral("endpoint/%1").arg(QLatin1Char('A' + char(index))))
+            .toMap();
+        if (saved.isEmpty()) continue;
+        const auto draft = draftFromVariant(saved);
+        if (draft.kind < PortDraft::Serial || draft.kind > PortDraft::Udp) continue;
+        m_selectors.at(index)->setDraft(draft);
+        m_ports[index] = draft;
+    }
+}
+
+void MainWindow::saveEndpointDrafts()
+{
+    if (!m_preferences) return;
+    for (int index = 0; index < m_selectors.size(); ++index)
+        m_preferences->setValue(QStringLiteral("endpoint/%1").arg(QLatin1Char('A' + char(index))),
+            draftToVariant(m_selectors.at(index)->draft()));
 }
 
 void MainWindow::toggleEndpoint(int index)

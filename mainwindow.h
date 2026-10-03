@@ -13,6 +13,7 @@ class QTimer;
 class QSplitter;
 class QThread;
 class EndpointRuntime;
+class PreferencesStore;
 class RouteEditorWidget;
 class SendPanel;
 class TrafficPanel;
@@ -40,6 +41,8 @@ protected:
 
 private:
     void refreshEndpoints();
+    void restoreEndpointDrafts(PreferencesStore *preferences);
+    void saveEndpointDrafts();
     void toggleEndpoint(int index);
     void handleEndpointState(int index, int state, const QString &detail);
     void handleEndpointPeers(int index, const QStringList &peers);
@@ -47,6 +50,7 @@ private:
     void updateEndpointStatus();
     void updateRateLabels();
     Ui::MainWindow *ui;
+    PreferencesStore *m_preferences = nullptr; // 端点草稿持久化（面板各有自己的注入通道）
     QList<PortDraft> m_ports;
     QList<PortSelectorWidget *> m_selectors;
     QTimer *m_autoRefresh;

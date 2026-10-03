@@ -362,8 +362,20 @@ private slots:
         options.events = true;
     }
 
+    // 端点草稿现在随配置即时持久化（endpoint/A、endpoint/B）：共享 ini 里
+    // 前序用例留下的端点状态会污染"默认端点"假设，依赖该假设的用例先清场。
+    void clearEndpointDrafts()
+    {
+        const QString ini = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+            + QStringLiteral("/preferences.ini");
+        PreferencesStore sweep(nullptr, ini);
+        sweep.setValue(QStringLiteral("endpoint/A"), QVariant());
+        sweep.setValue(QStringLiteral("endpoint/B"), QVariant());
+    }
+
     void portDraftsRemainIndependent()
     {
+        clearEndpointDrafts();
         MainWindow window;
         auto *a = window.findChild<PortSelectorWidget *>("endpointA");
         auto *b = window.findChild<PortSelectorWidget *>("endpointB");
@@ -464,6 +476,7 @@ private slots:
 
     void endpointSummaryTracksConfigurationAndType()
     {
+        clearEndpointDrafts();
         MainWindow window;
         window.setAttribute(Qt::WA_DontShowOnScreen);
         window.show();
@@ -829,6 +842,7 @@ private slots:
 
     void sendPreviewRejectsInvalidInput()
     {
+        clearEndpointDrafts();
         MainWindow window;
         auto *editor = window.findChild<QPlainTextEdit *>("sendEditor");
         auto *length = window.findChild<QLabel *>("ByteCount");
@@ -859,6 +873,7 @@ private slots:
 
     void sendTargetsMatchDisplayToggles()
     {
+        clearEndpointDrafts();
         MainWindow window;
         window.setAttribute(Qt::WA_DontShowOnScreen);
         window.resize(1280, 720);
@@ -934,6 +949,7 @@ private slots:
 
     void bridgeUsesOneFixedPair()
     {
+        clearEndpointDrafts();
         MainWindow window;
         auto *a = window.findChild<PortSelectorWidget *>("endpointA");
         auto *direction = window.findChild<QComboBox *>("routeDirection");
@@ -1006,6 +1022,7 @@ private slots:
     {
         // 端到端接线：点击动作按钮 → 运行时监听 → 状态回到按钮文案；
         // 再次点击关闭。全程不需要真实硬件（TCP 服务器走本机监听）。
+        clearEndpointDrafts();
         MainWindow window;
         window.setAttribute(Qt::WA_DontShowOnScreen);
         window.resize(1280, 720);
@@ -1028,6 +1045,7 @@ private slots:
 
     void compactWindowAndExamples()
     {
+        clearEndpointDrafts();
         MainWindow window;
         window.setAttribute(Qt::WA_DontShowOnScreen);
         window.resize(1280, 720);
@@ -1277,10 +1295,10 @@ private slots:
                  "换行不能再以转义字面量出现");
     }
 
-    // 超长报文的控制台行按 MaxPayloadChars 封顶（超出部分显示省略号）：
-    // 固化进文档的那一份必须是有界的，1M 行 × 8KB 字符的洪泛推不动内存；
-    // 原始字节在模型里一字不动，导出与记录仍拿得到完整数据。
-    void hugePayloadCappedInTextView()
+    // 超长报文在控制台完整显示：单行不再封顶（完整显示是显式需求），
+    // 内存由行数与字符两个总预算兜底。模型侧仍按 4096 字节做预览截断
+    // （truncated 标记），原始字节事实保留在结构化存储里，导出与记录拿得到。
+    void hugePayloadDisplayedFullyInTextView()
     {
         MainWindow window;
         window.setAttribute(Qt::WA_DontShowOnScreen);
@@ -1293,7 +1311,12 @@ private slots:
 
         const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
                                      ->property("endpoint").toUuid();
-        // 8KB 可打印 ASCII：UTF-8 渲染 8192 字符，越过 4096 的行上限触发封顶。
+        // 8KB 可打印 ASCII：模型预览截到 4096 字节，控制台必须一字节不少地展开。
+        // 显示格式显式切到 UTF-8，不依赖共享配置里的残留值；HEX 对照行同样关掉，
+        // 保证最后一行就是数据行，断言才有稳定锚点。
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(false);
         QByteArray raw(8192, Qt::Uninitialized);
         for (int i = 0; i < raw.size(); ++i)
             raw[i] = char(0x20 + (i % 0x5F));
@@ -1310,11 +1333,13 @@ private slots:
         QTRY_COMPARE(model->rowCount(), 1);
 
         const QString line = text->toPlainText();
-        QVERIFY2(line.size() < 4096 + 64,
-                 qPrintable(QStringLiteral("控制台行必须按载荷上限封顶：实际 %1 字符").arg(line.size())));
-        QVERIFY2(line.endsWith(QStringLiteral("…")), qPrintable(QStringLiteral("尾部应有省略号：") + line.right(16)));
-        // 模型侧还有 4096 字节的预览截断：存储的 raw 被截到上限，rawLength 仍是真实大小，
-        // 记录带 truncated 标记——字节事实没有丢，控制台行也一定有界。
+        // 控制台完整显示：8192 字节一字节不少（单行封顶已移除）。
+        const auto full = PayloadCodec::render(raw, PayloadCodec::Format::Utf8);
+        QVERIFY2(line.endsWith(full),
+            qPrintable(QStringLiteral("控制台行必须完整展开载荷：实际 %1 字符，载荷 %2 字符")
+                           .arg(line.size()).arg(full.size())));
+        // 模型侧仍有 4096 字节的预览截断：存储的 raw 被截到上限，rawLength 仍是
+        // 真实大小并带 truncated 标记——结构化存储（导出/记录）与显示各有各的预算。
         QCOMPARE(model->record(0).raw.size(), 4096);
         QCOMPARE(model->record(0).displayBytes(), qint64(raw.size()));
         QVERIFY(model->record(0).truncated);
@@ -1357,7 +1382,8 @@ private slots:
         QTRY_COMPARE(model->rowCount(), 1);
         QCOMPARE(text->document()->blockCount(), 2); // 数据行 + HEX 对照行
         // 行号顶格左对齐：右对齐补空格在自动换行下像首行缩进，与续行错位。
-        QCOMPARE(text->document()->firstBlock().text(), QStringLiteral("1 [2 B] OK"));
+        // 前缀以冒号收尾，与数据的分界一眼可辨。
+        QCOMPARE(text->document()->firstBlock().text(), QStringLiteral("1 [2 B]: OK"));
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("4F 4B"));
 
         // 行号是独立开关：关掉后只剩长度与数据。
@@ -1366,7 +1392,7 @@ private slots:
         message.id = 2;
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 2);
-        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("[2 B] OK"));
+        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("[2 B]: OK"));
 
         // 纯数据模式：一切前缀与附注消失，只剩数据本身。
         window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(true);
@@ -1413,7 +1439,7 @@ private slots:
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 1);
         QCOMPARE(text->document()->blockCount(), 1); // 只有数据行，没有 HEX 对照行
-        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("1 4F 4B"));
+        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("1: 4F 4B"));
         // UTF-8 格式下对照行恢复出现。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
