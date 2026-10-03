@@ -87,6 +87,11 @@ void TcpServerTransport::acceptPending()
 {
     while (m_server && m_server->hasPendingConnections()) {
         auto *socket = m_server->nextPendingConnection();
+        // 改挂到传输对象上：nextPendingConnection 默认把 socket 认 QTcpServer 作父，
+        // 而断开/stop 时我们又对它 deleteLater——两条销毁路径会在关闭后打架
+        // （父析构删一遍、队列里的 deleteLater 再删一遍）。归属收敛到本对象后，
+        // deleteLater 与父子析构互斥，不会有悬空事件。
+        socket->setParent(this);
         if (m_peers.size() >= m_maxClients) {
             // 超出上限立即拒绝；连接里的待处理字节随断开丢弃，不假装收下了。
             socket->abort();

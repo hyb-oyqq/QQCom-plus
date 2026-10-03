@@ -171,6 +171,87 @@ private slots:
         QCOMPARE(fallback.pendingBytes(), 0);
     }
 
+    // 组帧端到端：字节流经 EndpointRuntime 的组帧器后，界面看到的是帧而不是片段。
+    // 引擎的单测只覆盖 feed/flush，这里覆盖"传输事件 → 组帧 → 消息装配"这条链路。
+    void runtimeFramesByteStreamByDelimiter()
+    {
+        EndpointRuntime runtime;
+        QSignalSpy states(&runtime, &EndpointRuntime::endpointStateChanged);
+        QSignalSpy messages(&runtime, &EndpointRuntime::messageReceived);
+
+        // 先借一个空闲端口：运行时反复开同一端点（扫描候选端口）会与传输对象的
+        // deleteLater 收尾打架，这里只开一次。
+        QTcpServer probe;
+        QVERIFY(probe.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = probe.serverPort();
+        probe.close();
+
+        PortDraft draft = makeDraft(PortDraft::TcpServer,
+            {{"server.address", "127.0.0.1"}, {"server.port", int(port)}, {"server.clients", 4}});
+        ReceiveFraming framing;
+        framing.mode = ReceiveFraming::Delimiter;
+        framing.delimiter = QByteArray::fromHex("0D0A");
+        framing.idleTimeoutMs = 120;
+        framing.bufferThresholdBytes = 300;
+        framing.logHints = true; // 兜底输出要发警告事件
+        draft.framing = framing;
+
+        runtime.openEndpoint(0, draft);
+        QTRY_COMPARE(lastState(states), int(Transport::State::Open));
+
+        QTcpSocket client;
+        client.connectToHost(QStringLiteral("127.0.0.1"), port);
+        QVERIFY(client.waitForConnected(3000));
+
+        // 只看接收消息：状态/错误事件混在同一个信号里，断言前先按方向过滤。
+        const auto received = [&messages] {
+            QList<Traffic::Message> rx;
+            for (const auto &params : messages) {
+                const auto message = params.at(0).value<Traffic::Message>();
+                if (message.direction == Traffic::Direction::Receive) rx.append(message);
+            }
+            return rx;
+        };
+        const auto waitReceived = [&](int count) { QTRY_VERIFY(received().size() >= count); };
+
+        // 半帧先到：定界未到，只应出"one"这一帧，"t"留在缓冲里。
+        client.write(QByteArray("one\r\nt"));
+        QVERIFY(client.waitForBytesWritten(1000));
+        waitReceived(1);
+        // 半帧留在缓冲里：此刻只有"one"一条（再等下去空闲超时会兜底把"t"也输出）。
+        QCOMPARE(received().size(), 1);
+        QCOMPARE(received().at(0).raw, QByteArray("one"));
+        // 按定界收齐的是完整帧。
+        QCOMPARE(received().at(0).framing, Traffic::Framing::Message);
+
+        // 补齐第二帧：跨包到达的半帧在这里收齐。
+        client.write(QByteArray("wo\r\n"));
+        QVERIFY(client.waitForBytesWritten(1000));
+        waitReceived(2);
+        QCOMPARE(received().size(), 2);
+        QCOMPARE(received().at(1).raw, QByteArray("two"));
+
+        // 不带结束符的残留：空闲超时兜底输出，仍是流片段，并给出提示日志。
+        client.write(QByteArray("tail"));
+        QVERIFY(client.waitForBytesWritten(1000));
+        waitReceived(3);
+        const auto tail = received().at(2);
+        QCOMPARE(tail.raw, QByteArray("tail"));
+        QCOMPARE(tail.framing, Traffic::Framing::Stream);
+        QVERIFY(tail.hasMoreFragments);
+        QTRY_VERIFY([&messages] {
+            for (const auto &params : messages) {
+                const auto message = params.at(0).value<Traffic::Message>();
+                if (message.direction == Traffic::Direction::Warning) return true;
+            }
+            return false;
+        }());
+
+        client.disconnectFromHost();
+        QTest::qWait(60);
+        runtime.closeEndpoint(0);
+    }
+
     void factoryCreatesEveryKind()
     {
         for (int kind = PortDraft::Serial; kind <= PortDraft::Udp; ++kind) {
