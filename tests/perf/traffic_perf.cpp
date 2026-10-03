@@ -4,11 +4,12 @@
 // 这件事只能测出货代码：卡顿来自面板与视图的协作方式（行高怎么定、单元格文本给多长、
 // 预算溢出怎么通知模型），任何用假模型搭出来的复现都测不到同一个瓶颈。
 //
-// 用法：easyDebug_traffic_perf.exe [载荷字节数] [每批条数] [批数] [是否开启换行:0/1]
+// 用法：easyDebug_traffic_perf.exe [载荷字节数] [每批条数] [批数] [是否开启换行:0/1] [视图:0=表格 1=文本]
 // 判读：mean/p50 是流畅度，max 与 over100 是"卡顿"——用户感知到的正是长尾。
 #include "mainwindow.h"
 #include "ui/panels/traffic/trafficlogview.h"
 #include "ui/panels/traffic/trafficpanel.h"
+#include "ui/panels/traffic/traffictextview.h"
 
 #include <QAction>
 #include <QApplication>
@@ -85,6 +86,7 @@ int main(int argc, char **argv)
     const int batchSize = argc > 2 ? std::atoi(argv[2]) : 20;
     const int cycles = argc > 3 ? std::atoi(argv[3]) : 200;
     const bool wrap = argc > 4 ? std::atoi(argv[4]) != 0 : true;
+    const bool textView = argc > 5 ? std::atoi(argv[5]) != 0 : false;
 
     MainWindow window;
     window.resize(1400, 900);
@@ -93,10 +95,16 @@ int main(int argc, char **argv)
 
     auto *panel = window.findChild<TrafficPanel *>();
     auto *table = window.findChild<TrafficLogView *>(QStringLiteral("trafficTable"));
+    auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
     auto *model = window.findChild<TrafficModel *>();
     auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
+    auto *textModeAction = window.findChild<QAction *>(QStringLiteral("textMode"));
     auto *portA = window.findChild<QPushButton *>(QStringLiteral("showPortA"));
-    Q_ASSERT(panel && table && model && wrapAction && portA);
+    Q_ASSERT(panel && table && model && wrapAction && portA && text && textModeAction);
+
+    // 文本视图默认开启：表格基准必须显式切回表格，否则被测控件被堆栈藏起来，
+    // viewport()->repaint() 就测不到任何绘制。
+    textModeAction->setChecked(textView);
 
     window.loadExample();
     QTest::qWait(60);
@@ -107,7 +115,7 @@ int main(int argc, char **argv)
 
     const int dataColumnWidth = table->payloadAreaWidth();
     std::printf("========================================================\n");
-    std::printf("监视区刷新基准  Qt %s\n", qVersion());
+    std::printf("监视区刷新基准  Qt %s  视图 %s\n", qVersion(), textView ? "文本框" : "表格");
     std::printf("载荷 %d B/条  每批 %d 条  批数 %d  换行 %s\n",
                 payloadBytes, batchSize, cycles, wrap ? "开启" : "关闭");
     std::printf("窗口 %dx%d  数据列宽 %dpx  行高 %dpx  工作集 %.0f MiB\n",
@@ -179,8 +187,13 @@ int main(int argc, char **argv)
             if (landed && wait.elapsed() >= 25) break;
         }
         perPace.append(wait.nsecsElapsed() / 1e6);
-        if (auto *sb = table->verticalScrollBar()) table->scrollToBottom();
-        table->viewport()->repaint();
+        if (textView) {
+            text->scrollToBottom();
+            text->viewport()->repaint();
+        } else {
+            table->scrollToBottom();
+            table->viewport()->repaint();
+        }
         perCycle.append(t.nsecsElapsed() / 1e6);
     }
 
@@ -194,7 +207,7 @@ int main(int argc, char **argv)
     std::printf("  超过 100ms（肉眼可见卡顿）的周期 %d / %d\n", s.over100, cycles);
     std::printf("  帧率 净工作折合 %5.1f fps   最差一拍 %5.1f fps\n",
                 s.mean > 0 ? 1000 / (s.mean - pace.mean) : 0, s.max > 0 ? 1000 / s.max : 0);
-    std::printf("  模型 %d 行  工作集 %.0f MiB\n", model->rowCount(), wsMiB());
+    std::printf("  模型 %d 行  文本 %d 行  工作集 %.0f MiB\n", model->rowCount(), text->lineCount(), wsMiB());
 
     std::printf("\n参考：自定义视图不测量全表行高，没有 resizeRowsToContents()。\n");
     return 0;

@@ -1,5 +1,6 @@
 #include "trafficpanel.h"
 #include "trafficlogview.h"
+#include "traffictextview.h"
 #include "ui/common/combometrics.h"
 #include "ui/common/endpointformat.h"
 #include "ui/common/tintedicon.h"
@@ -319,9 +320,8 @@ void TrafficFilter::setOptions(const Options &options)
     endFilterChange(QSortFilterProxyModel::Direction::Rows);
 }
 
-bool TrafficFilter::filterAcceptsRow(int row, const QModelIndex &) const
+bool TrafficFilter::accepts(const Traffic::Message &r, const Options &m_options, PayloadCodec::Format m_format)
 {
-    const auto &r = static_cast<TrafficModel *>(sourceModel())->record(row);
     // 端点与方向是消息自带的事实字段，直接按结构判等，不解析显示文本。
     if (m_options.endpoints.isEmpty() || !m_options.endpoints.contains(r.source.endpointId)) return false;
     switch (r.direction) {
@@ -355,6 +355,11 @@ bool TrafficFilter::filterAcceptsRow(int row, const QModelIndex &) const
     if (PayloadCodec::render(r.raw, PayloadCodec::Format::Utf8).contains(needle, Qt::CaseInsensitive)) return true;
     if (QString(r.raw.toHex()).contains(needle, Qt::CaseInsensitive)) return true;
     return QString::fromLatin1(r.raw.toHex(' ')).contains(needle, Qt::CaseInsensitive);
+}
+
+bool TrafficFilter::filterAcceptsRow(int row, const QModelIndex &) const
+{
+    return accepts(static_cast<TrafficModel *>(sourceModel())->record(row), m_options, m_format);
 }
 
 TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
@@ -458,6 +463,21 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         applyWrapMode(checked);
         savePreferences();
     });
+    // 文本显示模式：监视区换成"文本框刷新"——每条消息一行文本，随到达持续追加。
+    // 默认开启：表格留给需要按列对齐扫字段的场景，两种视图共享同一条数据管线。
+    m_textModeAction = displayMenu->addAction(tr("文本显示模式"));
+    m_textModeAction->setObjectName("textMode");
+    m_textModeAction->setCheckable(true);
+    m_textModeAction->setChecked(true);
+    m_textModeAction->setToolTip(
+        tr("以文本框逐行追加显示（JCom 风格）：可任意选中复制，高速跟随不卡顿。\n"
+           "行内容按到达时的显示格式与过滤条件固化；关闭则回到分栏表格视图。"));
+    connect(m_textModeAction, &QAction::toggled, this, [this](bool checked) {
+        updateSummary();
+        // 切回文本视图时接着钉在底部，跟随语义不因切换视图而中断。
+        if (checked && m_follow->isChecked()) m_text->scrollToBottom();
+        savePreferences();
+    });
     displayMenu->addSeparator();
     // 记录到文件：与"导出"互补。导出是"把当前所见存一份"，记录是"边看边记"——
     // 记录行跟随当前显示格式（HEX 模式记 HEX、文本模式记文本），所见即所记。
@@ -538,10 +558,14 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(m_table, &TrafficLogView::contentWidthChanged, m_budgetDebounce, qOverload<>(&QTimer::start));
     m_stack = new QStackedWidget;
     m_stack->addWidget(m_table);
+    // 文本视图与表格并存于堆栈：数据管线只有一条，视图只是它的两种读取方式。
+    m_text = new TrafficTextView;
+    m_stack->addWidget(m_text);
     auto *empty = new QLabel(tr("等待接收数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。"));
     empty->setAlignment(Qt::AlignCenter);
     empty->setObjectName("EmptyState");
     empty->setWordWrap(true);
+    m_empty = empty;
     m_stack->addWidget(empty);
     layout->addWidget(m_stack, 1);
 
@@ -563,24 +587,35 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(clear, &QPushButton::clicked, this, [this] {
         m_pending.clear();
         m_model->replaceRecords({});
+        m_text->clearAll();
         m_fitScannedId = 0; // 记录清空，列宽测量从头再来
         updateSummary();
     });
     connect(exportButton, &QPushButton::clicked, this, &TrafficPanel::exportVisible);
     connect(m_follow, &QPushButton::toggled, this, [this](bool follow) {
-        if (follow) m_table->scrollToBottom();
+        if (follow) {
+            m_table->scrollToBottom();
+            m_text->scrollToBottom();
+        }
         savePreferences();
     });
     // 任何形式的向上翻阅（拖动、滚轮、翻页）都解除“滚动到底”。
     // 视图自己改滚动范围时不算翻阅，否则每次追加都会把跟随关掉。
+    // 文本视图与表格同一套语义；文本视图追加后立刻钉回底部，不会误触发。
     connect(m_table->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int position) {
         if (m_table->isScrollAdjusting()) return;
         if (position < m_table->verticalScrollBar()->maximum()) m_follow->setChecked(false);
+    });
+    connect(m_text->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int position) {
+        if (position < m_text->verticalScrollBar()->maximum()) m_follow->setChecked(false);
     });
     updateSummary();
     // 构造末尾先按当前列宽算一次字符预算：偏好里换行是关闭状态时 setChecked(false)
     // 不会触发 toggled，若只依赖 applyWrapMode，默认配置下就会一直按"不裁剪"渲染。
     updateTextBudget();
+    // 文本视图按到达时的过滤条件收流，条件在这里做第一次汇聚；
+    // m_preferences 此时尚未注入，updateFilter 里的 savePreferences 是空操作。
+    updateFilter();
 }
 
 void TrafficPanel::setPorts(const QList<PortDraft> &ports)
@@ -624,10 +659,17 @@ void TrafficPanel::loadExample(const QList<PortDraft> &ports)
         records.append(message);
     }
     m_model->replaceRecords(records);
+    m_text->clearAll();
+    // 示例数据与 replaceRecords 同语义：整批直达模型，不经显示过滤。
+    // 文本行按当前显示格式固化。
+    m_text->appendMessages(records, currentDisplayFormat());
     m_fitScannedId = 0; // 整批替换，列宽测量从头再来
     fitFixedColumns(); // 端点类型和对端地址是刚定下来的，列宽要跟着量一次
     updateSummary();
-    if (m_follow->isChecked()) m_table->scrollToBottom();
+    if (m_follow->isChecked()) {
+        m_table->scrollToBottom();
+        m_text->scrollToBottom();
+    }
 }
 
 void TrafficPanel::appendMessages(const QList<Traffic::Message> &messages)
@@ -654,7 +696,19 @@ void TrafficPanel::flushPending()
     m_fitDebounce->start(); // 列宽自适应限流执行，见构造处的说明
     updateSummary();
     writeLog(batch); // 记录与显示同流：进模型的批次才落日志，暂停即同停
-    if (m_follow->isChecked()) m_table->scrollToBottom();
+    // 文本显示与表格同流：进模型的批次才进文本历史。到达时按当前过滤条件
+    // 逐条判定（TrafficFilter::accepts 与表格代理同源），文本行按当前显示格式
+    // 固化后不再重渲染——控制台语义，格式切换只影响新行。
+    const auto format = currentDisplayFormat();
+    QList<Traffic::Message> accepted;
+    accepted.reserve(batch.size());
+    for (const auto &message : batch)
+        if (TrafficFilter::accepts(message, m_textOptions, format)) accepted.append(message);
+    m_text->appendMessages(accepted, format);
+    if (m_follow->isChecked()) {
+        m_table->scrollToBottom();
+        m_text->scrollToBottom();
+    }
 }
 
 void TrafficPanel::updateTextBudget()
@@ -784,6 +838,7 @@ void TrafficPanel::loadPreferences()
     m_sampleAction->setChecked(m_preferences->value("traffic/sample", true).toBool());
     m_wholeAction->setChecked(m_preferences->value("traffic/whole", false).toBool());
     m_wrapAction->setChecked(m_preferences->value("traffic/wrap", false).toBool());
+    m_textModeAction->setChecked(m_preferences->value("traffic/textMode", true).toBool());
     m_follow->setChecked(m_preferences->value("traffic/follow", true).toBool());
     m_portAButton->setChecked(m_preferences->value("traffic/portA", true).toBool());
     m_portBButton->setChecked(m_preferences->value("traffic/portB", true).toBool());
@@ -813,6 +868,7 @@ void TrafficPanel::savePreferences()
     m_preferences->setValue("traffic/sample", m_sampleAction->isChecked());
     m_preferences->setValue("traffic/whole", m_wholeAction->isChecked());
     m_preferences->setValue("traffic/wrap", m_wrapAction->isChecked());
+    m_preferences->setValue("traffic/textMode", m_textModeAction->isChecked());
     m_preferences->setValue("traffic/follow", m_follow->isChecked());
     m_preferences->setValue("traffic/portA", m_portAButton->isChecked());
     m_preferences->setValue("traffic/portB", m_portBButton->isChecked());
@@ -892,6 +948,8 @@ void TrafficPanel::updateFilter()
     for (const auto *action : m_lengthMenu->actions())
         if (action->isChecked()) options.minBytes = action->data().toInt();
     m_filter->setOptions(options);
+    // 文本视图的到达时过滤用同一份条件的快照；写入点只有这里。
+    m_textOptions = options;
     updateSummary();
     savePreferences(); // 过滤开关的汇聚点：任一开关变化即落盘
 }
@@ -899,7 +957,12 @@ void TrafficPanel::updateFilter()
 void TrafficPanel::updateSummary()
 {
     const int count = m_model->rowCount();
-    m_stack->setCurrentIndex(count == 0 ? 1 : 0);
+    // 空态优先：有数据后按"文本显示模式"决定当前页，表格与文本是两种并存的读法。
+    if (count == 0)
+        m_stack->setCurrentWidget(m_empty);
+    else
+        m_stack->setCurrentWidget(m_textModeAction->isChecked() ? static_cast<QWidget *>(m_text)
+                                                                : static_cast<QWidget *>(m_table));
     // 空态提示由表格区的空态文案承担；顶栏标记只提醒示例数据不计入统计。
     const bool sampleVisible = m_sampleAction->isChecked();
     // 文案没变就不 setText：QLabel::setText 每次都重算尺寸并请求重绘，

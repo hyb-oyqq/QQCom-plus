@@ -5,6 +5,7 @@
 #include "ui/panels/sending/sendpanel.h"
 #include "ui/panels/traffic/trafficpanel.h"
 #include "ui/panels/traffic/trafficlogview.h"
+#include "ui/panels/traffic/traffictextview.h"
 #include "discovery/portdiscoveryservice.h"
 #include "persistence/preferencesstore.h"
 
@@ -22,6 +23,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -29,6 +31,7 @@
 #include <QStyleOptionComboBox>
 #include <QStyleOptionSpinBox>
 #include <QTabWidget>
+#include <QTextBlock>
 #include <QToolButton>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -969,6 +972,9 @@ private slots:
         window.resize(1280, 720);
         window.show();
         QTest::qWait(50);
+        // 文本显示模式默认开启，表格被收进堆栈；本用例验证表格列的可见性，先切回表格。
+        if (auto *textModeAction = window.findChild<QAction *>(QStringLiteral("textMode")))
+            textModeAction->setChecked(false);
         auto *a = window.findChild<PortSelectorWidget *>("endpointA");
         auto *b = window.findChild<PortSelectorWidget *>("endpointB");
         auto *traffic = window.findChild<TrafficLogView *>("trafficTable");
@@ -1526,6 +1532,95 @@ private slots:
         warning.direction = Traffic::Direction::Warning;
         QVERIFY(!warning.isData());
         QCOMPARE(Traffic::directionName(warning.direction), QStringLiteral("警告"));
+    }
+
+    // 文本显示模式的三条底线：高速追加后跟随钉底；模型触顶淘汰后文本历史原样保留；
+    // 停止跟随滚回顶部，第 1 条仍可回滚显示——这正是 JCom 34 万行不卡的行为基线。
+    void textViewFollowsRetainsAndRollsBack()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        auto *textModeAction = window.findChild<QAction *>(QStringLiteral("textMode"));
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *follow = window.findChild<QPushButton *>(QStringLiteral("followTraffic"));
+        QVERIFY(textModeAction && text && model && follow);
+        textModeAction->setChecked(true);
+
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        // 25000 条 8 字节小帧：越过模型 20000 条的条数上限，文本历史必须原样保留。
+        const int total = 25000;
+        for (int batchStart = 0; batchStart < total; batchStart += 500) {
+            QList<Traffic::Message> batch;
+            batch.reserve(500);
+            for (int i = 0; i < 500; ++i) {
+                Traffic::Message message;
+                message.id = batchStart + i + 1;
+                message.timestamp = QDateTime::currentDateTime();
+                message.direction = (batchStart + i) % 2 ? Traffic::Direction::Transmit
+                                                         : Traffic::Direction::Receive;
+                message.source.endpointId = endpointId;
+                message.source.endpointIndex = 0;
+                message.source.endpointKind = PortDraft::Serial;
+                message.raw = QByteArray::fromHex("0102030405060708");
+                message.rawLength = message.raw.size();
+                batch.append(message);
+            }
+            window.findChild<TrafficPanel *>()->appendMessages(batch);
+            // 等攒批逐批落地：同步连灌会让 50 批合成一个 25000 条巨批，
+            // 而"先裁后插"裁不到单批自身——单批不超预算是调用方的既有约定。
+            QTest::qWait(20);
+        }
+        // 攒批是 16ms 异步的；空表上 record(-1) 是未定义行为，先等首条落地。
+        QTRY_VERIFY(model->rowCount() > 0);
+        QTRY_COMPARE(model->record(model->rowCount() - 1).id, quint64(total));
+
+        // 跟随开启：追加后钉在底部。
+        QVERIFY(follow->isChecked());
+        QCOMPARE(text->verticalScrollBar()->value(), text->verticalScrollBar()->maximum());
+
+        // 模型触顶淘汰，文本历史一行不少：这是"文本模式能看完整历史"的判据。
+        QVERIFY2(model->rowCount() <= 20000, qPrintable(QStringLiteral("模型应已淘汰：当前 %1 条").arg(model->rowCount())));
+        QCOMPARE(text->lineCount(), total);
+        QCOMPARE(text->document()->blockCount(), total);
+
+        // 向上翻阅自动解除跟随；滚回顶部，第 1 条仍然在第一行。
+        text->verticalScrollBar()->setValue(text->verticalScrollBar()->maximum() - 100);
+        QVERIFY(!follow->isChecked());
+        text->verticalScrollBar()->setValue(0);
+        QCOMPARE(text->verticalScrollBar()->value(), 0);
+        const QString firstLine = text->document()->firstBlock().text();
+        QVERIFY2(firstLine.contains(QStringLiteral("01 02 03 04 05 06 07 08")),
+                 qPrintable(QStringLiteral("第 1 行应是首条记录：") + firstLine));
+        QVERIFY(firstLine.trimmed().startsWith(QStringLiteral("1 ")));
+
+        // 重新跟随：一键回底，继续钉住最新记录。
+        follow->setChecked(true);
+        QCOMPARE(text->verticalScrollBar()->value(), text->verticalScrollBar()->maximum());
+
+        // 清空是会话边界：行号从 1 重新计数。
+        window.findChild<QPushButton *>("clearTraffic")->click();
+        QCOMPARE(text->lineCount(), 1); // 空文档保底的一个空块
+        QList<Traffic::Message> afterClear;
+        for (int i = 0; i < 3; ++i) {
+            Traffic::Message message;
+            message.id = i + 1;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = Traffic::Direction::Receive;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray::fromHex("AA");
+            message.rawLength = message.raw.size();
+            afterClear.append(message);
+        }
+        window.findChild<TrafficPanel *>()->appendMessages(afterClear);
+        QTRY_COMPARE(text->lineCount(), 3); // 首行复用空文档保底块，3 条即 3 块
+        QVERIFY(text->document()->firstBlock().text().trimmed().startsWith(QStringLiteral("1 ")));
     }
 };
 

@@ -22,6 +22,7 @@ class QPushButton;
 class QShowEvent;
 class QStackedWidget;
 class TrafficLogView;
+class TrafficTextView;
 class QTimer;
 
 // 消息是 domain 的值类型（Traffic::Message）：原始字节、时间戳、来源、长度都是事实，
@@ -99,6 +100,9 @@ public:
     void setOptions(const Options &options);
     // 搜索同时匹配当前显示格式的渲染文本，切换格式后仍能按所见内容过滤。
     void setDisplayFormat(PayloadCodec::Format format);
+    // 过滤判定的唯一实现：代理逐行用它；文本显示在消息到达时也用它，
+    // 两处看到的"此刻可见内容"才一致。Options 与格式都由调用方持有。
+    static bool accepts(const Traffic::Message &record, const Options &options, PayloadCodec::Format format);
 protected:
     bool filterAcceptsRow(int row, const QModelIndex &parent) const override;
 private:
@@ -152,6 +156,8 @@ private:
     TrafficModel *m_model = nullptr;
     TrafficFilter *m_filter = nullptr;
     TrafficLogView *m_table = nullptr;
+    TrafficTextView *m_text = nullptr; // 文本框刷新视图：JCom 式逐行追加，与表格并存可切换
+    QLabel *m_empty = nullptr;
     QComboBox *m_format;
     QLineEdit *m_search;
     // A/B 端点开关直接放在顶栏选项栏里，快捷切换显示范围；其余显示选项在"显示设置"菜单。
@@ -162,6 +168,7 @@ private:
     QAction *m_sampleAction; // 示例数据独立开关，避免与真实收发混看
     QAction *m_wholeAction;  // 只看按边界完整的记录，滤掉字节流片段
     QAction *m_wrapAction;   // 自动换行：数据内容列按列宽折行的查看模式
+    QAction *m_textModeAction; // 文本显示模式：监视区在"分栏表格"与"文本框"之间切换
     QAction *m_recordAction; // 记录到文件：按当前显示格式持续写日志
     QMenu *m_lengthMenu;     // 最小字节数档位；勾选状态即当前过滤条件
     QSet<QUuid> m_visibleEndpoints;
@@ -179,6 +186,9 @@ private:
     // 攒批缓冲：appendMessages 先入缓冲，16ms 一拍整批入模。
     QList<Traffic::Message> m_pending;
     QTimer *m_flushTimer = nullptr;
+    // 文本视图按到达时的过滤条件收流：与 m_filter 同一份 Options 的副本，
+    // updateFilter 是唯一写入点。文本行按到达时格式固化，没有"重算全部行"这回事。
+    TrafficFilter::Options m_textOptions;
     PreferencesStore *m_preferences = nullptr;
     bool m_loading = false; // 加载偏好期间联动触发的保存要抑制，否则半成品状态会覆盖已存值
     QFile *m_logFile = nullptr;   // 打开期间持续追加；关闭开关或析构时收口
