@@ -11,6 +11,7 @@
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDir>
@@ -1346,26 +1347,36 @@ private slots:
         message.raw = QByteArray("OK");
         message.rawLength = 2;
 
-        // 关时间戳/方向，开长度与 HEX 对照：长度用真实字节数，HEX 是原始字节对照。
+        // 关时间戳/方向，开长度与 HEX 对照：长度用真实字节数；
+        // HEX 独占一行（不是接在数据行尾），便于上下比对字节。
         window.findChild<QAction *>(QStringLiteral("showTimestamp"))->setChecked(false);
         window.findChild<QAction *>(QStringLiteral("showDirection"))->setChecked(false);
         window.findChild<QAction *>(QStringLiteral("showLength"))->setChecked(true);
         window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(true);
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 1);
-        QCOMPARE(text->document()->lastBlock().text(),
-                 QStringLiteral("      1 [2 B] OK  HEX 4F 4B"));
+        QCOMPARE(text->document()->blockCount(), 2); // 数据行 + HEX 对照行
+        QCOMPARE(text->document()->firstBlock().text(), QStringLiteral("      1 [2 B] OK"));
+        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("4F 4B"));
 
-        // 纯数据模式：一切前缀与附注消失，只剩数据本身。
-        window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(true);
+        // 行号是独立开关：关掉后只剩长度与数据。
+        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("showLineNumber"))->setChecked(false);
         message.id = 2;
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 2);
+        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("[2 B] OK"));
+
+        // 纯数据模式：一切前缀与附注消失，只剩数据本身。
+        window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(true);
+        message.id = 3;
+        panel->appendMessages({message});
+        QTRY_COMPARE(model->rowCount(), 3);
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("OK"));
         // 还原默认开关，不把本用例的状态带给后续用例。
         window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("showLineNumber"))->setChecked(true);
         window.findChild<QAction *>(QStringLiteral("showLength"))->setChecked(false);
-        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(false);
     }
 
     // 错误/警告日志的独立开关：关闭后事件不进显示、数据不受影响；开启后恢复。
@@ -1460,6 +1471,58 @@ private slots:
                 foundRed = fragment.charFormat().foreground().color() == QColor(0xC6, 0x28, 0x28);
         }
         QVERIFY(foundRed);
+    }
+
+    // 接收组帧是端点配置：模式联动显隐、结束符可校验、开关随草稿下发到运行时。
+    void receiveFramingControlsFeedTheDraft()
+    {
+        // 独立选择器即可：组帧是端点配置，不依赖主窗口，也避开串口扫描的时序。
+        PortSelectorWidget selectorWidget;
+        selectorWidget.show();
+        auto *selector = &selectorWidget;
+        // 先给串口选个设备：未选设备本身就不合法，会盖住组帧的校验结果。
+        selector->setSerialPorts({{"COM17", "USB Serial", {}, "COM17"}});
+        selector->findChild<QComboBox *>(QStringLiteral("serial.port"))
+            ->setCurrentIndex(selector->findChild<QComboBox *>(QStringLiteral("serial.port"))
+                                  ->findData(QStringLiteral("COM17")));
+        auto *advanced = selector->findChild<QToolButton *>(QStringLiteral("advancedToggle"));
+        QVERIFY(advanced);
+        advanced->click(); // 展开高级参数：组帧行挂在类型专属参数之下
+        QTest::qWait(20);
+        auto *mode = selector->findChild<QComboBox *>(QStringLiteral("framingMode"));
+        auto *delimiter = selector->findChild<QLineEdit *>(QStringLiteral("framingDelimiter"));
+        auto *idle = selector->findChild<QSpinBox *>(QStringLiteral("framingIdle"));
+        auto *logHints = selector->findChild<QCheckBox *>(QStringLiteral("framingLogHints"));
+        QVERIFY(mode && delimiter && idle && logHints);
+        const auto valid = [selector](const QString &stage) {
+            QVERIFY2(selector->hasValidConfiguration(),
+                qPrintable(stage + QStringLiteral("：") + selector->validationError()));
+        };
+        // 默认仅兜底输出：不需要结束符，输入因此不出现。
+        QVERIFY(!delimiter->isVisible());
+        valid(QStringLiteral("默认模式"));
+
+        // 结束符模式：结束符必填（HEX），缺失即校验失败。
+        mode->setCurrentIndex(mode->findData(int(ReceiveFraming::Delimiter)));
+        QTest::qWait(20);
+        QVERIFY(delimiter->isVisible());
+        QVERIFY2(!selector->hasValidConfiguration(), qPrintable(selector->validationError()));
+        delimiter->setText(QStringLiteral("0D 0A"));
+        valid(QStringLiteral("填好结束符"));
+        idle->setValue(250);
+        logHints->setChecked(true);
+        const auto draft = selector->draft();
+        QCOMPARE(draft.framing.mode, ReceiveFraming::Delimiter);
+        QCOMPARE(draft.framing.delimiter, QByteArray::fromHex("0D0A"));
+        QCOMPARE(draft.framing.idleTimeoutMs, 250);
+        QVERIFY(draft.framing.logHints);
+
+        // 长度前缀模式：结束符输入隐去，不再要求结束符。
+        mode->setCurrentIndex(mode->findData(int(ReceiveFraming::LengthPrefixU16LE)));
+        QTest::qWait(20);
+        QVERIFY(!delimiter->isVisible());
+        QVERIFY(selector->hasValidConfiguration());
+        QCOMPARE(selector->draft().framing.mode, ReceiveFraming::LengthPrefixU16LE);
     }
 
     // 自动换行开关：勾选后按视口宽度折行（横向滚动随之失效），取消后恢复水平滚动。

@@ -190,18 +190,19 @@ void TrafficTextView::appendMessages(
                 }
                 if (atMessageStart) {
                     atMessageStart = false;
-                    // 纯数据模式省略一切前缀；其余模式行号恒在，时间/长度按开关拼接。
-                    // 行号/时间/长度同为元色，拼成一段一次插入：插入次数决定追加成本，
+                    // 纯数据模式省略一切前缀；其余模式行号/时间/长度各自独立开关、
+                    // 同为元色，拼成一段一次插入：插入次数决定追加成本，
                     // 每条消息多一次文档插入都会直接吃掉刷新预算。
                     if (!options.pure) {
-                        QString metaPrefix =
-                            QStringLiteral("%1 ")
+                        QString metaPrefix;
+                        if (options.number)
+                            metaPrefix += QStringLiteral("%1 ")
                                 .arg(QString::number(m_nextNumber).rightJustified(NumberColumns));
                         if (options.timestamp)
                             metaPrefix += r.timestamp.toString(QStringLiteral("HH:mm:ss.zzz "));
                         if (options.length)
                             metaPrefix += QStringLiteral("[%1 B] ").arg(r.displayBytes());
-                        if (metaPrefix.size() > NumberColumns + 1) {
+                        if (!metaPrefix.isEmpty()) {
                             cursor.setCharFormat(metaFormat);
                             cursor.insertText(metaPrefix);
                         }
@@ -228,12 +229,15 @@ void TrafficTextView::appendMessages(
                 start = nl + 1;
             }
         }
-        // HEX 对照附注：非 HEX 显示格式且开关开启时，行尾以元色补前 64 字节的 HEX。
+        // HEX 对照另起一行：与数据行头尾相接会把两条信息挤在一行，
+        // 长报文下根本看不到对照；独占一行才便于上下比对字节。
         if (!options.pure && options.hex && format != PayloadCodec::Format::Hex && !r.raw.isEmpty()) {
             auto hex = QString::fromLatin1(r.raw.left(HexTailBytes).toHex(' ')).toUpper();
             if (r.raw.size() > HexTailBytes) hex += tr(" …");
+            if (needSeparator) needSeparator = false; // 载荷以换行收尾：续块此时是空的
+            else cursor.insertText(QString(QChar::ParagraphSeparator));
             cursor.setCharFormat(metaFormat);
-            cursor.insertText(QStringLiteral("  HEX ") + hex);
+            cursor.insertText(hex);
         }
         // 行号按消息计，一条多行报文共用一个行号；空载荷也保留前缀行。
         ++m_nextNumber;

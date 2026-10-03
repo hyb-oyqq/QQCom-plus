@@ -2,8 +2,10 @@
 #include "domain/networkaddress.h"
 #include "ui/common/combometrics.h"
 #include "ui/common/endpointformat.h"
+#include "ui/common/payloadcodec.h"
 #include "ui/common/tintedicon.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QAbstractItemView>
 #include <QColor>
@@ -228,11 +230,12 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     // Advanced row: opens in place under this endpoint, never moves the data area.
     m_advancedPanel = new QWidget;
     m_advancedPanel->setObjectName("advancedPanel");
-    auto *advancedLayout = new QHBoxLayout(m_advancedPanel);
+    // 纵向：上排是各类型专属参数，下排是与类型无关的接收组帧。
+    auto *advancedLayout = new QVBoxLayout(m_advancedPanel);
     advancedLayout->setContentsMargins(34, 0, 0, 2);
-    advancedLayout->setSpacing(8);
+    advancedLayout->setSpacing(4);
     m_advancedPages = new QStackedWidget;
-    advancedLayout->addWidget(m_advancedPages, 1);
+    advancedLayout->addWidget(m_advancedPages);
 
     auto *serialMore = makePage(m_advancedPages);
     addInlineLabel(serialMore, tr("数据位"), addChoice("serial.bits", {"5", "6", "7", "8"}));
@@ -259,6 +262,10 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     udpHint->setObjectName("Muted");
     udpMore->addWidget(udpHint);
     udpMore->addStretch();
+
+    // 接收组帧与端点类型无关（数据报端点不经过它），因此作为通用行挂在
+    // 类型专属页之下：串口/TCP 客户端用它把字节流切成协议帧。
+    advancedLayout->addWidget(buildFramingRow());
 
     layout->addWidget(m_advancedPanel);
     m_advancedPanel->hide();
@@ -488,11 +495,116 @@ QSpinBox *PortSelectorWidget::addNumber(const QString &key, int minimum, int max
     return field;
 }
 
+QWidget *PortSelectorWidget::buildFramingRow()
+{
+    auto *row = new QWidget;
+    auto *layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+
+    auto *label = new QLabel(tr("接收组帧"));
+    label->setObjectName("Muted");
+    layout->addWidget(label);
+
+    m_framingMode = new QComboBox;
+    m_framingMode->setObjectName(QStringLiteral("framingMode"));
+    m_framingMode->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    m_framingMode->addItem(tr("仅兜底输出"), int(ReceiveFraming::Passthrough));
+    m_framingMode->addItem(tr("结束符拆分"), int(ReceiveFraming::Delimiter));
+    m_framingMode->addItem(tr("长度前缀 u16 小端"), int(ReceiveFraming::LengthPrefixU16LE));
+    layout->addWidget(m_framingMode);
+
+    // 结束符按 HEX 输入（0D 0A / 0D0A 均可）：不可见字节必须能被精确表达。
+    m_framingDelimiter = new QLineEdit;
+    m_framingDelimiter->setObjectName(QStringLiteral("framingDelimiter"));
+    m_framingDelimiter->setPlaceholderText(tr("结束符 HEX，如 0D 0A"));
+    m_framingDelimiter->setMaximumWidth(170);
+    layout->addWidget(m_framingDelimiter);
+
+    // 用 PortSpinBox（sizeHint 覆盖量程两端）：写死宽度会让最大值显示不全，
+    // tests/ui 的 portControlsShowTheirOwnContent 就是这条底线。
+    auto numericLocale = QLocale::c();
+    numericLocale.setNumberOptions(QLocale::RejectGroupSeparator);
+    m_framingIdle = new PortSpinBox;
+    m_framingIdle->setObjectName(QStringLiteral("framingIdle"));
+    m_framingIdle->setRange(10, 60000);
+    m_framingIdle->setSuffix(tr(" ms"));
+    m_framingIdle->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    m_framingIdle->setLocale(numericLocale);
+    m_framingIdle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    layout->addWidget(m_framingIdle);
+
+    m_framingThreshold = new PortSpinBox;
+    m_framingThreshold->setObjectName(QStringLiteral("framingThreshold"));
+    m_framingThreshold->setRange(16, 65536);
+    m_framingThreshold->setSuffix(tr(" 字节"));
+    m_framingThreshold->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    m_framingThreshold->setLocale(numericLocale);
+    m_framingThreshold->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    layout->addWidget(m_framingThreshold);
+
+    m_framingKeepBoundary = new QCheckBox(tr("保留结束符"));
+    m_framingKeepBoundary->setObjectName(QStringLiteral("framingKeepBoundary"));
+    layout->addWidget(m_framingKeepBoundary);
+
+    m_framingLogHints = new QCheckBox(tr("记录组帧提示日志"));
+    m_framingLogHints->setObjectName(QStringLiteral("framingLogHints"));
+    m_framingLogHints->setToolTip(tr("兜底输出（空闲超时、缓冲阈值、关闭收尾）时发一条警告事件"));
+    layout->addWidget(m_framingLogHints);
+    layout->addStretch();
+
+    const auto changed = [this] { notifyChange(); };
+    connect(m_framingMode, &QComboBox::currentIndexChanged, this, [this] {
+        syncFramingControls();
+        notifyChange();
+    });
+    connect(m_framingDelimiter, &QLineEdit::textChanged, this, changed);
+    connect(m_framingIdle, &QSpinBox::valueChanged, this, changed);
+    connect(m_framingThreshold, &QSpinBox::valueChanged, this, changed);
+    connect(m_framingKeepBoundary, &QCheckBox::toggled, this, changed);
+    connect(m_framingLogHints, &QCheckBox::toggled, this, changed);
+    return row;
+}
+
+void PortSelectorWidget::syncFramingControls()
+{
+    const auto mode = ReceiveFraming::Mode(m_framingMode->currentData().toInt());
+    const bool delimiter = mode == ReceiveFraming::Delimiter;
+    const bool length = mode == ReceiveFraming::LengthPrefixU16LE;
+    m_framingDelimiter->setVisible(delimiter);
+    m_framingKeepBoundary->setVisible(delimiter || length);
+    // 同一个开关在两种模式下语义不同：结束符模式下是"保留结束符"，
+    // 长度前缀模式下是"保留长度帧头"。
+    m_framingKeepBoundary->setText(delimiter ? tr("保留结束符") : tr("保留长度帧头"));
+}
+
+void PortSelectorWidget::applyFramingToDraft(PortDraft &draft) const
+{
+    const auto mode = ReceiveFraming::Mode(m_framingMode->currentData().toInt());
+    draft.framing.mode = mode;
+    draft.framing.idleTimeoutMs = m_framingIdle->value();
+    draft.framing.bufferThresholdBytes = m_framingThreshold->value();
+    draft.framing.includeDelimiter = m_framingKeepBoundary->isChecked();
+    draft.framing.includeLengthPrefix = m_framingKeepBoundary->isChecked();
+    draft.framing.logHints = m_framingLogHints->isChecked();
+    // 结束符按 HEX 解析；解析失败时留空（校验会拦住结束符模式），不写半个序列。
+    const auto parsed = PayloadCodec::parse(m_framingDelimiter->text(), PayloadCodec::Format::Hex, {});
+    draft.framing.delimiter = parsed.valid() ? parsed.bytes : QByteArray();
+}
+
 void PortSelectorWidget::setDraft(const PortDraft &draft)
 {
     commitAddressHistory();
     m_loading = true;
     m_draft = draft;
+    m_framingMode->setCurrentIndex(m_framingMode->findData(int(draft.framing.mode)));
+    m_framingDelimiter->setText(QString::fromLatin1(draft.framing.delimiter.toHex(' ').toUpper()));
+    m_framingIdle->setValue(draft.framing.idleTimeoutMs);
+    m_framingThreshold->setValue(draft.framing.bufferThresholdBytes);
+    m_framingKeepBoundary->setChecked(draft.framing.mode == ReceiveFraming::Delimiter
+        ? draft.framing.includeDelimiter : draft.framing.includeLengthPrefix);
+    m_framingLogHints->setChecked(draft.framing.logHints);
+    syncFramingControls();
     // 通过 itemData 定位类型，草稿里的 kind 与下拉框顺序解耦；越界值回落串口。
     const int typeIndex = m_type->findData(draft.kind);
     m_type->setCurrentIndex(typeIndex >= 0 ? typeIndex : 0);
@@ -531,6 +643,7 @@ PortDraft PortSelectorWidget::draft() const
 {
     auto result = m_draft;
     result.kind = m_type->currentData().toInt();
+    applyFramingToDraft(result);
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it) {
         if (it.key() == "serial.port")
             result.values.insert(it.key(), m_serialPorts->currentData().toString());
@@ -587,6 +700,13 @@ void PortSelectorWidget::updateValidation()
         requireText("udp.target", tr("目标地址：请输入有效的 IPv4 地址；仅接收时可留空"), true);
         break;
     }
+    // 组帧校验与类型无关：结束符模式必须给出可解析且非空的结束符。
+    if (ReceiveFraming::Mode(m_framingMode->currentData().toInt()) == ReceiveFraming::Delimiter) {
+        const auto parsed = PayloadCodec::parse(m_framingDelimiter->text(),
+            PayloadCodec::Format::Hex, {});
+        if (!parsed.valid() || parsed.bytes.isEmpty())
+            errors.insert(m_framingDelimiter, tr("结束符：请输入 HEX 字节，如 0D 0A"));
+    }
     const QString prefix = QStringList{"serial.", "client.", "server.", "udp."}.value(m_type->currentData().toInt());
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it) {
         const auto *spin = qobject_cast<QSpinBox *>(it.value());
@@ -597,8 +717,9 @@ void PortSelectorWidget::updateValidation()
         }
     }
     QStringList messages;
-    for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it) {
-        auto *field = it.value();
+    // 红框、提示与校验文案三处同源；组帧控件不在 m_fields 里（它是草稿上的值类型
+    // 而不是 values 项），因此单独走同一段处理，错误才不会只显示不生效。
+    const auto apply = [&errors, &messages](QWidget *field, const QString &tooltip) {
         const bool invalid = errors.contains(field);
         if (field->property("invalid").toBool() != invalid) {
             field->setProperty("invalid", invalid);
@@ -606,10 +727,12 @@ void PortSelectorWidget::updateValidation()
             field->style()->polish(field);
             field->update();
         }
-        field->setToolTip(invalid ? errors.value(field)
-            : field == m_serialPorts ? m_serialPorts->currentText() : QString());
+        field->setToolTip(invalid ? errors.value(field) : tooltip);
         if (invalid) messages.append(errors.value(field));
-    }
+    };
+    for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it)
+        apply(it.value(), it.value() == m_serialPorts ? m_serialPorts->currentText() : QString());
+    apply(m_framingDelimiter, QString());
     m_validationError = messages.join('\n');
     // 动作按钮：配置有效才可打开；已打开时保持可点（用于关闭/取消）。
     m_action->setEnabled(m_open || m_validationError.isEmpty());

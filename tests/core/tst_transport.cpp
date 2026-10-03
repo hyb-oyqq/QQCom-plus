@@ -2,6 +2,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include "app/endpointruntime.h"
+#include "app/receiveframer.h"
 #include "transport/serialtransport.h"
 #include "transport/tcpclienttransport.h"
 #include "transport/tcpservertransport.h"
@@ -61,6 +62,115 @@ class TransportTest : public QObject
     Q_OBJECT
 
 private slots:
+    // 接收组帧器：纯逻辑，不需要端口与事件循环——把字节流片段喂进去，
+    // 看它按定界/长度/兜底三种规则吐出什么。
+    void framerSplitsOnDelimiter()
+    {
+        ReceiveFraming config;
+        config.mode = ReceiveFraming::Delimiter;
+        config.delimiter = QByteArray::fromHex("0D0A");
+        config.bufferThresholdBytes = 1000;
+        ReceiveFramer framer(config);
+
+        // 半帧先到：缓冲里没有结束符，一条都不该输出。
+        QVERIFY(framer.feed(QByteArray("abc")).isEmpty());
+        QCOMPARE(framer.pendingBytes(), 3);
+        // 结束符补齐：出一帧，默认剥离结束符。
+        auto frames = framer.feed(QByteArray("\r\n"));
+        QCOMPARE(frames.size(), 1);
+        QCOMPARE(frames.at(0).bytes, QByteArray("abc"));
+        QVERIFY(frames.at(0).complete);
+        QCOMPARE(framer.pendingBytes(), 0);
+
+        // 一次收到两帧（粘包）+ 下一帧的前半段：两帧即时输出，半个留下。
+        frames = framer.feed(QByteArray("one\r\ntwo\r\nthr"));
+        QCOMPARE(frames.size(), 2);
+        QCOMPARE(frames.at(0).bytes, QByteArray("one"));
+        QCOMPARE(frames.at(1).bytes, QByteArray("two"));
+        QCOMPARE(framer.pendingBytes(), 3);
+    }
+
+    void framerFollowsLengthPrefix()
+    {
+        ReceiveFraming config;
+        config.mode = ReceiveFraming::LengthPrefixU16LE;
+        config.includeLengthPrefix = true; // 默认保留帧头
+        config.bufferThresholdBytes = 1000;
+        ReceiveFramer framer(config);
+
+        // 帧头说"后面还有 2 字节"，但一个也没到：继续等。
+        QVERIFY(framer.feed(QByteArray::fromHex("0200")).isEmpty());
+        QVERIFY(framer.feed(QByteArray("xy")).size() == 1);
+        // 半帧：帧头说 3 字节，只到了 1 字节 → 不出帧。
+        QVERIFY(framer.feed(QByteArray::fromHex("0300")).isEmpty());
+        QVERIFY(framer.feed(QByteArray("a")).isEmpty());
+        auto frames = framer.feed(QByteArray("bc"));
+        QCOMPARE(frames.size(), 1);
+        QCOMPARE(frames.at(0).bytes, QByteArray::fromHex("0300616263")); // 含帧头
+        QVERIFY(frames.at(0).complete);
+
+        // 跨包拆分：帧头与 payload 分两次到，收齐才出帧。
+        frames = framer.feed(QByteArray::fromHex("0100")); // payload 1 字节
+        QVERIFY(frames.isEmpty());
+        frames = framer.feed(QByteArray("Z"));
+        QCOMPARE(frames.size(), 1);
+        QCOMPARE(frames.at(0).bytes, QByteArray::fromHex("01005A"));
+
+        // 长度 0 的空帧也要收：不收就会永远等第 3 字节。
+        // 花括号构造：写成 ReceiveFramer x(ReceiveFraming()) 会被解析成函数声明。
+        ReceiveFramer stripped{ReceiveFraming()};
+        ReceiveFraming noPrefix = config;
+        noPrefix.includeLengthPrefix = false;
+        stripped.setConfig(noPrefix);
+        frames = stripped.feed(QByteArray::fromHex("0000"));
+        QCOMPARE(frames.size(), 1);
+        QCOMPARE(frames.at(0).bytes, QByteArray()); // 剥离帧头后为空帧
+        QCOMPARE(stripped.pendingBytes(), 0);
+    }
+
+    void framerFallbacksBoundBuffer()
+    {
+        // 缓冲阈值：慢速/无定界协议不能无限滞留，也不能无界增长。
+        ReceiveFraming config;
+        config.mode = ReceiveFraming::Delimiter;
+        config.delimiter = QByteArray::fromHex("0D0A");
+        config.bufferThresholdBytes = 8;
+        ReceiveFramer framer(config);
+
+        auto frames = framer.feed(QByteArray(8, 'x'));
+        QCOMPARE(frames.size(), 1);
+        QCOMPARE(frames.at(0).bytes, QByteArray(8, 'x'));
+        QVERIFY(!frames.at(0).complete); // 兜底切出来的仍是流片段
+        QCOMPARE(frames.at(0).trigger, ReceiveFramer::Threshold);
+        QVERIFY(!frames.at(0).hint.isEmpty());
+        QCOMPARE(framer.pendingBytes(), 0);
+
+        // 空闲超时：flush 把残留输出，空缓冲则什么也不发。
+        framer.feed(QByteArray("tail"));
+        QCOMPARE(framer.pendingBytes(), 4);
+        auto idle = framer.flush(ReceiveFramer::Idle);
+        QCOMPARE(idle.size(), 1);
+        QCOMPARE(idle.at(0).bytes, QByteArray("tail"));
+        QCOMPARE(idle.at(0).trigger, ReceiveFramer::Idle);
+        QVERIFY(framer.flush(ReceiveFramer::Idle).isEmpty());
+
+        // 直通模式：收到什么出什么，不做任何拆分。
+        ReceiveFramer passthrough{ReceiveFraming()};
+        auto out = passthrough.feed(QByteArray("a\r\nb"));
+        QCOMPARE(out.size(), 1);
+        QCOMPARE(out.at(0).bytes, QByteArray("a\r\nb"));
+        QVERIFY(out.at(0).complete);
+
+        // 配置不合法（结束符模式却没有结束符）时退回直通，绝不把数据吞在缓冲里。
+        ReceiveFraming broken;
+        broken.mode = ReceiveFraming::Delimiter;
+        ReceiveFramer fallback(broken);
+        out = fallback.feed(QByteArray("kept"));
+        QCOMPARE(out.size(), 1);
+        QCOMPARE(out.at(0).bytes, QByteArray("kept"));
+        QCOMPARE(fallback.pendingBytes(), 0);
+    }
+
     void factoryCreatesEveryKind()
     {
         for (int kind = PortDraft::Serial; kind <= PortDraft::Udp; ++kind) {

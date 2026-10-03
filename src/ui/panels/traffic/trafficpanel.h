@@ -105,6 +105,7 @@ private:
     QAction *m_rxAction;
     QAction *m_txAction;
     // 行内容开关：全部在到达时生效（控制台语义），纯数据模式下被忽略。
+    QAction *m_numberAction;    // 行号（会话内绝对计数）
     QAction *m_timestampAction;
     QAction *m_directionAction;
     QAction *m_lengthAction;  // 数据长度 [N B]

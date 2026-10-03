@@ -29,10 +29,11 @@ public:
     // pure 为真时其余前缀选项被忽略——只显示数据本身。
     struct DisplayOptions
     {
+        bool number = true;    // 行号（会话内绝对计数）
         bool timestamp = true; // 行首 HH:mm:ss.zzz
         bool direction = true; // RX/TX 方向标记（含手动/定时等来源复合标记）
         bool length = false;   // [N B] 真实字节数（不受预览截断影响）
-        bool hex = false;      // 行尾附 HEX 对照（HEX 格式下自然省略）
+        bool hex = false;      // 数据后另起一行显示 HEX 对照（HEX 格式下无意义，自动省略）
         bool pure = false;     // 纯数据视图：无行号、时间、方向等一切前缀
     };
 

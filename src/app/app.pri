@@ -2,5 +2,10 @@
 # 对象归属 I/O 线程，GUI 只见队列信号。
 INCLUDEPATH += $$PWD/.. $$PWD/../..
 
-SOURCES += $$PWD/endpointruntime.cpp
-HEADERS += $$PWD/endpointruntime.h
+SOURCES += \
+    $$PWD/endpointruntime.cpp \
+    $$PWD/receiveframer.cpp
+
+HEADERS += \
+    $$PWD/endpointruntime.h \
+    $$PWD/receiveframer.h

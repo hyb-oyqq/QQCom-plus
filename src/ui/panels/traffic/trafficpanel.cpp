@@ -231,16 +231,18 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         connect(action, &QAction::toggled, this, &TrafficPanel::updateFilter);
         return action;
     };
+    m_numberAction = rowToggle("showLineNumber", tr("显示行号"), true);
     m_timestampAction = rowToggle("showTimestamp", tr("显示时间戳"), true);
     m_directionAction = rowToggle("showDirection", tr("显示数据方向"), true);
     m_lengthAction = rowToggle("showLength", tr("显示数据长度"), false);
     m_hexAction = rowToggle("showHex", tr("同时显示 HEX"), false);
-    m_hexAction->setToolTip(tr("行尾附 HEX 对照（HEX 显示格式下自动省略）"));
+    m_hexAction->setToolTip(tr("数据行之后另起一行显示 HEX 对照（HEX 显示格式下自动省略）"));
     m_pureAction = rowToggle("pureData", tr("纯数据模式"), false);
     m_pureAction->setToolTip(tr("移除行号、时间、方向等一切前缀，只显示数据本身"));
     // 纯数据开启时，行前缀开关全部失效置灰，状态一目了然。
     connect(m_pureAction, &QAction::toggled, this, [this](bool pure) {
-        for (auto *action : {m_timestampAction, m_directionAction, m_lengthAction, m_hexAction})
+        for (auto *action : {m_numberAction, m_timestampAction, m_directionAction, m_lengthAction,
+                             m_hexAction})
             action->setEnabled(!pure);
     });
     m_wrapAction = rowToggle("wrapTraffic", tr("自动换行"), false);
@@ -502,6 +504,7 @@ void TrafficPanel::loadPreferences()
     m_rxAction->setChecked(m_preferences->value("traffic/rx", true).toBool());
     m_txAction->setChecked(m_preferences->value("traffic/tx", true).toBool());
     m_errorAction->setChecked(m_preferences->value("traffic/errors", true).toBool());
+    m_numberAction->setChecked(m_preferences->value("traffic/number", true).toBool());
     m_timestampAction->setChecked(m_preferences->value("traffic/timestamp", true).toBool());
     m_directionAction->setChecked(m_preferences->value("traffic/direction", true).toBool());
     m_lengthAction->setChecked(m_preferences->value("traffic/length", false).toBool());
@@ -529,6 +532,7 @@ void TrafficPanel::savePreferences()
     m_preferences->setValue("traffic/rx", m_rxAction->isChecked());
     m_preferences->setValue("traffic/tx", m_txAction->isChecked());
     m_preferences->setValue("traffic/errors", m_errorAction->isChecked());
+    m_preferences->setValue("traffic/number", m_numberAction->isChecked());
     m_preferences->setValue("traffic/timestamp", m_timestampAction->isChecked());
     m_preferences->setValue("traffic/direction", m_directionAction->isChecked());
     m_preferences->setValue("traffic/length", m_lengthAction->isChecked());
@@ -568,6 +572,7 @@ void TrafficPanel::updateFilter()
     // 文本视图的到达时过滤用这一份条件的快照；写入点只有这里。
     m_textOptions = options;
     // 行内容的开关组合同样在到达时生效：这里重建快照，flushPending 直读。
+    m_displayOptions.number = m_numberAction->isChecked();
     m_displayOptions.timestamp = m_timestampAction->isChecked();
     m_displayOptions.direction = m_directionAction->isChecked();
     m_displayOptions.length = m_lengthAction->isChecked();

@@ -7,6 +7,7 @@
 #include "domain/portdraft.h"
 #include "domain/serialportdescriptor.h"
 
+class QCheckBox;
 class QComboBox;
 class QLineEdit;
 class QLabel;
@@ -55,6 +56,15 @@ private:
     QComboBox *addAddress(const QString &key, bool allowHostName = false);
     QComboBox *addChoice(const QString &key, const QStringList &items, bool editable = false);
     QSpinBox *addNumber(const QString &key, int minimum, int maximum);
+    QWidget *buildFramingRow(); // 接收组帧：与端点类型无关，挂在高级参数区底部
+    void syncFramingControls(); // 模式联动：只有结束符模式需要结束符输入
+    void applyFramingToDraft(PortDraft &draft) const;
+    QComboBox *m_framingMode = nullptr;
+    QLineEdit *m_framingDelimiter = nullptr;
+    QSpinBox *m_framingIdle = nullptr;
+    QSpinBox *m_framingThreshold = nullptr;
+    QCheckBox *m_framingKeepBoundary = nullptr;
+    QCheckBox *m_framingLogHints = nullptr;
     PortDraft m_draft;
     bool m_loading = false;
     bool m_initialised = false;

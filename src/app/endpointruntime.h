@@ -3,6 +3,7 @@
 
 #include <QElapsedTimer>
 #include <QObject>
+#include "app/receiveframer.h"
 #include "domain/portdraft.h"
 #include "domain/trafficmessage.h"
 #include "transport/abstracttransport.h"
@@ -44,10 +45,20 @@ private:
     Traffic::Message makeMessage(int index, Traffic::Direction direction, Traffic::Origin origin,
         const QByteArray &raw, Traffic::Framing framing);
     void publish(Traffic::Message message);
+    // 组帧：字节流端点（串口、TCP 客户端）的片段先进组帧器，输出帧再装配成消息；
+    // 数据报（UDP）自带边界，不经过组帧器。
+    void feedFramer(int index, const Traffic::Source &source, const QByteArray &payload);
+    void publishFrames(int index, const Traffic::Source &source,
+        const QList<ReceiveFramer::Frame> &frames);
+    void flushFramer(int index, ReceiveFramer::Trigger trigger);
+    void restartIdleTimer(int index);
 
     AbstractTransport *m_transports[EndpointCount] = {};
     PortDraft m_drafts[EndpointCount];
     quint64 m_generations[EndpointCount] = {};
+    ReceiveFramer m_framers[EndpointCount];
+    // 空闲输出定时器：在本对象归属 I/O 线程后（openEndpoint 里）创建，线程归属才正确。
+    QTimer *m_idleTimers[EndpointCount] = {};
     quint64 m_nextMessageId = 1;
     QElapsedTimer m_clock; // 构造即启动；速率与超时都依赖单调时钟
 };
