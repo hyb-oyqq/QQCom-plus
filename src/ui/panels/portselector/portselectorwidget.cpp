@@ -124,19 +124,29 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     m_pages = new QStackedWidget;
     row->addWidget(m_pages, 1);
 
-    // The leading label of every type shares one width, so A and B align despite different text.
+    // 每行的参数落进四列：前导标签列（左对齐、定宽）→ 主字段（拉伸）→ 尾部标签列
+    // （右对齐、定宽）→ 尾部字段（定宽）。两列标签与尾部字段都按全局最宽者定宽，
+    // A/B 两行、四种端点类型的"波特率 / 监听端口 / 端口"因此落在同一条竖线上。
+    enum Column { Lead, Trail, Plain };
     QList<QLabel *> leadLabels;
-    const auto addInlineLabel = [&leadLabels](QHBoxLayout *target, const QString &text,
-                                             QWidget *field, bool lead = false) {
+    QList<QLabel *> trailLabels;
+    QList<QWidget *> trailFields;
+    const auto addInlineLabel = [&](QHBoxLayout *target, const QString &text,
+                                    QWidget *field, Column column = Trail) {
         auto *label = new QLabel(text);
         label->setObjectName(field->objectName() + "Label");
         label->setBuddy(field);
-        if (lead) {
+        if (column == Lead) {
             label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
             leadLabels.append(label);
+        } else if (column == Trail) {
+            // 右对齐让字段左缘对齐：label 宽窄不同也不影响参数列的起点。
+            label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            trailLabels.append(label);
+            trailFields.append(field);
         }
         target->addWidget(label);
-        target->addWidget(field, lead ? 1 : 0);
+        target->addWidget(field, column == Lead ? 1 : 0);
     };
     auto makePage = [this](QStackedWidget *stack) {
         auto *page = new QWidget;
@@ -153,7 +163,7 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     // Grows with the row so a long friendly name stays fully readable.
     m_serialPorts->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_serialPorts->setMinimumWidth(200);
-    addInlineLabel(serial, tr("串口"), m_serialPorts, true);
+    addInlineLabel(serial, tr("串口"), m_serialPorts, Lead);
     // 刷新按钮已移除：扫描由组合根的定时器周期驱动，设备插拔自动出现在列表里。
     auto *baud = addChoice("serial.baud", {"9600", "38400", "115200", "230400", "921600"}, true);
     baud->setValidator(new BaudRateValidator(baud));
@@ -161,42 +171,55 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     baud->lineEdit()->setInputMethodHints(Qt::ImhDigitsOnly);
     // Editable, so it sizes itself from the preset rates instead of a frozen pixel width.
     baud->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-    addInlineLabel(serial, tr("波特率"), baud);
-    serial->addStretch();
+    addInlineLabel(serial, tr("波特率"), baud, Trail);
 
     auto *client = makePage(m_pages);
     auto *host = addAddress("client.host", true);
     host->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     host->setMinimumWidth(200);
-    addInlineLabel(client, tr("远端地址"), host, true);
-    addInlineLabel(client, tr("端口"), addNumber("client.port", 1, 65535));
+    addInlineLabel(client, tr("远端地址"), host, Lead);
+    addInlineLabel(client, tr("端口"), addNumber("client.port", 1, 65535), Trail);
 
     auto *server = makePage(m_pages);
     auto *bind = addAddress("server.address");
     bind->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     bind->setMinimumWidth(200);
-    addInlineLabel(server, tr("本地地址"), bind, true);
-    addInlineLabel(server, tr("监听端口"), addNumber("server.port", 0, 65535));
+    addInlineLabel(server, tr("本地地址"), bind, Lead);
+    addInlineLabel(server, tr("监听端口"), addNumber("server.port", 0, 65535), Trail);
 
     auto *udp = makePage(m_pages);
     auto *udpBind = addAddress("udp.address");
     udpBind->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     udpBind->setMinimumWidth(130);
-    addInlineLabel(udp, tr("本地地址"), udpBind, true);
-    addInlineLabel(udp, tr(":"), addNumber("udp.port", 0, 65535));
+    addInlineLabel(udp, tr("本地地址"), udpBind, Lead);
+    addInlineLabel(udp, tr(":"), addNumber("udp.port", 0, 65535), Plain);
     auto *udpTarget = addAddress("udp.target");
     udpTarget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     udpTarget->setMinimumWidth(130);
-    addInlineLabel(udp, tr("目标地址"), udpTarget, true);
-    addInlineLabel(udp, tr(":"), addNumber("udp.targetPort", 1, 65535));
+    addInlineLabel(udp, tr("目标地址"), udpTarget, Lead);
+    addInlineLabel(udp, tr(":"), addNumber("udp.targetPort", 1, 65535), Plain);
 
-    int leadWidth = 0;
-    for (auto *label : leadLabels) {
-        label->ensurePolished();
-        leadWidth = qMax(leadWidth, label->fontMetrics().horizontalAdvance(label->text()));
-    }
+    const auto widestLabel = [](QList<QLabel *> &labels) {
+        int width = 0;
+        for (auto *label : labels) {
+            label->ensurePolished();
+            width = qMax(width, label->fontMetrics().horizontalAdvance(label->text()));
+        }
+        return width;
+    };
+    const int leadWidth = widestLabel(leadLabels);
     for (auto *label : leadLabels)
         label->setFixedWidth(leadWidth);
+    const int trailLabelWidth = widestLabel(trailLabels);
+    for (auto *label : trailLabels)
+        label->setFixedWidth(trailLabelWidth);
+    // 尾部字段同样统一宽度：波特率是可编辑下拉框、端口是数字框，天然宽度不同，
+    // 不统一的话两行的参数列只能是"起点对齐、右缘参差"。
+    int trailFieldWidth = 0;
+    for (auto *field : trailFields)
+        trailFieldWidth = qMax(trailFieldWidth, field->sizeHint().width());
+    for (auto *field : trailFields)
+        field->setFixedWidth(trailFieldWidth);
 
     m_advanced = new QToolButton;
     m_advanced->setObjectName("advancedToggle");

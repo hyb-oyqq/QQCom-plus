@@ -840,6 +840,41 @@ private slots:
         }
     }
 
+    // A（串口）与 B（TCP 服务器）的参数列必须落在同一条竖线上：主字段右缘一致，
+    // 尾部标签右缘一致、尾部字段左缘与宽度一致。原先各页的尾部组宽窄不同
+    // （波特率 vs 监听端口）且串口页多一个尾部 stretch，行间看着参差。
+    void endpointParameterColumnsAlign()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+        auto *a = window.findChild<PortSelectorWidget *>("endpointA");
+        auto *b = window.findChild<PortSelectorWidget *>("endpointB");
+        QVERIFY(a && b);
+        const auto leftInWindow = [&window](QWidget *w) {
+            return w->mapTo(&window, QPoint(0, 0)).x();
+        };
+        const auto rightInWindow = [&window](QWidget *w) {
+            return w->mapTo(&window, QPoint(w->width(), 0)).x();
+        };
+        // 主字段（串口选择 / 本地地址）与尾部组（波特率 / 监听端口）逐列比对。
+        auto *aMain = a->findChild<QComboBox *>("serial.port");
+        auto *bMain = b->findChild<QComboBox *>("server.address");
+        auto *aTrailLabel = a->findChild<QLabel *>("serial.baudLabel");
+        auto *bTrailLabel = b->findChild<QLabel *>("server.portLabel");
+        auto *aTrail = a->findChild<QComboBox *>("serial.baud");
+        auto *bTrail = b->findChild<QSpinBox *>("server.port");
+        QVERIFY(aMain && bMain && aTrailLabel && bTrailLabel && aTrail && bTrail);
+        QCOMPARE(leftInWindow(aMain), leftInWindow(bMain));
+        QCOMPARE(rightInWindow(aMain), rightInWindow(bMain));
+        QCOMPARE(rightInWindow(aTrailLabel), rightInWindow(bTrailLabel));
+        QCOMPARE(leftInWindow(aTrail), leftInWindow(bTrail));
+        QCOMPARE(aTrail->width(), bTrail->width());
+    }
+
     void sendPreviewRejectsInvalidInput()
     {
         clearEndpointDrafts();
