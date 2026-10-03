@@ -167,13 +167,10 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     layout->setContentsMargins(16, 14, 16, 12);
     layout->setSpacing(12);
 
-    // 单行顶栏：示例数据标记、A/B 端点开关、编码切换、过滤关键词、显示设置、导出、
+    // 单行顶栏：A/B 端点开关、编码切换、过滤关键词、显示设置、导出、
     // 滚动到底、清空。
     auto *top = new QHBoxLayout;
     top->setSpacing(6);
-    m_exampleBadge = new QLabel(tr("等待数据"));
-    m_exampleBadge->setObjectName("Muted");
-    top->addWidget(m_exampleBadge);
 
     // A/B 端点开关直接放在选项栏里：点哪个看哪个，都点看全部，无需进菜单。
     const auto portToggle = [this](const QString &letter, const QString &name) {
@@ -596,13 +593,7 @@ void TrafficPanel::updateSummary()
     // 摘要按"会话累计接收条数"播报，不随任何一方的淘汰缩水。
     m_stack->setCurrentWidget(m_totalAccepted == 0 ? static_cast<QWidget *>(m_empty)
                                                    : static_cast<QWidget *>(m_text));
-    // 空态提示由内容区的空态文案承担；顶栏标记只提醒示例数据不计入统计。
-    const bool sampleVisible = m_sampleAction->isChecked();
-    // 文案没变就不 setText：QLabel::setText 每次都重算尺寸并请求重绘，
-    // 16ms 一拍的刷新节奏下，恒定文案的重复赋值会变成持续的无效重排。
-    const auto badge = sampleVisible ? tr("示例数据 · 不计入收发统计") : tr("仅显示真实收发");
-    if (m_exampleBadge->text() != badge) m_exampleBadge->setText(badge);
-    m_exampleBadge->setVisible(m_totalAccepted > 0);
+    // 空态提示由内容区的空态文案承担，顶栏不再放提示标记。
     const auto summary = m_paused ? tr("显示已暂停 · 期间丢弃 %1 条").arg(m_droppedWhilePaused)
                                  : tr("共 %1 条").arg(m_totalAccepted);
     if (m_summary->text() != summary) m_summary->setText(summary);

@@ -1,6 +1,6 @@
 # 参考工程：BLE 调试工具（ble-debug-tool-ios）
 
-阅读日期：2026-10-02。与 [REFERENCE_REVIEW.md](REFERENCE_REVIEW.md) 的两个本地 Qt 工程并列作为第三个参考工程；参考工程总索引见 [REFERENCES.md](REFERENCES.md)。
+阅读日期：2026-10-02。与 [REFERENCE_REVIEW.md](REFERENCE_REVIEW.md) 的两个本地 Qt 工程并列作为第三个参考工程；2026-10-03 新增第四个参考工程 Serial Studio，见 [REFERENCE_SERIAL_STUDIO.md](REFERENCE_SERIAL_STUDIO.md)。参考工程总索引见 [REFERENCES.md](REFERENCES.md)。
 
 ## 1. 版本与阅读范围
 

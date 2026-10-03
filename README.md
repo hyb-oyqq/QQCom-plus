@@ -9,9 +9,10 @@
 | 文档 | 内容 |
 | --- | --- |
 | [PLAN.md](PLAN.md) | 需求范围、阶段安排、交付清单与实施顺序 |
-| [参考工程索引](docs/REFERENCES.md) | 三个参考工程的入口、借鉴维度与按需求查表 |
+| [参考工程索引](docs/REFERENCES.md) | 四个参考工程的入口、借鉴维度与按需求查表 |
 | [参考工程分析](docs/REFERENCE_REVIEW.md) | debugTool/YmodemTool 两个本地工程的结构、复用点和需改进的问题 |
 | [BLE 调试工具参考](docs/REFERENCE_BLE_TOOL.md) | 同作者 iOS BLE 调试工具：消息模型、过滤、显示设置、接收组帧的对照 |
+| [Serial Studio 参考](docs/REFERENCE_SERIAL_STUDIO.md) | Qt 遥测仪表盘工程：分层治理、驱动抽象、帧提取与计数、控制台文本缓冲、发送预设 |
 | [架构评审](docs/ARCHITECTURE_REVIEW.md) | 对比参考工程的架构评审结论、分级问题清单与修复记录 |
 | [架构设计](docs/ARCHITECTURE.md) | 模块边界、接口契约、线程、转发、缓冲与配置 |
 | [界面与交互](docs/UI_DESIGN.md) | 端口选择控件扩展、监视区、路由和自定义发送 |
@@ -52,5 +53,6 @@ pwsh -File scripts/deploy_qt_windows.ps1 -Binary build/Desktop_Qt_6_10_1_MSVC202
 - `D:/AWork/myself/QTProject/debugTool`
 - `D:/AWork/myself/QTProject/YmodemTool`
 - https://gitee.com/qinjmin/ble-debug-tool-ios.git（BLE 调试工具，功能与交互参考）
+- https://github.com/Serial-Studio/Serial-Studio（Serial Studio，分层治理、帧提取与文本缓冲等底层做法参考；GPLv3/商业双许可，只借鉴设计结论）
 
 界面原型对应 [PLAN.md](PLAN.md) 的 M0/M2/M3 交互准备工作；后续实现从 M1 通信契约开始。每个阶段完成后更新任务状态、测试记录和设计偏差。

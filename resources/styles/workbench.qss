@@ -21,6 +21,13 @@ QPushButton:hover, QToolButton:hover { color: #14326f; border-color: #6d87b8; ba
 QPushButton:pressed, QToolButton:pressed { background: #d7e2f7; border-color: #4d6ba3; }
 QPushButton:checked { background: #fde8c0; border-color: #c79a46; color: #70511c; }
 QPushButton:disabled { background: #eceff5; border-color: #c3ccda; color: #7a8599; }
+/* A/B 端点开关：选中=实心蓝（该端点数据显示中），未选中=灰（已停用），对比强、状态一眼可辨。 */
+QPushButton#showPortA, QPushButton#showPortB { font-weight: 700; min-width: 26px; }
+QPushButton#showPortA:checked, QPushButton#showPortB:checked { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; }
+QPushButton#showPortA:checked:hover { background: #163fb3; border-color: #163fb3; }
+QPushButton#showPortA:checked:pressed { background: #12369c; }
+QPushButton#showPortA:!checked, QPushButton#showPortB:!checked { background: #e3e7ee; border-color: #c3ccda; color: #8a94a6; }
+QPushButton#showPortA:!checked:hover { border-color: #9aa7bd; color: #6b7690; }
 QPushButton#PrimaryButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
 QPushButton#PrimaryButton:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#PrimaryButton:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }

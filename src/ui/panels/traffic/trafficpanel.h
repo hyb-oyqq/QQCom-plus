@@ -109,7 +109,6 @@ private:
     QSet<QUuid> m_visibleEndpoints;
     QPushButton *m_follow;
     QLabel *m_summary;
-    QLabel *m_exampleBadge;
     QStackedWidget *m_stack;
     bool m_paused = false;
     quint64 m_droppedWhilePaused = 0;
