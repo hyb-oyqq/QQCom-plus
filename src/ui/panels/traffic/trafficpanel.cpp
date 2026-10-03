@@ -5,7 +5,6 @@
 #include "ui/common/tintedicon.h"
 #include "persistence/preferencesstore.h"
 
-#include <QActionGroup>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFile>
@@ -133,16 +132,15 @@ bool TrafficFilter::accepts(const Traffic::Message &r, const Options &options, P
     case Traffic::Direction::Transmit:
         if (!options.tx) return false;
         break;
-    default:
-        // 状态与错误不属于任何一个方向开关，跟随 RX 一起显示。
+    case Traffic::Direction::State:
+        // 状态迁移不属于任何一个方向开关，跟随 RX 一起显示。
         if (!options.rx && !options.tx) return false;
         break;
+    default:
+        // 错误/警告日志有独立开关：排障时才打开，平时不让异常事件刷屏。
+        if (!options.events) return false;
+        break;
     }
-    // 示例数据单独开关：调试时最怕把预览数据和真实收发混在一起看。
-    if (r.origin == Traffic::Origin::Sample && !options.sample) return false;
-    if (options.textOnly && r.isFragment()) return false;
-    // 长度用真实字节数过滤，不用预览后剩下的长度，否则大消息会被误判为小。
-    if (r.displayBytes() < options.minBytes) return false;
     if (options.search.isEmpty()) return true;
 
     // 搜索匹配当前显示格式的渲染文本、UTF-8 文本与两种 HEX 写法，所见即可搜；
@@ -201,11 +199,11 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_search->setClearButtonEnabled(true);
     top->addWidget(m_search, 1);
 
-    // 日志显示设置：方向、时间戳列与暂停收进菜单，顶栏只留一个入口。
+    // 日志显示设置：方向开关与行内容开关收进菜单，顶栏只留一个入口。
     auto *settings = new QPushButton(tr("显示设置"));
     settings->setObjectName("displaySettings");
     settings->setIcon(mutedIcon(QStringLiteral(":/icons/cog.svg"), BarIconSize));
-    settings->setToolTip(tr("日志显示选项：RX/TX、暂停显示"));
+    settings->setToolTip(tr("日志显示选项：RX/TX、行前缀、自动换行"));
     auto *displayMenu = new QMenu(settings);
     m_rxAction = displayMenu->addAction(tr("显示 RX"));
     m_rxAction->setObjectName("showRx");
@@ -217,31 +215,40 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_txAction->setCheckable(true);
     m_txAction->setChecked(true);
     connect(m_txAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
-    m_sampleAction = displayMenu->addAction(tr("显示示例数据"));
-    m_sampleAction->setCheckable(true);
-    m_sampleAction->setChecked(true);
-    connect(m_sampleAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
-    m_wholeAction = displayMenu->addAction(tr("只看完整消息"));
-    m_wholeAction->setObjectName("wholeTraffic");
-    m_wholeAction->setCheckable(true);
-    // 默认关：字节流片段在真实抓包调试中是常态，默认滤掉会让人以为设备没发数据。
-    m_wholeAction->setToolTip(tr("滤掉字节流片段，只显示按数据报或协议边界完整的记录"));
-    connect(m_wholeAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
+    m_errorAction = displayMenu->addAction(tr("显示错误日志"));
+    m_errorAction->setObjectName("showErrorLog");
+    m_errorAction->setCheckable(true);
+    m_errorAction->setChecked(true);
+    m_errorAction->setToolTip(tr("错误与警告事件（端口错误、写入失败等）的显示开关"));
+    connect(m_errorAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
     displayMenu->addSeparator();
-    // 最小长度用预设档位而不是输入框：调试时要么"不要噪声心跳"要么"只看大块数据"，
-    // 很少需要精确到个位数。互斥用 QActionGroup，和顶栏 A/B 开关同一套勾选样式。
-    auto *lengthMenu = displayMenu->addMenu(tr("最小字节数"));
-    auto *lengthGroup = new QActionGroup(lengthMenu);
-    lengthGroup->setExclusive(true);
-    for (const int bytes : {0, 1, 8, 16, 64}) {
-        auto *action = lengthMenu->addAction(bytes == 0 ? tr("不限") : tr("≥ %1 字节").arg(bytes));
+    // 行内容开关：控制台语义，全部在消息到达时生效，已固化的行不重排。
+    const auto rowToggle = [this, &displayMenu](const char *name, const QString &text, bool checked) {
+        auto *action = displayMenu->addAction(text);
+        action->setObjectName(QString::fromLatin1(name));
         action->setCheckable(true);
-        action->setChecked(bytes == 0);
-        action->setData(bytes);
+        action->setChecked(checked);
         connect(action, &QAction::toggled, this, &TrafficPanel::updateFilter);
-        lengthGroup->addAction(action);
-    }
-    m_lengthMenu = lengthMenu;
+        return action;
+    };
+    m_timestampAction = rowToggle("showTimestamp", tr("显示时间戳"), true);
+    m_directionAction = rowToggle("showDirection", tr("显示数据方向"), true);
+    m_lengthAction = rowToggle("showLength", tr("显示数据长度"), false);
+    m_hexAction = rowToggle("showHex", tr("同时显示 HEX"), false);
+    m_hexAction->setToolTip(tr("行尾附 HEX 对照（HEX 显示格式下自动省略）"));
+    m_pureAction = rowToggle("pureData", tr("纯数据模式"), false);
+    m_pureAction->setToolTip(tr("移除行号、时间、方向等一切前缀，只显示数据本身"));
+    // 纯数据开启时，行前缀开关全部失效置灰，状态一目了然。
+    connect(m_pureAction, &QAction::toggled, this, [this](bool pure) {
+        for (auto *action : {m_timestampAction, m_directionAction, m_lengthAction, m_hexAction})
+            action->setEnabled(!pure);
+    });
+    m_wrapAction = rowToggle("wrapTraffic", tr("自动换行"), false);
+    m_wrapAction->setToolTip(tr("按窗口宽度折行显示；关闭时长报文水平滚动"));
+    connect(m_wrapAction, &QAction::toggled, this, [this](bool wrap) {
+        m_text->setLineWrapping(wrap);
+        savePreferences();
+    });
     displayMenu->addSeparator();
     // 记录到文件：与"导出"互补。导出是"把当前所见存一份"，记录是"边看边记"——
     // 记录行跟随当前显示格式（HEX 模式记 HEX、文本模式记文本），所见即所记。
@@ -252,13 +259,6 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(m_recordAction, &QAction::toggled, this, [this](bool enabled) {
         toggleLogRecording(enabled);
         savePreferences();
-    });
-    auto *pauseAction = displayMenu->addAction(tr("暂停显示"));
-    pauseAction->setCheckable(true);
-    connect(pauseAction, &QAction::toggled, this, [this](bool checked) {
-        m_paused = checked;
-        m_droppedWhilePaused = 0;
-        updateSummary();
     });
     settings->setMenu(displayMenu);
     top->addWidget(settings);
@@ -297,12 +297,6 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_stack->addWidget(m_text);
     m_stack->addWidget(empty);
     layout->addWidget(m_stack, 1);
-
-    auto *bottom = new QHBoxLayout;
-    m_summary = new QLabel;
-    m_summary->setObjectName("Muted");
-    bottom->addWidget(m_summary, 1);
-    layout->addLayout(bottom);
 
     // RX/TX 的过滤连接在创建菜单动作时已完成，这里不再重复 connect。
     connect(m_search, &QLineEdit::textChanged, this, &TrafficPanel::updateFilter);
@@ -344,7 +338,7 @@ void TrafficPanel::setPorts(const QList<PortDraft> &ports)
 
 void TrafficPanel::loadExample(const QList<PortDraft> &ports)
 {
-    if (m_paused || ports.isEmpty()) return;
+    if (ports.isEmpty()) return;
     // 构造真实形状的消息，而不是"看起来像"的占位数据：示例走的是与真实数据
     // 完全相同的筛选、格式化与导出路径，将来换了字段不会只有示例数据对不上。
     const auto start = QDateTime::currentDateTime().addSecs(-2);
@@ -379,7 +373,7 @@ void TrafficPanel::loadExample(const QList<PortDraft> &ports)
     // 示例数据与 replaceRecords 同语义：整批直达模型，不经显示过滤。
     // 文本行按当前显示格式固化。
     m_totalAccepted = records.size();
-    m_text->appendMessages(records, currentDisplayFormat());
+    m_text->appendMessages(records, currentDisplayFormat(), m_displayOptions);
     updateSummary();
     if (m_follow->isChecked()) m_text->scrollToBottom();
 }
@@ -387,12 +381,6 @@ void TrafficPanel::loadExample(const QList<PortDraft> &ports)
 void TrafficPanel::appendMessages(const QList<Traffic::Message> &messages)
 {
     if (messages.isEmpty()) return;
-    if (m_paused) {
-        // 暂停只冻结显示，不无限积压：直接丢弃并累计缺口，恢复时计数清零。
-        m_droppedWhilePaused += messages.size();
-        updateSummary();
-        return;
-    }
     // 逐条入模 + 滚动的事件开销与消息速率成正比；
     // 先攒进缓冲，16ms 一拍整批入模，插入通知次数与消息速率解耦。
     m_pending += messages;
@@ -401,11 +389,6 @@ void TrafficPanel::appendMessages(const QList<Traffic::Message> &messages)
 
 void TrafficPanel::appendMessage(const Traffic::Message &message)
 {
-    if (m_paused) {
-        ++m_droppedWhilePaused;
-        updateSummary();
-        return;
-    }
     m_pending.append(message);
     if (!m_flushTimer->isActive()) m_flushTimer->start();
 }
@@ -416,16 +399,16 @@ void TrafficPanel::flushPending()
     auto batch = std::move(m_pending);
     m_pending.clear();
     m_model->appendRecords(batch);
-    writeLog(batch); // 记录与显示同流：进模型的批次才落日志，暂停即同停
+    writeLog(batch); // 记录与显示同流：进模型的批次才落日志
     // 文本视图按到达时的过滤条件逐条判定（TrafficFilter::accepts 的唯一显示出口），
-    // 行按当前显示格式固化后不再重渲染——控制台语义，格式切换只影响新行。
+    // 行按当前显示格式与开关组合固化后不再重渲染——控制台语义。
     const auto format = currentDisplayFormat();
     QList<Traffic::Message> accepted;
     accepted.reserve(batch.size());
     for (const auto &message : batch)
         if (TrafficFilter::accepts(message, m_textOptions, format)) accepted.append(message);
     m_totalAccepted += accepted.size();
-    m_text->appendMessages(accepted, format);
+    m_text->appendMessages(accepted, format, m_displayOptions);
     if (m_follow->isChecked()) m_text->scrollToBottom();
     updateSummary();
 }
@@ -456,8 +439,8 @@ void TrafficPanel::toggleLogRecording(bool enabled)
     }
     m_logFile = new QFile(m_logPath, this);
     if (!m_logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        // 错误提示直接顶替摘要文本；界面状态没有其他变化，不需要走 updateSummary。
-        m_summary->setText(tr("日志文件无法打开：%1").arg(m_logFile->errorString()));
+        // 错误提示经摘要信号顶替状态栏文本；界面状态没有其他变化。
+        reportSummary(tr("日志文件无法打开：%1").arg(m_logFile->errorString()));
         delete m_logFile;
         m_logFile = nullptr;
         const QSignalBlocker blocker(m_recordAction);
@@ -482,7 +465,7 @@ void TrafficPanel::writeLog(const QList<Traffic::Message> &messages)
     }
     out.flush();
     if (out.status() != QTextStream::Ok) {
-        m_summary->setText(tr("日志写入失败，记录已停止：%1").arg(m_logFile->errorString()));
+        reportSummary(tr("日志写入失败，记录已停止：%1").arg(m_logFile->errorString()));
         m_logFile->close();
         delete m_logFile;
         m_logFile = nullptr;
@@ -518,8 +501,13 @@ void TrafficPanel::loadPreferences()
         m_format->setCurrentText(format);
     m_rxAction->setChecked(m_preferences->value("traffic/rx", true).toBool());
     m_txAction->setChecked(m_preferences->value("traffic/tx", true).toBool());
-    m_sampleAction->setChecked(m_preferences->value("traffic/sample", true).toBool());
-    m_wholeAction->setChecked(m_preferences->value("traffic/whole", false).toBool());
+    m_errorAction->setChecked(m_preferences->value("traffic/errors", true).toBool());
+    m_timestampAction->setChecked(m_preferences->value("traffic/timestamp", true).toBool());
+    m_directionAction->setChecked(m_preferences->value("traffic/direction", true).toBool());
+    m_lengthAction->setChecked(m_preferences->value("traffic/length", false).toBool());
+    m_hexAction->setChecked(m_preferences->value("traffic/hex", false).toBool());
+    m_pureAction->setChecked(m_preferences->value("traffic/pure", false).toBool());
+    m_wrapAction->setChecked(m_preferences->value("traffic/wrap", false).toBool());
     m_follow->setChecked(m_preferences->value("traffic/follow", true).toBool());
     m_portAButton->setChecked(m_preferences->value("traffic/portA", true).toBool());
     m_portBButton->setChecked(m_preferences->value("traffic/portB", true).toBool());
@@ -529,9 +517,6 @@ void TrafficPanel::loadPreferences()
         // 上次开着记录：沿用原文件继续追加；文件不可用则复位勾选（含提示）。
         m_recordAction->setChecked(true);
     }
-    const auto minBytes = m_preferences->value("traffic/minBytes", 0).toInt();
-    for (auto *action : m_lengthMenu->actions())
-        if (action->data().toInt() == minBytes) action->setChecked(true);
     m_loading = false;
     updatePortVisibility();
     updateFilter(); // 恢复完成后统一刷新一次过滤
@@ -543,15 +528,18 @@ void TrafficPanel::savePreferences()
     m_preferences->setValue("traffic/format", m_format->currentText());
     m_preferences->setValue("traffic/rx", m_rxAction->isChecked());
     m_preferences->setValue("traffic/tx", m_txAction->isChecked());
-    m_preferences->setValue("traffic/sample", m_sampleAction->isChecked());
-    m_preferences->setValue("traffic/whole", m_wholeAction->isChecked());
+    m_preferences->setValue("traffic/errors", m_errorAction->isChecked());
+    m_preferences->setValue("traffic/timestamp", m_timestampAction->isChecked());
+    m_preferences->setValue("traffic/direction", m_directionAction->isChecked());
+    m_preferences->setValue("traffic/length", m_lengthAction->isChecked());
+    m_preferences->setValue("traffic/hex", m_hexAction->isChecked());
+    m_preferences->setValue("traffic/pure", m_pureAction->isChecked());
+    m_preferences->setValue("traffic/wrap", m_wrapAction->isChecked());
     m_preferences->setValue("traffic/follow", m_follow->isChecked());
     m_preferences->setValue("traffic/portA", m_portAButton->isChecked());
     m_preferences->setValue("traffic/portB", m_portBButton->isChecked());
     m_preferences->setValue("traffic/record", m_recordAction->isChecked());
     if (!m_logPath.isEmpty()) m_preferences->setValue("traffic/recordPath", m_logPath);
-    for (auto *action : m_lengthMenu->actions())
-        if (action->isChecked()) m_preferences->setValue("traffic/minBytes", action->data().toInt());
 }
 
 TrafficPanel::~TrafficPanel()
@@ -575,14 +563,16 @@ void TrafficPanel::updateFilter()
     options.endpoints = m_visibleEndpoints;
     options.rx = m_rxAction->isChecked();
     options.tx = m_txAction->isChecked();
-    options.sample = m_sampleAction->isChecked();
-    options.textOnly = m_wholeAction->isChecked();
+    options.events = m_errorAction->isChecked();
     options.search = m_search->text();
-    // 长度档位读的是被选中的动作，不缓存上次值，避免与菜单实际状态失步。
-    for (const auto *action : m_lengthMenu->actions())
-        if (action->isChecked()) options.minBytes = action->data().toInt();
     // 文本视图的到达时过滤用这一份条件的快照；写入点只有这里。
     m_textOptions = options;
+    // 行内容的开关组合同样在到达时生效：这里重建快照，flushPending 直读。
+    m_displayOptions.timestamp = m_timestampAction->isChecked();
+    m_displayOptions.direction = m_directionAction->isChecked();
+    m_displayOptions.length = m_lengthAction->isChecked();
+    m_displayOptions.hex = m_hexAction->isChecked();
+    m_displayOptions.pure = m_pureAction->isChecked();
     updateSummary();
     savePreferences(); // 过滤开关的汇聚点：任一开关变化即落盘
 }
@@ -593,15 +583,19 @@ void TrafficPanel::updateSummary()
     // 摘要按"会话累计接收条数"播报，不随任何一方的淘汰缩水。
     m_stack->setCurrentWidget(m_totalAccepted == 0 ? static_cast<QWidget *>(m_empty)
                                                    : static_cast<QWidget *>(m_text));
-    // 空态提示由内容区的空态文案承担，顶栏不再放提示标记。
-    const auto summary = m_paused ? tr("显示已暂停 · 期间丢弃 %1 条").arg(m_droppedWhilePaused)
-                                 : tr("共 %1 条").arg(m_totalAccepted);
-    if (m_summary->text() != summary) m_summary->setText(summary);
+    reportSummary(tr("共 %1 条").arg(m_totalAccepted));
+}
+
+void TrafficPanel::reportSummary(const QString &text)
+{
+    if (text == m_lastSummary) return;
+    m_lastSummary = text;
+    emit summaryChanged(text);
 }
 
 void TrafficPanel::exportVisible()
 {
-    if (!m_model->rowCount()) { m_summary->setText(tr("当前没有可导出的记录")); return; }
+    if (!m_model->rowCount()) { reportSummary(tr("当前没有可导出的记录")); return; }
     const auto path = QFileDialog::getSaveFileName(this, tr("导出记录"), "easyDebug-preview.tsv", tr("制表符文件 (*.tsv)"));
     if (path.isEmpty()) return;
     // 导出列与显示列解耦：导出的是完整的结构化事实。
@@ -628,5 +622,5 @@ void TrafficPanel::exportVisible()
     }
     QSaveFile file(path);
     const bool ok = file.open(QIODevice::WriteOnly) && file.write(output) == output.size() && file.commit();
-    m_summary->setText(ok ? tr("记录已导出") : tr("导出失败：%1").arg(file.errorString()));
+    reportSummary(ok ? tr("记录已导出") : tr("导出失败：%1").arg(file.errorString()));
 }

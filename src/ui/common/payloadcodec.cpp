@@ -25,7 +25,10 @@ QTextCodec *gbkCodec()
 // 控制字符以 \r \n \t \xNN 转义呈现；escapeHighBytes 决定 >=0x80 的字符是否同样转义
 // （ASCII 渲染必须转义，UTF-8/GBK 渲染里它们是正文）。keepLineBreaks 为真时
 // \r \n 保持真实字符——"按文本样子看"的视图要按报文里的行分隔真实断行。
-QString escapeControlChars(const QString &text, bool escapeHighBytes, bool keepLineBreaks = false)
+// keepEsc 为真时 ESC(0x1B) 同样保持真实字符：监视区要靠它识别 ANSI 颜色标识，
+// 其余控制字符仍转义，避免不可见字节悄悄改变显示。
+QString escapeControlChars(const QString &text, bool escapeHighBytes, bool keepLineBreaks = false,
+    bool keepEsc = false)
 {
     QString out;
     for (const QChar c : text) {
@@ -37,6 +40,7 @@ QString escapeControlChars(const QString &text, bool escapeHighBytes, bool keepL
             if (keepLineBreaks) out += c;
             else out += QLatin1String("\\n");
         } else if (u == '\t') out += QLatin1String("\\t");
+        else if (u == 0x1B && keepEsc) out += c;
         else if (u < 32 || u == 127 || (escapeHighBytes && u > 127)) {
             out += QLatin1String("\\x");
             out += QString::number(u, 16).rightJustified(2, QLatin1Char('0')).toUpper();
@@ -268,13 +272,13 @@ QString renderMultiline(const QByteArray &payload, Format format)
 {
     switch (format) {
     case Format::Utf8:
-        return escapeControlChars(QString::fromUtf8(payload), false, true);
+        return escapeControlChars(QString::fromUtf8(payload), false, true, true);
     case Format::Gbk:
         if (QTextCodec *codec = gbkCodec())
-            return escapeControlChars(codec->toUnicode(payload), false, true);
+            return escapeControlChars(codec->toUnicode(payload), false, true, true);
         return render(payload, format);
     case Format::Ascii:
-        return escapeControlChars(QString::fromLatin1(payload), true, true);
+        return escapeControlChars(QString::fromLatin1(payload), true, true, true);
     default:
         return render(payload, format);
     }

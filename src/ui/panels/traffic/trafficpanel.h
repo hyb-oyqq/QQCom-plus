@@ -4,13 +4,13 @@
 #include "ui/common/payloadcodec.h"
 #include "domain/trafficmessage.h"
 #include "domain/portdraft.h"
+#include "traffictextview.h"
 #include <QDateTime>
 #include <QObject>
 #include <QSet>
 #include <QWidget>
 
 class QAction;
-class QActionGroup;
 class QComboBox;
 class QFile;
 class QLabel;
@@ -19,7 +19,6 @@ class QMenu;
 class PreferencesStore;
 class QPushButton;
 class QStackedWidget;
-class TrafficTextView;
 class QTimer;
 
 // 消息是 domain 的值类型（Traffic::Message）：原始字节、时间戳、来源、长度都是事实，
@@ -50,9 +49,7 @@ public:
         QSet<QUuid> endpoints; // 集合为空表示不显示任何端点的记录
         bool rx = true;
         bool tx = true;
-        bool sample = true; // 示例数据可单独关掉，不与真实数据混淆
-        bool textOnly = false; // 只看按消息边界完整的记录，滤掉字节流片段
-        int minBytes = 0;
+        bool events = true; // 错误/警告日志（Warning/Error 方向的离散事件）有独立开关
         QString search;
     };
 
@@ -67,14 +64,17 @@ public:
     ~TrafficPanel() override;
     void setPorts(const QList<PortDraft> &ports);
     void loadExample(const QList<PortDraft> &ports);
-    // 真实通信消息的统一入口。暂停期间不进显示，只累计丢弃条数并在恢复后清零
-    // （显示暂停不拖垮通信）。高频到达时先攒批再入模（见 m_flushTimer），
+    // 真实通信消息的统一入口。高频到达时先攒批再入模（见 m_flushTimer），
     // 插入通知次数与消息速率解耦。
     void appendMessages(const QList<Traffic::Message> &messages);
     // 单条入口：与 appendMessages 同语义，免去逐条消息构造临时批次的开销。
     void appendMessage(const Traffic::Message &message);
     // 组合根注入的偏好存储；为空时全部显示选项不落盘（示例预览等场景）。
     void setPreferences(PreferencesStore *store);
+signals:
+    // 会话累计条数与一次性提示（导出结果、日志写失败）都从这根信号出，
+    // 由主窗口放进底部状态栏——面板内部不再为摘要保留一行 UI。
+    void summaryChanged(const QString &text);
 private:
     void updateFilter();
     void updatePortVisibility();
@@ -85,10 +85,12 @@ private:
     // m_format 下标 → 格式枚举的唯一换算点，格式切换联动与日志落盘共用。
     PayloadCodec::Format currentDisplayFormat() const;
     // 日志记录：把入模的每条消息按当前显示格式写成一行，持续追加到用户选定的文件。
-    // 记录跟随显示流：暂停显示即暂停记录；切换编码格式后，新行跟随新格式。
+    // 记录跟随显示流：切换编码格式后，新行跟随新格式。
     void toggleLogRecording(bool enabled);
     void writeLog(const QList<Traffic::Message> &messages);
     void closeLogFile();
+    // 摘要经 summaryChanged 上报；内容不变就不重发，状态栏不做无效刷新。
+    void reportSummary(const QString &text);
     // 显示选项持久化：变更即写（QSettings 延迟落盘），析构时兜底再存一次。
     void loadPreferences();
     void savePreferences();
@@ -102,23 +104,27 @@ private:
     QPushButton *m_portBButton;
     QAction *m_rxAction;
     QAction *m_txAction;
-    QAction *m_sampleAction; // 示例数据独立开关，避免与真实收发混看
-    QAction *m_wholeAction;  // 只看按边界完整的记录，滤掉字节流片段
-    QAction *m_recordAction; // 记录到文件：按当前显示格式持续写日志
-    QMenu *m_lengthMenu;     // 最小字节数档位；勾选状态即当前过滤条件
+    // 行内容开关：全部在到达时生效（控制台语义），纯数据模式下被忽略。
+    QAction *m_timestampAction;
+    QAction *m_directionAction;
+    QAction *m_lengthAction;  // 数据长度 [N B]
+    QAction *m_hexAction;     // 同时显示 HEX 对照
+    QAction *m_errorAction;   // 错误/警告日志（过滤开关）
+    QAction *m_pureAction;    // 纯数据视图：无一切前缀
+    QAction *m_wrapAction;    // 自动换行
+    QAction *m_recordAction;  // 记录到文件：按当前显示格式持续写日志
     QSet<QUuid> m_visibleEndpoints;
     QPushButton *m_follow;
-    QLabel *m_summary;
     QStackedWidget *m_stack;
-    bool m_paused = false;
-    quint64 m_droppedWhilePaused = 0;
     quint64 m_totalAccepted = 0; // 会话累计接收条数（含示例），文本历史随淘汰可超过模型上限
+    QString m_lastSummary;       // 上次上报的摘要文本，去重用
     // 攒批缓冲：appendMessages 先入缓冲，16ms 一拍整批入模。
     QList<Traffic::Message> m_pending;
     QTimer *m_flushTimer = nullptr;
     // 文本视图按到达时的过滤条件收流：updateFilter 是唯一写入点。
-    // 文本行按到达时格式固化，没有"重算全部行"这回事。
+    // 文本行按到达时格式与开关组合固化，没有"重算全部行"这回事。
     TrafficFilter::Options m_textOptions;
+    TrafficTextView::DisplayOptions m_displayOptions;
     PreferencesStore *m_preferences = nullptr;
     bool m_loading = false; // 加载偏好期间联动触发的保存要抑制，否则半成品状态会覆盖已存值
     QFile *m_logFile = nullptr;   // 打开期间持续追加；关闭开关或析构时收口

@@ -342,27 +342,23 @@ private slots:
         };
         TrafficFilter::Options options;
         options.endpoints = {a.endpointId, b.endpointId};
-
-        // 只看完整消息：按 framing 字段判定，而不是靠"数据内容里有没有换行"这类猜测。
-        options.textOnly = true;
-        QCOMPARE(accepted(options), 2);
-        options.textOnly = false;
         QCOMPARE(accepted(options), 3);
-
-        // 最小长度：按真实字节数，不受预览截断影响。
-        options.minBytes = 8;
-        QCOMPARE(accepted(options), 1);
-        QCOMPARE(model.record(model.rowCount() - 1).raw.size(), 64);
-        options.minBytes = 0;
 
         // 对端地址是来源的结构化字段，能被关键词直接命中，不必先渲染成显示文本。
         options.search = QStringLiteral("52344");
         QCOMPARE(accepted(options), 2);
-
-        // 关掉示例数据：真实的 RX/TX 记录不受影响，示例全部隐藏。
         options.search.clear();
-        options.sample = false;
-        QCOMPARE(accepted(options), 0);
+
+        // 错误/警告日志有独立开关：关闭后 Warning/Error 事件不进显示，数据不受影响。
+        const auto warning = Traffic::makeSampleMessage(
+            4, QDateTime(), b, Traffic::Direction::Warning, {});
+        const auto error = Traffic::makeSampleMessage(
+            5, QDateTime(), b, Traffic::Direction::Error, {});
+        model.replaceRecords({stream, datagram, message, warning, error});
+        QCOMPARE(accepted(options), 5);
+        options.events = false;
+        QCOMPARE(accepted(options), 3);
+        options.events = true;
     }
 
     void portDraftsRemainIndependent()
@@ -714,12 +710,12 @@ private slots:
         firstTraffic.setPreferences(&firstStore);
         SendPanel firstSender;
         firstSender.setPreferences(&firstStore);
-        auto *whole = firstTraffic.findChild<QAction *>(QStringLiteral("wholeTraffic"));
+        auto *wrap = firstTraffic.findChild<QAction *>(QStringLiteral("wrapTraffic"));
         auto *rx = firstTraffic.findChild<QAction *>(QStringLiteral("showRx"));
         auto *format = firstTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
         auto *sendFormat = firstSender.findChild<QComboBox *>(QStringLiteral("sendFormat"));
-        QVERIFY(whole && rx && format && sendFormat);
-        whole->setChecked(true);
+        QVERIFY(wrap && rx && format && sendFormat);
+        wrap->setChecked(true);
         rx->setChecked(false);
         format->setCurrentText(QStringLiteral("UTF-8"));
         sendFormat->setCurrentText(QStringLiteral("GBK"));
@@ -729,7 +725,7 @@ private slots:
         secondTraffic.setPreferences(&secondStore);
         SendPanel secondSender;
         secondSender.setPreferences(&secondStore);
-        QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("wholeTraffic"))->isChecked(), true);
+        QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("wrapTraffic"))->isChecked(), true);
         QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("showRx"))->isChecked(), false);
         QCOMPARE(secondTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->currentText(),
                  QStringLiteral("UTF-8"));
@@ -1058,6 +1054,9 @@ private slots:
               splitterProbe->widget(0)->sizeHint().height(),
               splitterProbe->widget(1)->sizeHint().height());
         QCOMPARE(model->rowCount(), 12);
+        // 条数摘要搬进了主窗口状态栏：示例加载完成后状态栏同步播报会话累计。
+        QCOMPARE(window.findChild<QLabel *>(QStringLiteral("TrafficStatus"))->text(),
+                 QStringLiteral("共 12 条"));
         QVERIFY(window.rect().contains(QRect(editor->mapTo(&window, QPoint()), editor->size())));
         // 格式切换只影响新行（控制台语义）：切到 DEC 后，新到达的消息按 DEC 渲染固化进文本视图。
         // 已知字节流片段（HEX 01 03 00 00 00 02 C4 0B）渲染为 DEC，并带 ⏎ 续接标记——边界是消息的事实。
@@ -1318,6 +1317,165 @@ private slots:
         QCOMPARE(model->record(0).raw.size(), 4096);
         QCOMPARE(model->record(0).displayBytes(), qint64(raw.size()));
         QVERIFY(model->record(0).truncated);
+    }
+
+    // 行内容开关按控制台语义生效：只影响新行，已固化的行不重排。
+    // 行号恒在；纯数据模式去掉行号/时间/方向/长度/HEX 等一切前缀与附注。
+    void displayTogglesShapeNewLines()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr); // 开关变化不落盘，避免污染共享配置
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        QVERIFY(text && model);
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        Traffic::Message message;
+        message.id = 1;
+        message.timestamp = QDateTime::currentDateTime();
+        message.direction = Traffic::Direction::Receive;
+        message.source.endpointId = endpointId;
+        message.source.endpointIndex = 0;
+        message.source.endpointKind = PortDraft::Serial;
+        message.raw = QByteArray("OK");
+        message.rawLength = 2;
+
+        // 关时间戳/方向，开长度与 HEX 对照：长度用真实字节数，HEX 是原始字节对照。
+        window.findChild<QAction *>(QStringLiteral("showTimestamp"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("showDirection"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("showLength"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(true);
+        panel->appendMessages({message});
+        QTRY_COMPARE(model->rowCount(), 1);
+        QCOMPARE(text->document()->lastBlock().text(),
+                 QStringLiteral("      1 [2 B] OK  HEX 4F 4B"));
+
+        // 纯数据模式：一切前缀与附注消失，只剩数据本身。
+        window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(true);
+        message.id = 2;
+        panel->appendMessages({message});
+        QTRY_COMPARE(model->rowCount(), 2);
+        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("OK"));
+        // 还原默认开关，不把本用例的状态带给后续用例。
+        window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("showLength"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(false);
+    }
+
+    // 错误/警告日志的独立开关：关闭后事件不进显示、数据不受影响；开启后恢复。
+    void errorEventsFollowTheirOwnToggle()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        QVERIFY(text && model);
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        const auto makeMessage = [endpointId](quint64 id, Traffic::Direction direction, const char *text) {
+            Traffic::Message message;
+            message.id = id;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = direction;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray(text);
+            message.rawLength = message.raw.size();
+            if (direction == Traffic::Direction::Error)
+                message.statusText = QStringLiteral("写入失败");
+            return message;
+        };
+        // 先建立一条可见数据行作基线。
+        panel->appendMessages({makeMessage(1, Traffic::Direction::Receive, "data")});
+        QTRY_COMPARE(model->rowCount(), 1);
+        const auto baseline = text->document()->lastBlock().text();
+        // 关闭错误日志：错误事件进模型不进显示，数据行纹丝不动。
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+        window.findChild<QAction *>(QStringLiteral("showErrorLog"))->setChecked(false);
+        panel->appendMessages({makeMessage(2, Traffic::Direction::Error, "boom")});
+        QTRY_COMPARE(model->rowCount(), 2);
+        QCOMPARE(text->lineCount(), 1);
+        QCOMPARE(text->document()->lastBlock().text(), baseline);
+        // 重新开启：后续错误事件恢复显示。
+        window.findChild<QAction *>(QStringLiteral("showErrorLog"))->setChecked(true);
+        panel->appendMessages({makeMessage(3, Traffic::Direction::Error, "boom2")});
+        QTRY_COMPARE(text->lineCount(), 2);
+        QVERIFY2(text->document()->lastBlock().text().endsWith(QStringLiteral("boom2")),
+            qPrintable(QStringLiteral("错误行实况：")
+                + text->document()->lastBlock().text()));
+    }
+
+    // ANSI 颜色标识：SGR 序列渲染为前景色分片，转义序列本身不进显示文本，
+    // 换行还原保持既有语义。命令行式的彩色日志因此原样可读。
+    void ansiColorsRenderStripped()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        QVERIFY(text && model);
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        Traffic::Message message;
+        message.id = 1;
+        message.timestamp = QDateTime::currentDateTime();
+        message.direction = Traffic::Direction::Receive;
+        message.source.endpointId = endpointId;
+        message.source.endpointIndex = 0;
+        message.source.endpointKind = PortDraft::Serial;
+        message.raw = QByteArray("\x1b[31mRED\x1b[0m plain\r\nnext \x1b[92mgreen");
+        message.rawLength = message.raw.size();
+        panel->appendMessages({message});
+        QTRY_COMPARE(model->rowCount(), 1);
+        QCOMPARE(text->document()->blockCount(), 2);
+        const auto first = text->document()->firstBlock();
+        QVERIFY2(first.text().endsWith(QStringLiteral("RED plain")),
+                 qPrintable(QStringLiteral("转义序列应被剥离：") + first.text()));
+        QVERIFY2(text->document()->lastBlock().text() == QStringLiteral("next green"),
+                 qPrintable(QStringLiteral("续行应无残留序列：")
+                     + text->document()->lastBlock().text()));
+        // "RED" 分片按 SGR 31 的前景色渲染。
+        bool foundRed = false;
+        for (auto it = first.begin(); !it.atEnd(); ++it) {
+            const auto fragment = it.fragment();
+            if (fragment.text() == QStringLiteral("RED"))
+                foundRed = fragment.charFormat().foreground().color() == QColor(0xC6, 0x28, 0x28);
+        }
+        QVERIFY(foundRed);
+    }
+
+    // 自动换行开关：勾选后按视口宽度折行（横向滚动随之失效），取消后恢复水平滚动。
+    void wrapToggleSwitchesLineWrapMode()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        QVERIFY(text);
+        QCOMPARE(text->lineWrapMode(), QPlainTextEdit::NoWrap);
+        window.findChild<QAction *>(QStringLiteral("wrapTraffic"))->setChecked(true);
+        QCOMPARE(text->lineWrapMode(), QPlainTextEdit::WidgetWidth);
+        window.findChild<QAction *>(QStringLiteral("wrapTraffic"))->setChecked(false);
+        QCOMPARE(text->lineWrapMode(), QPlainTextEdit::NoWrap);
     }
 };
 
