@@ -173,7 +173,6 @@ MainWindow::MainWindow(QWidget *parent)
             [this, index] { toggleEndpoint(index); });
     }
 
-    connect(m_traffic, &TrafficPanel::reusePayload, m_sender, &SendPanel::setPayload);
     connect(m_sender, &SendPanel::sendRequested, this,
         [this](const QByteArray &payload, int targetMask) {
             const int origin = int(Traffic::Origin::Manual);

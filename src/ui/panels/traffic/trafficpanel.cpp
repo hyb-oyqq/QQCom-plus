@@ -1,12 +1,11 @@
 #include "trafficpanel.h"
+#include "trafficlogview.h"
 #include "ui/common/combometrics.h"
 #include "ui/common/endpointformat.h"
 #include "ui/common/tintedicon.h"
 #include "persistence/preferencesstore.h"
 
 #include <QActionGroup>
-#include <QApplication>
-#include <QClipboard>
 #include <QColor>
 #include <QComboBox>
 #include <QFileDialog>
@@ -21,8 +20,7 @@
 #include <QScrollBar>
 #include <QStackedWidget>
 #include <QStyle>
-#include <QStyledItemDelegate>
-#include <QTableView>
+#include <QStyleOptionHeader>
 #include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -39,6 +37,12 @@ constexpr int PreviewLimit = 4096;
 // 整个模型保留的原始字节预算，与 ARCHITECTURE.md §7 的 GUI 历史模型上限一致。
 constexpr qint64 HistoryByteBudget = 4 * 1024 * 1024;
 
+// 历史上的条数上限：与字节预算先到者为准，对应 ARCHITECTURE.md §7.1 的
+// "16 MiB 或 20000 条"。只限字节是不够的：串口遥测常见几十字节的小帧，
+// 光靠 4 MiB 预算能堆到六万条以上，而每条 Message（时间、来源、三个 QUuid、
+// 两个 QString）的元数据开销远大于它那 64 字节的载荷——"限了字节"不等于"限了内存"。
+constexpr int HistoryRowBudget = 20000;
+
 // 真实消息到达的攒批窗口：一帧左右的时间足够把同一次 readyRead 的多条消息
 // 合成一个插入通知；再长会让人感觉记录"迟一拍"。
 constexpr int FlushIntervalMs = 16;
@@ -46,33 +50,40 @@ constexpr int FlushIntervalMs = 16;
 // 换行查看模式下数据内容列的最大行高（以文本行数计）。
 constexpr int WrappedRowLines = 6;
 
-// 钳制行高在文本高度之外保留的绘制余量：交替行底色、焦点框与上下留白。
-constexpr int WrappedRowPaddingPx = 8;
+// 渲染缓存条数上限。命中率只需覆盖"当前可见的一屏"，上限之外整体清空让热点自然重填；
+// 单条缓存约 1KB 量级，512 条把额外内存压在 1MB 以内。
+constexpr int RenderCacheLimit = 512;
 
-// 行高钳制委托。换行开启时 QTableView 会按内容给出行高，4096 字节的 HEX
-// 折行能有上百行，直接把滚动体验顶穿；这里把单行钳在几行文本以内，
-// 更长的内容走悬停提示——换行是查看模式，不是排版模式。
-// 关闭换行时单行高度远小于钳制值，常驻无副作用。
-class TrafficRowDelegate final : public QStyledItemDelegate
-{
-public:
-    using QStyledItemDelegate::QStyledItemDelegate;
-    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
-    {
-        auto size = QStyledItemDelegate::sizeHint(option, index);
-        if (index.column() == TrafficModel::DataColumn)
-            size.setHeight(qMin(size.height(), option.fontMetrics.height() * WrappedRowLines + WrappedRowPaddingPx));
-        return size;
-    }
-};
+// 字符预算按可见容量的比例下发，给截断标记留出位置：预算用满再追加省略号，
+// 最后一行会被挤出可见区，长报文看起来就像"到这里就结束了"。
+constexpr int TextBudgetCapacityPercent = 90;
+
+// 字符预算的下限：HEX 下 64 字节以内一律不裁。这个量级的文本布局开销可以忽略
+// （实测 60 字符整视口重绘 7ms，300 字符 13ms，900 字符 40ms），
+// 而在窄列里按容量算出的预算会小到把一条"本来只是被省略显示"的短报文
+// 改成"看起来被截断"——那是把渲染细节泄漏成了数据事实。
+constexpr int MinTextBudget = 128;
 
 // 丢弃最旧记录直到回到预算内。逐条移除而不是整体截断，保留最新的连续上下文。
-void enforceBudget(QList<Traffic::Message> &records){
+// 字节与条数两个上限先到者为准；返回丢弃的条数，由调用方决定用哪种模型通知。
+int trimToBudget(QList<Traffic::Message> &records, qint64 &bytes)
+{
+    int dropped = 0;
+    while (!records.isEmpty()
+           && (bytes > HistoryByteBudget || records.size() > HistoryRowBudget)) {
+        bytes -= records.first().raw.size();
+        records.removeFirst();
+        ++dropped;
+    }
+    return dropped;
+}
+
+void enforceBudget(QList<Traffic::Message> &records)
+{
     qint64 bytes = 0;
     for (const auto &record : records)
         bytes += record.raw.size();
-    while (bytes > HistoryByteBudget && !records.isEmpty())
-        bytes -= records.takeFirst().raw.size();
+    trimToBudget(records, bytes);
 }
 
 // 保留预览长度，并把 rawLength 修正为真实长度。
@@ -96,30 +107,72 @@ const Traffic::Message &TrafficModel::record(int row) const { return m_records.a
 
 QString TrafficModel::renderDataColumn(int row) const
 {
-    // LRU 式按需渲染：先查缓存，未命中才渲染并缓存。
-    // QHash 在键不存在时 contains() 比 [] 更高效，避免默认构造空值。
-    if (m_renderCache.contains(row))
-        return m_renderCache.value(row);
-
     const auto &r = m_records.at(row);
+
+    // 按消息 id 查缓存：id 在会话内唯一，淘汰旧记录造成的行号平移不会让它失效，
+    // 因此滚动与追加都不会因为缓存错位而重复渲染。
+    const auto cached = m_renderCache.constFind(r.id);
+    if (cached != m_renderCache.constEnd())
+        return *cached;
+
     auto text = PayloadCodec::render(r.raw, m_format);
     if (r.truncated) text += QObject::tr(" …");
     if (r.isFragment() && r.hasMoreFragments) text += QObject::tr(" ⏎");
 
-    // 插入缓存。缓存容量控制：超过 200 条时清理一半最旧的条目，
-    // 避免无限增长但不过度频繁清理（每次清理约 100 条的开销可接受）。
-    if (m_renderCache.size() >= 200) {
-        // 简单策略：清空缓存，让热点数据自然重新填充。
-        // 更精细的 LRU 淘汰需要额外的访问时间戳，这里用粗粒度策略换取实现简洁。
-        m_renderCache.clear();
+    // 只把"当前列宽下画得出来"的那一段交给视图。视图会把拿到的文本逐行画出来，
+    // 文本越长每帧越慢；裁掉看不见的尾部对显示结果没有影响，
+    // 完整内容仍在悬停提示、导出与搜索里（它们都直接读 record.raw）。
+    if (text.size() > m_textBudget) {
+        text.truncate(m_textBudget);
+        text += QObject::tr(" …");
     }
-    m_renderCache.insert(row, text);
+
+    if (m_renderCache.size() >= RenderCacheLimit)
+        m_renderCache.clear();
+    m_renderCache.insert(r.id, text);
     return text;
 }
 
 void TrafficModel::clearRenderCache()
 {
     m_renderCache.clear();
+}
+
+void TrafficModel::setTextBudget(int chars)
+{
+    if (chars < 1 || chars == m_textBudget) return;
+    m_textBudget = chars;
+    clearRenderCache();
+    if (!m_records.isEmpty())
+        emit dataChanged(index(0, DataColumn), index(m_records.size() - 1, DataColumn));
+}
+
+void TrafficModel::setWrapColumns(int charsPerLine)
+{
+    m_wrapColumns = qMax(0, charsPerLine);
+}
+
+int TrafficModel::renderLength(int row) const
+{
+    const auto &r = m_records.at(row);
+    const auto cached = m_renderLengths.constFind(r.id);
+    if (cached != m_renderLengths.constEnd())
+        return *cached;
+    // 与 renderDataColumn() 保持同一套文本：截断标记与续接标记都会占字符，
+    // 少算它们会让长文本正好差一个字符、多折一行。
+    int length = PayloadCodec::render(r.raw, m_format).size();
+    if (r.truncated) length += 2;
+    if (r.isFragment() && r.hasMoreFragments) length += 2;
+    m_renderLengths.insert(r.id, length);
+    return length;
+}
+
+int TrafficModel::wrappedLines(int row) const
+{
+    if (m_wrapColumns <= 0 || row < 0 || row >= m_records.size()) return 1;
+    // 画出来的那一份是"渲染文本按预算截断"后的结果，行数按它折算。
+    const int chars = qMin(renderLength(row), m_textBudget);
+    return qBound(1, (chars + m_wrapColumns - 1) / m_wrapColumns, WrappedRowLines);
 }
 
 QVariant TrafficModel::data(const QModelIndex &index, int role) const
@@ -194,6 +247,9 @@ void TrafficModel::replaceRecords(QList<Traffic::Message> records)
     for (auto &r : records)
         applyPreviewLimit(r);
     enforceBudget(records);
+    m_rawBytes = 0;
+    for (const auto &r : records)
+        m_rawBytes += r.raw.size();
     beginResetModel();
     m_records = std::move(records);
     clearRenderCache();  // 记录全部替换，缓存失效
@@ -206,18 +262,37 @@ void TrafficModel::appendRecords(QList<Traffic::Message> records)
     for (auto &r : records)
         applyPreviewLimit(r);
     const int added = records.size();
-    m_records += records;
-    const int before = m_records.size();
-    enforceBudget(m_records);
-    if (m_records.size() != before) {
-        // 超出预算时丢的是最旧记录，行号整体平移，用 reset 让视图和索引重新对齐。
-        beginResetModel();
-        clearRenderCache();  // 行号平移，所有缓存的行号失效
-        endResetModel();
-        return;
+
+    qint64 incomingBytes = 0;
+    for (const auto &r : records)
+        incomingBytes += r.raw.size();
+
+    // 先把本批计入总量，再算出"包含本批在内"要淘汰多少条。反过来（先裁后插）
+    // 会让上限超出整整一批，把硬约束变成软约束。
+    int drop = 0;
+    qint64 keptBytes = m_rawBytes;
+    while (drop < m_records.size()
+           && (keptBytes + incomingBytes > HistoryByteBudget
+               || (m_records.size() - drop) + added > HistoryRowBudget)) {
+        keptBytes -= m_records.at(drop).raw.size();
+        ++drop;
     }
-    beginInsertRows({}, before - added, before - 1);
-    // 新插入的行不在缓存里，无需清理；已有行的行号不变，缓存仍然有效
+
+    // 增量的移除 + 插入，而不是整表 beginResetModel：reset 会让视图丢弃选中项、
+    // 滚动位置与全部行状态，是"日志写满之后越来越卡"的直接来源。
+    // 渲染缓存按消息 id 索引，淘汰造成的行号平移不会让它失效。
+    if (drop > 0) {
+        beginRemoveRows({}, 0, drop - 1);
+        // 被淘汰的行不会再看，顺手回收它们的渲染长度缓存，避免长跑后只增不减。
+        for (int i = 0; i < drop; ++i)
+            m_renderLengths.remove(m_records.at(i).id);
+        m_records.remove(0, drop);
+        endRemoveRows();
+    }
+    m_rawBytes = keptBytes + incomingBytes;
+    const int first = m_records.size();
+    beginInsertRows({}, first, first + added - 1);
+    m_records += records;
     endInsertRows();
 }
 
@@ -225,7 +300,8 @@ void TrafficModel::setFormat(PayloadCodec::Format format)
 {
     // 渲染格式只影响显示列，原始字节始终是事实依据。
     m_format = format;
-    clearRenderCache();  // 格式变化，所有缓存的渲染文本失效
+    clearRenderCache();   // 格式变化，渲染文本与它的长度都失效
+    m_renderLengths.clear();
     if (!m_records.isEmpty())
         emit dataChanged(index(0, DataColumn), index(m_records.size() - 1, DataColumn));
 }
@@ -377,7 +453,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_wrapAction = displayMenu->addAction(tr("自动换行"));
     m_wrapAction->setObjectName("wrapTraffic");
     m_wrapAction->setCheckable(true);
-    m_wrapAction->setToolTip(tr("数据内容超出列宽时折行显示（行高最多 6 行，更多内容见悬停提示）；大流量时按内容计算行高的开销较大，建议关闭"));
+    m_wrapAction->setToolTip(tr("数据内容超出列宽时折行显示（最多 6 行，其余见悬停提示）"));
     connect(m_wrapAction, &QAction::toggled, this, [this](bool checked) {
         applyWrapMode(checked);
         savePreferences();
@@ -432,19 +508,17 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_flushTimer->setSingleShot(true);
     m_flushTimer->setInterval(FlushIntervalMs);
     connect(m_flushTimer, &QTimer::timeout, this, &TrafficPanel::flushPending);
+    // 列宽变化后重算字符预算：拖动分隔条或缩放窗口时逐像素重算只是白做，
+    // 防抖到停手之后再算一次，重算会连带让渲染缓存按新预算重建。
+    m_budgetDebounce = new QTimer(this);
+    m_budgetDebounce->setSingleShot(true);
+    m_budgetDebounce->setInterval(120);
+    connect(m_budgetDebounce, &QTimer::timeout, this, &TrafficPanel::updateTextBudget);
     m_filter->setSourceModel(m_model);
-    m_table = new QTableView;
-    m_table->setObjectName("trafficTable");
+    // 行高、折行和可见行绘制都在 TrafficLogView 里。过滤让"视图行 → 记录"整体变化时，
+    // 视图自己会在 layoutChanged / modelReset 上重排，面板不再碰行高。
+    m_table = new TrafficLogView;
     m_table->setModel(m_filter);
-    m_table->setItemDelegate(new TrafficRowDelegate(m_table));
-    m_table->setAlternatingRowColors(true);
-    m_table->setShowGrid(false);
-    m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_table->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_table->setWordWrap(false);
-    m_table->verticalHeader()->hide();
-    m_table->verticalHeader()->setDefaultSectionSize(33);
     auto *header = m_table->horizontalHeader();
     header->setSectionResizeMode(QHeaderView::Interactive);
     // 列宽一律按枚举写死值。裸下标在上次加"对端"列时就悄悄错位过一次，
@@ -458,6 +532,10 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_table->setColumnWidth(TrafficModel::SourceColumn, 96);
     m_table->setColumnWidth(TrafficModel::PeerColumn, 120);
     fitFixedColumns();
+    // 数据内容列是 Stretch：窗口缩放与固定列增宽都会改变它的实际宽度，字符预算要跟着走。
+    connect(header, &QHeaderView::sectionResized, this, [this](int section, int, int) {
+        if (section == TrafficModel::DataColumn) m_budgetDebounce->start();
+    });
     m_stack = new QStackedWidget;
     m_stack->addWidget(m_table);
     auto *empty = new QLabel(tr("等待接收数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。"));
@@ -485,6 +563,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(clear, &QPushButton::clicked, this, [this] {
         m_pending.clear();
         m_model->replaceRecords({});
+        m_fitScannedId = 0; // 记录清空，列宽测量从头再来
         updateSummary();
     });
     connect(exportButton, &QPushButton::clicked, this, &TrafficPanel::exportVisible);
@@ -492,45 +571,16 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         if (follow) m_table->scrollToBottom();
         savePreferences();
     });
-    // 任何形式的向上翻阅（拖动、滚轮、翻页）都解除“滚动到底”，与悬停提示的承诺一致。
+    // 任何形式的向上翻阅（拖动、滚轮、翻页）都解除“滚动到底”。
+    // 视图自己改滚动范围时不算翻阅，否则每次追加都会把跟随关掉。
     connect(m_table->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int position) {
+        if (m_table->isScrollAdjusting()) return;
         if (position < m_table->verticalScrollBar()->maximum()) m_follow->setChecked(false);
     });
-    m_table->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_table, &QTableView::customContextMenuRequested, this, [this](const QPoint &point) {
-        const auto index = m_table->indexAt(point);
-        if (!index.isValid()) return;
-        const auto &record = m_model->record(m_filter->mapToSource(index).row());
-        QMenu menu;
-        auto *copy = menu.addAction(tr("复制 HEX"));
-        auto *reuse = menu.addAction(tr("填入发送区"));
-        menu.addSeparator();
-        // 边界是消息的事实属性，不是显示设置：把"只显示完整消息"的开关反应用到这一行，
-        // 比让用户回到顶栏菜单里找同一个条件更直接。
-        auto *onlyWhole = menu.addAction(tr("只看完整消息"));
-        onlyWhole->setCheckable(true);
-        onlyWhole->setChecked(m_wholeAction->isChecked());
-        menu.addSeparator();
-        // 关联 id 可直接复制，用来和文件记录、路由规则对照。
-        auto *copyIds = menu.addAction(record.requestId.isNull() && record.routeId.isNull() && record.frameId.isNull()
-                ? tr("复制行标识")
-                : tr("复制关联 ID"));
-        const auto *chosen = menu.exec(m_table->viewport()->mapToGlobal(point));
-        if (chosen == copy) QApplication::clipboard()->setText(PayloadCodec::render(record.raw, PayloadCodec::Format::Hex));
-        if (chosen == reuse) emit reusePayload(record.raw);
-        if (chosen == onlyWhole) m_wholeAction->setChecked(!m_wholeAction->isChecked());
-        if (chosen == copyIds) {
-            QStringList ids;
-            if (!record.frameId.isNull()) ids << tr("帧 %1").arg(record.frameId.toString());
-            if (!record.routeId.isNull()) ids << tr("路由 %1").arg(record.routeId.toString());
-            if (!record.requestId.isNull()) ids << tr("请求 %1").arg(record.requestId.toString());
-            if (ids.isEmpty())
-                ids << QStringLiteral("%1 · %2").arg(endpointLabel(record.source.endpointIndex, record.source.endpointKind),
-                                        record.timestamp.toString(Qt::ISODateWithMs));
-            QApplication::clipboard()->setText(ids.join(QLatin1Char('\n')));
-        }
-    });
     updateSummary();
+    // 构造末尾先按当前列宽算一次字符预算：偏好里换行是关闭状态时 setChecked(false)
+    // 不会触发 toggled，若只依赖 applyWrapMode，默认配置下就会一直按"不裁剪"渲染。
+    updateTextBudget();
 }
 
 void TrafficPanel::setPorts(const QList<PortDraft> &ports)
@@ -574,6 +624,7 @@ void TrafficPanel::loadExample(const QList<PortDraft> &ports)
         records.append(message);
     }
     m_model->replaceRecords(records);
+    m_fitScannedId = 0; // 整批替换，列宽测量从头再来
     fitFixedColumns(); // 端点类型和对端地址是刚定下来的，列宽要跟着量一次
     updateSummary();
     if (m_follow->isChecked()) m_table->scrollToBottom();
@@ -606,18 +657,32 @@ void TrafficPanel::flushPending()
     if (m_follow->isChecked()) m_table->scrollToBottom();
 }
 
+void TrafficPanel::updateTextBudget()
+{
+    // 字符预算 = 当前列宽下真正画得出来的字符数。视图只画这一段，
+    // 文本越长每帧越慢。裁掉的只是绘制用的那一份，悬停提示、导出与搜索都直接读原始字节。
+    const int columnWidth = m_table->columnWidth(TrafficModel::DataColumn);
+    if (columnWidth <= 0) {
+        // 还没布局完。可见时再试一次；藏着的面板不要空转定时器。
+        if (isVisible()) m_budgetDebounce->start();
+        return;
+    }
+    const QFontMetrics metrics = m_table->fontMetrics();
+    const auto pad = m_table->cellPadding();
+    const int charWidth = qMax(1, metrics.horizontalAdvance(QLatin1Char('0')));
+    const int charsPerLine = qMax(16, (columnWidth - pad.left() - pad.right()) / charWidth);
+    const int lines = m_wrapAction->isChecked() ? WrappedRowLines : 1;
+    // 先写折行列数，再改预算：预算变化会通知视图重算行高，那时候列数必须已经是新的。
+    // 按字符折行和绘制用的是同一个列数，不再为词边界多留一行。
+    m_model->setWrapColumns(m_wrapAction->isChecked() ? charsPerLine : 0);
+    m_model->setTextBudget(qMax(MinTextBudget, charsPerLine * lines * TextBudgetCapacityPercent / 100));
+    m_table->relayoutRows();
+}
+
 void TrafficPanel::applyWrapMode(bool wrap)
 {
     m_table->setWordWrap(wrap);
-    auto *header = m_table->verticalHeader();
-    header->setSectionResizeMode(wrap ? QHeaderView::ResizeToContents : QHeaderView::Interactive);
-    if (!wrap) header->setDefaultSectionSize(33);
-    // 数据不动，只让行高按当前模式整体重算：开启后长内容折行（委托钳到 6 行），
-    // 关闭后回到统一的 33px 单行省略。行高由 ResizeToContents 模式切换与本次
-    // 模型重置各自触发重算，无需再手动 resizeRowsToContents 重复算一遍。
-    // 注意：refreshLayout 会触发 beginResetModel，但不会清空渲染缓存——
-    // 换行模式切换不改变数据内容，缓存的文本仍然有效，只是行高重新计算。
-    m_model->refreshLayout();
+    updateTextBudget();
 }
 
 // m_format 下标 → 格式枚举的唯一换算点：格式切换的过滤联动与日志落盘都从这里取，
@@ -696,6 +761,14 @@ void TrafficPanel::setPreferences(PreferencesStore *store)
     loadPreferences();
 }
 
+void TrafficPanel::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    // 显示之前数据内容列还没有真实宽度（Stretch 要等布局），按它算出来的行数与行高
+    // 都是错的。这里补一次；列宽随后真的变化时，sectionResized 还会再触发一次。
+    if (m_budgetDebounce) m_budgetDebounce->start();
+}
+
 void TrafficPanel::loadPreferences()
 {
     if (!m_preferences) return;
@@ -767,34 +840,37 @@ void TrafficPanel::updatePortVisibility()
 
 void TrafficPanel::fitFixedColumns()
 {
-    // 遍历可见行实测文字宽度，取最大值再加样式表带来的开销。只增不减：
+    // 遍历可见行实测文字宽度，取最大值再加单元格内边距。只增不减：
     // 数据滚动时列宽来回跳比稍微宽一点更难用。固定列变宽的代价由 Stretch 的数据内容列吸收。
-    //
-    // 开销不能拍一个常数：workbench.qss 给 QTableView::item 加了 padding，Qt 绘制时
-    // 还会留出焦点框和文档边距。用 QStyle::subElementRect(SE_ItemViewItemText) 问
-    // 样式本身"文本区到底有多宽"，比在这里猜 padding 数值可靠——它和实际绘制同源。
     const QFontMetrics metrics = m_table->fontMetrics();
-    // 量样式开销要用 QStyleOption 载体：subElementRect 会把 option 拷一份再改，
-    // 传裸矩形拿不到真实的文本区。SE_ItemViewItemText 与实际绘制同源。
-    QStyleOptionViewItem itemOption;
-    itemOption.initFrom(m_table);
-    itemOption.rect = QRect(0, 0, 400, metrics.height());
-    const int overhead = qMax(0, itemOption.rect.width()
-        - m_table->style()->subElementRect(QStyle::SE_ItemViewItemText, &itemOption, m_table).width());
+    // 对端列绘制用的是等宽字体，列宽必须按那套字体量，否则数字会被裁掉。
+    QFont peerFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    peerFont.setPointSize(10);
+    const QFontMetrics peerMetrics(peerFont);
+    const auto pad = m_table->cellPadding();
+    const int overhead = pad.left() + pad.right();
     int portWidth = 0;
     int peerWidth = 0;
+    // 只量上次之后新到的记录：端点标签与对端地址的最大宽度只会随新记录增长，
+    // 已经量过的不必重来。上限从"每次追加全表遍历"变成"只看新批次"，
+    // 记录数上万时这一项的差别从毫秒级变成常数级。
     for (int row = 0; row < m_model->rowCount(); ++row) {
         const auto &record = m_model->record(row);
+        if (record.id <= m_fitScannedId) continue;
         portWidth = qMax(portWidth, metrics.horizontalAdvance(endpointLabel(record.source.endpointIndex, record.source.endpointKind)));
         if (record.source.hasPeer())
-            peerWidth = qMax(peerWidth, metrics.horizontalAdvance(record.source.peerAddress));
+            peerWidth = qMax(peerWidth, peerMetrics.horizontalAdvance(record.source.peerAddress));
     }
+    if (m_model->rowCount() > 0) m_fitScannedId = m_model->record(m_model->rowCount() - 1).id;
     // 表头有自己的 padding，单独按表头样式算，不能和数据行共用一个开销值。
-    QStyleOptionViewItem headerOption;
-    headerOption.initFrom(m_table);
-    headerOption.rect = QRect(0, 0, 400, 20);
-    const int headerOverhead = qMax(0, headerOption.rect.width()
-        - m_table->style()->subElementRect(QStyle::SE_HeaderLabel, &headerOption, m_table).width());
+    auto *header = m_table->horizontalHeader();
+    QStyleOptionHeader headerOption;
+    headerOption.initFrom(header);
+    headerOption.rect = QRect(0, 0, 400, qMax(20, header->sizeHint().height()));
+    const QRect label = header->style()->subElementRect(QStyle::SE_HeaderLabel, &headerOption, header);
+    const int headerOverhead = label.isValid() && label.width() < headerOption.rect.width()
+        ? headerOption.rect.width() - label.width()
+        : 16;
     const int sourceNeeded = qMax(portWidth + overhead,
         metrics.horizontalAdvance(m_model->headerData(TrafficModel::SourceColumn, Qt::Horizontal).toString()) + headerOverhead);
     const int peerNeeded = qMax(peerWidth + overhead,
@@ -826,10 +902,14 @@ void TrafficPanel::updateSummary()
     m_stack->setCurrentIndex(count == 0 ? 1 : 0);
     // 空态提示由表格区的空态文案承担；顶栏标记只提醒示例数据不计入统计。
     const bool sampleVisible = m_sampleAction->isChecked();
-    m_exampleBadge->setText(sampleVisible ? tr("示例数据 · 不计入收发统计") : tr("仅显示真实收发"));
+    // 文案没变就不 setText：QLabel::setText 每次都重算尺寸并请求重绘，
+    // 16ms 一拍的刷新节奏下，恒定文案的重复赋值会变成持续的无效重排。
+    const auto badge = sampleVisible ? tr("示例数据 · 不计入收发统计") : tr("仅显示真实收发");
+    if (m_exampleBadge->text() != badge) m_exampleBadge->setText(badge);
     m_exampleBadge->setVisible(count > 0);
-    m_summary->setText(m_paused ? tr("显示已暂停 · 期间丢弃 %1 条").arg(m_droppedWhilePaused)
-                              : tr("显示 %1 / %2 条  ·  右键记录可复制或填入发送区").arg(m_filter->rowCount()).arg(count));
+    const auto summary = m_paused ? tr("显示已暂停 · 期间丢弃 %1 条").arg(m_droppedWhilePaused)
+                                 : tr("显示 %1 / %2 条").arg(m_filter->rowCount()).arg(count);
+    if (m_summary->text() != summary) m_summary->setText(summary);
 }
 
 void TrafficPanel::exportVisible()

@@ -19,8 +19,9 @@ class QLineEdit;
 class QMenu;
 class PreferencesStore;
 class QPushButton;
+class QShowEvent;
 class QStackedWidget;
-class QTableView;
+class TrafficLogView;
 class QTimer;
 
 // 消息是 domain 的值类型（Traffic::Message）：原始字节、时间戳、来源、长度都是事实，
@@ -49,17 +50,32 @@ public:
     void appendRecords(QList<Traffic::Message> records);
     // 数据内容列的渲染格式，由 PayloadCodec 与发送区共用同一套规则。
     void setFormat(PayloadCodec::Format format);
+    // 数据内容列交给委托的文本长度上限（字符）。委托会为拿到的整段文本建立折行 /
+    // 省略布局，文本长度直接决定每帧成本；完整内容仍在悬停提示、复制、导出与搜索里。
+    void setTextBudget(int chars);
+    // 换行行高换算：每行能放多少字符。模型据此把一条记录的渲染文本折算成显示行数，
+    // 只保存"渲染文本有多少字符"，行数用算术得出。
+    // 于是列宽变化时的全表重算是纯算术，不需要重新渲染、更不需要逐行测量文本——
+    // 后者正是"开了换行就卡"的根因。
+    void setWrapColumns(int charsPerLine);
+    int wrapColumns() const { return m_wrapColumns; }
+    // 该行按当前列宽需要几行（1..WrappedRowLines）。未启用换算时恒为 1。
+    int wrappedLines(int row) const;
     const Traffic::Message &record(int row) const;
-    // 切换换行模式等全局显示形态时重建视图行高：数据不动，只让行高按当前模式重算。
-    void refreshLayout() { beginResetModel(); endResetModel(); }
 private:
-    // 渲染缓存：按需渲染 DataColumn 文本，减少自动换行时 sizeHint() 的重复开销。
-    // 键为行号，值为当前格式的渲染文本；格式切换或模型重置后失效。
+    // 渲染缓存：按需渲染 DataColumn 文本，避免同一帧内多处询问时重复渲染。
+    // 键为消息 id：会话内唯一，且不随淘汰旧记录导致的行号平移而变化。
     QString renderDataColumn(int row) const;
     void clearRenderCache();
+    // 该行渲染文本的字符数（含截断/续接标记），按 id 惰性缓存；格式切换后失效。
+    int renderLength(int row) const;
     QList<Traffic::Message> m_records;
+    qint64 m_rawBytes = 0; // m_records 的原始字节总数，避免每次追加都全量重算
     PayloadCodec::Format m_format = PayloadCodec::Format::Hex;
-    mutable QHash<int, QString> m_renderCache;  // 缓存容量由 QHash 自动管理
+    int m_textBudget = INT_MAX;
+    int m_wrapColumns = 0; // 0 表示未启用换行行数换算
+    mutable QHash<quint64, QString> m_renderCache;
+    mutable QHash<quint64, qint32> m_renderLengths;
 };
 
 class TrafficFilter : public QSortFilterProxyModel
@@ -104,8 +120,10 @@ public:
     void appendMessages(const QList<Traffic::Message> &messages);
     // 组合根注入的偏好存储；为空时全部显示选项不落盘（示例预览等场景）。
     void setPreferences(PreferencesStore *store);
-signals:
-    void reusePayload(const QByteArray &bytes);
+protected:
+    // 列宽与字符预算要等布局落地才算得准：面板显示后主动补算一次，
+    // 否则"启动时恢复换行"会先按 0 列宽算出一份错误的行高。
+    void showEvent(QShowEvent *event) override;
 private:
     void updateFilter();
     void updatePortVisibility();
@@ -113,8 +131,11 @@ private:
     void exportVisible();
     // 把攒批里的消息整批入模并收尾（列宽防抖、滚动到底、计数摘要）。
     void flushPending();
-    // 换行查看模式：开启后数据内容列按列宽折行，行高钳制交给委托。
+    // 换行查看模式：开启后数据内容列按字符折行，行高按内容行数给。
     void applyWrapMode(bool wrap);
+    // 数据内容列的字符预算：按当前列宽算出"真正画得出来"的字符数下发给模型。
+    // 列宽变化（窗口缩放、固定列增宽）后重算，避免把整段长文本交出去逐帧排版。
+    void updateTextBudget();
     // m_format 下标 → 格式枚举的唯一换算点，格式切换联动与日志落盘共用。
     PayloadCodec::Format currentDisplayFormat() const;
     // 日志记录：把入模的每条消息按当前显示格式写成一行，持续追加到用户选定的文件。
@@ -128,9 +149,9 @@ private:
     // 按实际内容调整固定列宽：端口标签与对端地址的长度和端点类型、地址位数相关，
     // 写死的常量迟早会截断它们。数据内容列始终 Stretch，不参与。
     void fitFixedColumns();
-    TrafficModel *m_model;
-    TrafficFilter *m_filter;
-    QTableView *m_table;
+    TrafficModel *m_model = nullptr;
+    TrafficFilter *m_filter = nullptr;
+    TrafficLogView *m_table = nullptr;
     QComboBox *m_format;
     QLineEdit *m_search;
     // A/B 端点开关直接放在顶栏选项栏里，快捷切换显示范围；其余显示选项在"显示设置"菜单。
@@ -151,6 +172,10 @@ private:
     bool m_paused = false;
     quint64 m_droppedWhilePaused = 0;
     QTimer *m_fitDebounce = nullptr; // 高频追加时限流量宽：防抖到节拍执行
+    // 列宽变化后重算字符预算：拖动分隔条时逐像素重算会白做大量工作，同样防抖。
+    QTimer *m_budgetDebounce = nullptr;
+    // fitFixedColumns 只量新记录：端点标签与对端地址的最大宽度已经量过的不再重复量。
+    quint64 m_fitScannedId = 0;
     // 攒批缓冲：appendMessages 先入缓冲，16ms 一拍整批入模。
     QList<Traffic::Message> m_pending;
     QTimer *m_flushTimer = nullptr;

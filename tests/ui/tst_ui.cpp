@@ -4,16 +4,17 @@
 #include "ui/common/payloadcodec.h"
 #include "ui/panels/sending/sendpanel.h"
 #include "ui/panels/traffic/trafficpanel.h"
+#include "ui/panels/traffic/trafficlogview.h"
 #include "discovery/portdiscoveryservice.h"
 #include "persistence/preferencesstore.h"
 
+#include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
-#include <QHeaderView>
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QLineEdit>
@@ -27,7 +28,6 @@
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QStyleOptionSpinBox>
-#include <QTableView>
 #include <QTabWidget>
 #include <QToolButton>
 #include <QTemporaryDir>
@@ -682,17 +682,189 @@ private slots:
         // 摘除组合根注入的偏好存储：本用例改显示开关，不该写进真实用户的 preferences.ini。
         window.findChild<TrafficPanel *>()->setPreferences(nullptr);
         auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
-        auto *table = window.findChild<QTableView *>(QStringLiteral("trafficTable"));
-        QVERIFY(wrapAction && table);
+        auto *table = window.findChild<TrafficLogView *>(QStringLiteral("trafficTable"));
+        auto *model = window.findChild<TrafficModel *>();
+        QVERIFY(wrapAction && table && model);
         QCOMPARE(wrapAction->isChecked(), false);
         QCOMPARE(table->wordWrap(), false);
+        QCOMPARE(table->defaultRowHeight(), 33);
+
+        // 换行行高按各条内容的实际行数给：先让长报文进模型，才能看出行高是否跟着内容走。
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        QByteArray longRaw(1024, Qt::Uninitialized);
+        for (int i = 0; i < longRaw.size(); ++i)
+            longRaw[i] = char(i & 0xFF);
+        Traffic::Message longMessage;
+        longMessage.id = 999001;
+        longMessage.direction = Traffic::Direction::Receive;
+        longMessage.source.endpointId = endpointId;
+        longMessage.source.endpointIndex = 0;
+        longMessage.source.endpointKind = PortDraft::Serial;
+        longMessage.raw = longRaw;
+        longMessage.rawLength = longRaw.size();
+
         wrapAction->setChecked(true);
         QTRY_COMPARE(table->wordWrap(), true);
-        QCOMPARE(table->verticalHeader()->sectionResizeMode(0), QHeaderView::ResizeToContents);
-        // 折行是阅读模式：切回后恢复单行省略与固定行高，行高模式也随之还原。
+        const int lineHeight = table->fontMetrics().height();
+        // 单行高度 = 一行文本 + 绘制余量；余量从"单行基线"里反推，测试不复制实现常数。
+        const int lineUnit = table->defaultRowHeight();
+        const int padding = lineUnit - lineHeight;
+        QVERIFY2(lineUnit > 0 && padding >= 0, "换行模式的行高基线应是一行文本");
+
+        auto *proxy = qobject_cast<QSortFilterProxyModel *>(table->model());
+        QVERIFY(proxy);
+        // 行高 = 该行内容需要的行数 × 行高单位 + 绘制余量。逐行独立算，
+        // 不是全表一个常数——这正是"短报文不再占着长报文高度"的判据。
+        const auto expectedHeight = [&](int viewRow) {
+            const int sourceRow = proxy->mapToSource(proxy->index(viewRow, 0)).row();
+            return model->wrappedLines(sourceRow) * lineHeight + padding;
+        };
+
+        const int shortRows = table->model()->rowCount();
+        QVERIFY(shortRows > 0);
+        const int shortSourceRow = proxy->mapToSource(proxy->index(0, 0)).row();
+        const int shortLines = model->wrappedLines(shortSourceRow);
+
+        // 一条 1KB 报文（3071 字符 HEX）必须占更多行，且被折行上限钳住。
+        window.findChild<TrafficPanel *>()->appendMessages({longMessage});
+        QTRY_COMPARE(model->rowCount(), shortRows + 1);
+        const int longViewRow = table->model()->rowCount() - 1;
+        const int longSourceRow = proxy->mapToSource(proxy->index(longViewRow, 0)).row();
+        QVERIFY2(model->wrappedLines(longSourceRow) > shortLines,
+                 "1KB 报文必须比十几字节的示例报文占更多行");
+        QVERIFY2(model->wrappedLines(longSourceRow) <= 6, "折行行数必须被上限钳住");
+
+        // 列宽要等布局与预算防抖落地，行高才按内容算得出来，所以轮询等待收敛。
+        QTRY_COMPARE(table->rowHeight(longViewRow), expectedHeight(longViewRow));
+        QVERIFY2(table->rowHeight(longViewRow) > lineUnit,
+                 "长报文行高必须高于单行基线");
+        // 前面的短报文各行按自己的内容定高，没有被长报文带着一起变高。
+        for (int row = 0; row < shortRows; ++row)
+            QCOMPARE(table->rowHeight(row), expectedHeight(row));
+
+        // 连续大批追加并触发头部淘汰后，行高仍必须跟内容走。
+        // 旧的 QHeaderView section 会在"删头部 + 加尾部"之后丢高度，折行看起来就停了。
+        quint64 nextId = 100000;
+        for (int round = 0; round < 2; ++round) {
+            QList<Traffic::Message> batch;
+            batch.reserve(2500);
+            for (int i = 0; i < 2499; ++i) {
+                auto message = longMessage;
+                message.id = nextId++;
+                batch.append(message);
+            }
+            auto tail = longMessage;
+            tail.id = nextId++;
+            if (round == 1) {
+                tail.raw = QByteArray::fromHex("0102");
+                tail.rawLength = tail.raw.size();
+            }
+            batch.append(tail);
+            window.findChild<TrafficPanel *>()->appendMessages(batch);
+            QTRY_COMPARE(model->record(model->rowCount() - 1).id, nextId - 1);
+        }
+        QVERIFY2(model->rowCount() < 5000, "字节预算应该已经从头部淘汰旧记录");
+        const int floodedRows = table->model()->rowCount();
+        const int tailRow = floodedRows - 1;
+        const int beforeTail = floodedRows - 2;
+        QTRY_COMPARE(table->rowHeight(tailRow), expectedHeight(tailRow));
+        QTRY_COMPARE(table->rowHeight(beforeTail), expectedHeight(beforeTail));
+        QTRY_COMPARE(table->rowHeight(0), expectedHeight(0));
+        QVERIFY2(model->wrappedLines(proxy->mapToSource(proxy->index(tailRow, 0)).row()) == 1,
+                 "尾部短报文必须仍是一行");
+        QVERIFY2(table->rowHeight(beforeTail) > table->rowHeight(tailRow),
+                 "头部淘汰之后，长报文行高不能塌成短报文的高度");
+
+        // 切回单行省略：所有行回到统一 33px。
         wrapAction->setChecked(false);
         QTRY_COMPARE(table->wordWrap(), false);
-        QCOMPARE(table->verticalHeader()->sectionResizeMode(0), QHeaderView::Interactive);
+        QCOMPARE(table->defaultRowHeight(), 33);
+        for (int row = 0; row < table->model()->rowCount(); ++row)
+            QCOMPARE(table->rowHeight(row), 33);
+    }
+
+    // 大报文只在绘制那一份上裁剪，数据本身必须保持完整。
+    // 委托会为拿到的整段文本建立折行 / 省略布局，文本长度直接决定每帧成本：
+    // 实测 4KB 报文（12287 字符 HEX）不裁剪时单次整视口重绘要 441ms，
+    // 按可见行数裁到千字符以内后降到 20ms 上下。
+    void hugeMessagesRenderBoundedTextOnly()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
+        auto *table = window.findChild<TrafficLogView *>(QStringLiteral("trafficTable"));
+        auto *model = window.findChild<TrafficModel *>();
+        QVERIFY(wrapAction && table && model);
+        QTest::qWait(50); // 等列宽完成布局，字符预算才能按真实列宽算
+        wrapAction->setChecked(true);
+
+        // 真实形状的 4KB 报文：每个字节都不同，HEX 渲染后 12287 字符。
+        QByteArray raw(4096, Qt::Uninitialized);
+        for (int i = 0; i < raw.size(); ++i)
+            raw[i] = char(i & 0xFF);
+        const auto full = PayloadCodec::render(raw, PayloadCodec::Format::Hex);
+        QCOMPARE(full.size(), 12287);
+
+        Traffic::Message message;
+        message.id = 1;
+        message.direction = Traffic::Direction::Receive;
+        message.source.endpointIndex = 0;
+        message.source.endpointKind = PortDraft::Serial;
+        message.source.endpointId = QUuid::createUuid();
+        message.raw = raw;
+        message.rawLength = raw.size();
+        window.findChild<TrafficPanel *>()->appendMessages({message});
+        QTRY_COMPARE(model->rowCount(), 1);
+
+        const auto shownText = [model]() {
+            return model->index(0, TrafficModel::DataColumn).data(Qt::DisplayRole).toString();
+        };
+        QTRY_VERIFY2(shownText().size() < full.size() / 2,
+                     qPrintable(QStringLiteral("绘制文本未按列宽裁剪：%1 / %2 字符")
+                                    .arg(shownText().size()).arg(full.size())));
+        QVERIFY2(shownText().startsWith(full.left(64)), "裁剪必须保留开头，改的是尾部看不见的部分");
+        QVERIFY(shownText().endsWith(QStringLiteral("…")));
+
+        // 内存里仍然是完整的结构化数据：原始字节一字未动，真实长度单独保留。
+        QCOMPARE(model->record(0).raw.size(), raw.size());
+        QCOMPARE(model->record(0).displayBytes(), qint64(raw.size()));
+        // 完整内容仍可从悬停提示与导出拿到，裁剪不影响排障。
+        QVERIFY(model->index(0, TrafficModel::DataColumn).data(Qt::ToolTipRole).toString().contains(full));
+    }
+
+    // 历史上限必须同时限字节和条数。只限字节时，串口遥测那种几十字节的小帧
+    // 能把条数堆到六万以上，每条 Message 的元数据（时间、来源、三个 QUuid、
+    // 两个 QString）远大于它那点载荷——"限了字节"不等于"限了内存"。
+    void historyBudgetAlsoLimitsRowCount()
+    {
+        TrafficModel model;
+        Traffic::Message tiny;
+        tiny.direction = Traffic::Direction::Receive;
+        tiny.source.endpointIndex = 0;
+        tiny.source.endpointKind = PortDraft::Serial;
+        tiny.source.endpointId = QUuid::createUuid();
+        tiny.raw = QByteArray::fromHex("0102"); // 2 字节：4 MiB 字节预算能装两百万条
+        tiny.rawLength = tiny.raw.size();
+
+        quint64 id = 1;
+        for (int round = 0; round < 30; ++round) {
+            QList<Traffic::Message> batch;
+            batch.reserve(1000);
+            for (int i = 0; i < 1000; ++i) {
+                auto message = tiny;
+                message.id = id++;
+                batch.append(message);
+            }
+            model.appendRecords(batch);
+        }
+        QCOMPARE(model.rowCount(), 20000);
+        // 淘汰只从最旧一端发生：最新的一定在，最旧的恰好被挤掉。
+        QCOMPARE(model.record(model.rowCount() - 1).id, id - 1);
+        QCOMPARE(model.record(0).id, id - 20000);
     }
 
     void displayPreferencesPersistAcrossPanels()
@@ -799,7 +971,7 @@ private slots:
         QTest::qWait(50);
         auto *a = window.findChild<PortSelectorWidget *>("endpointA");
         auto *b = window.findChild<PortSelectorWidget *>("endpointB");
-        auto *traffic = window.findChild<QTableView *>("trafficTable");
+        auto *traffic = window.findChild<TrafficLogView *>("trafficTable");
         QVERIFY(a && b && traffic);
         const auto fits = [&window](QWidget *w) {
             return window.rect().contains(QRect(w->mapTo(&window, QPoint()), w->size()));
@@ -1204,31 +1376,28 @@ private slots:
         window.show();
         QTest::qWait(30);
         window.loadExample();
-        auto *table = window.findChild<QTableView *>("trafficTable");
+        auto *table = window.findChild<TrafficLogView *>("trafficTable");
         QVERIFY(table);
         auto *model = table->model();
         QCOMPARE(model->rowCount(), 12);
 
-        // 断言"绘制区放得下文字"，而不是"列宽减一个拍出来的常数放得下"。
-        // workbench.qss 给 QTableView::item 加了 padding，直接比 columnWidth 和
-        // horizontalAdvance 会在样式生效时给出假通过。SE_ItemViewItemText 与实际
-        // 绘制同源，量出来的就是真正的文本区。
-        const auto textAreaWidth = [table](int column) {
-            QStyleOptionViewItem option;
-            option.initFrom(table);
-            option.rect = QRect(0, 0, 400, table->fontMetrics().height());
-            const int overhead = qMax(0, option.rect.width()
-                - table->style()->subElementRect(QStyle::SE_ItemViewItemText, &option, table).width());
-            return table->columnWidth(column) - overhead;
-        };
+        // 文本区就是列宽减去视图实际使用的单元格内边距。对端列用等宽字体，
+        // 必须按那套字体量，否则会把"列宽够了"误判成绘制也放得下。
+        const auto pad = table->cellPadding();
         for (int row = 0; row < model->rowCount(); ++row) {
             for (const int column : {TrafficModel::SourceColumn, TrafficModel::PeerColumn}) {
-                const auto text = model->index(row, column).data().toString();
-                QVERIFY2(table->fontMetrics().horizontalAdvance(text) <= textAreaWidth(column),
+                const auto index = model->index(row, column);
+                const auto text = index.data().toString();
+                QFont font = table->font();
+                const QVariant fontData = index.data(Qt::FontRole);
+                if (fontData.isValid()) font = fontData.value<QFont>();
+                const int advance = QFontMetrics(font).horizontalAdvance(text);
+                const int textAreaWidth = table->columnWidth(column) - pad.left() - pad.right();
+                QVERIFY2(advance <= textAreaWidth,
                          qPrintable(QStringLiteral("第 %1 行第 %2 列被截断：%3（文本区 %4px，字宽 %5px）")
                                         .arg(row).arg(column).arg(text)
-                                        .arg(textAreaWidth(column))
-                                        .arg(table->fontMetrics().horizontalAdvance(text))));
+                                        .arg(textAreaWidth)
+                                        .arg(advance)));
             }
         }
     }
@@ -1241,7 +1410,7 @@ private slots:
         window.show();
         QTest::qWait(30);
         window.loadExample();
-        auto *table = window.findChild<QTableView *>("trafficTable");
+        auto *table = window.findChild<TrafficLogView *>("trafficTable");
         auto *editor = window.findChild<QPlainTextEdit *>("sendEditor");
         QVERIFY(table && editor);
         // 显示格式下拉框逐项来自共享 PayloadCodec，与发送区同一套列表与规则。
