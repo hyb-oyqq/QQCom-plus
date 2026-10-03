@@ -28,9 +28,9 @@ const QColor BodyColor(0x1C, 0x24, 0x30);
 const QColor TxColor(0x35, 0x65, 0xce);
 const QColor RxColor(0x00, 0x85, 0x77);
 
-// 行号 7 位右对齐 + 空格。超过 9,999,999 行后行号会自然加宽，
-// 只影响那一行的列对齐——先到那个量级的是内存预算。
-constexpr int NumberColumns = 7;
+// 行号顶格左对齐：右对齐补的空格在自动换行下看起来像首行缩进，
+// 与不带前缀的续行/HEX 对照行错位。数字位数不同带来的列微差
+// 远不如"每一行都从同一列开始"重要。
 
 // ANSI SGR 前景色调色板：浅色背景下可直接阅读的标准 8 色 + 亮色 8 色。
 // "白/亮白"映射为浅灰——纯白在浅底上不可见，控制台惯例按可读性处理。
@@ -196,8 +196,7 @@ void TrafficTextView::appendMessages(
                     if (!options.pure) {
                         QString metaPrefix;
                         if (options.number)
-                            metaPrefix += QStringLiteral("%1 ")
-                                .arg(QString::number(m_nextNumber).rightJustified(NumberColumns));
+                            metaPrefix += QStringLiteral("%1 ").arg(m_nextNumber);
                         if (options.timestamp)
                             metaPrefix += r.timestamp.toString(QStringLiteral("HH:mm:ss.zzz "));
                         if (options.length)

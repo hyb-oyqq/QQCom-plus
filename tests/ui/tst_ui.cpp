@@ -1356,7 +1356,8 @@ private slots:
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 1);
         QCOMPARE(text->document()->blockCount(), 2); // 数据行 + HEX 对照行
-        QCOMPARE(text->document()->firstBlock().text(), QStringLiteral("      1 [2 B] OK"));
+        // 行号顶格左对齐：右对齐补空格在自动换行下像首行缩进，与续行错位。
+        QCOMPARE(text->document()->firstBlock().text(), QStringLiteral("1 [2 B] OK"));
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("4F 4B"));
 
         // 行号是独立开关：关掉后只剩长度与数据。
@@ -1377,6 +1378,53 @@ private slots:
         window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(false);
         window.findChild<QAction *>(QStringLiteral("showLineNumber"))->setChecked(true);
         window.findChild<QAction *>(QStringLiteral("showLength"))->setChecked(false);
+    }
+
+    // 显示格式为 HEX 时不重复显示 HEX 对照行：数据本身就是 HEX，再来一行一模一样。
+    // 已固化的旧行不回溯（控制台语义），此断言锁定的是"新行"的行为。
+    void hexEchoSuppressedInHexFormat()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        QVERIFY(text && model);
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("HEX"));
+        // 关掉时间戳/方向，行内容只剩行号 + 数据，断言更聚焦。
+        window.findChild<QAction *>(QStringLiteral("showTimestamp"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("showDirection"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(true);
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        Traffic::Message message;
+        message.id = 1;
+        message.timestamp = QDateTime::currentDateTime();
+        message.direction = Traffic::Direction::Receive;
+        message.source.endpointId = endpointId;
+        message.source.endpointIndex = 0;
+        message.source.endpointKind = PortDraft::Serial;
+        message.raw = QByteArray("OK");
+        message.rawLength = 2;
+        panel->appendMessages({message});
+        QTRY_COMPARE(model->rowCount(), 1);
+        QCOMPARE(text->document()->blockCount(), 1); // 只有数据行，没有 HEX 对照行
+        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("1 4F 4B"));
+        // UTF-8 格式下对照行恢复出现。
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+        message.id = 2;
+        panel->appendMessages({message});
+        QTRY_COMPARE(model->rowCount(), 2);
+        QCOMPARE(text->document()->blockCount(), 3);
+        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("4F 4B"));
+        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("showTimestamp"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("showDirection"))->setChecked(true);
     }
 
     // 错误/警告日志的独立开关：关闭后事件不进显示、数据不受影响；开启后恢复。
