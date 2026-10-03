@@ -9,8 +9,9 @@ class QAbstractItemModel;
 class QHeaderView;
 class QPainter;
 
-// 监视区的绘制层。结构化记录仍在 TrafficModel / TrafficFilter 里，
-// 这里只负责列头、滚动和可见行绘制。
+// 监视区的绘制层。结构化记录仍在 TrafficModel / TrafficFilter 里。
+// 屏幕上是一行一条的文本，不是表格：时间、端口、对端、方向、字节、载荷排成一行，
+// 折行只折载荷并缩进。列宽仍记在隐藏的表头里，用来对齐这些字段和记住时间戳开关。
 //
 // 不用 QTableView：它把每个行高存在 QHeaderView 的 section 里，行高一不统一
 // 就离开等高快路径；高速追加再从头部淘汰时，section 还会和行对不齐，
@@ -28,6 +29,8 @@ public:
     int columnWidth(int column) const;
     void setColumnWidth(int column, int width);
     void setColumnHidden(int column, bool hidden);
+    // 载荷真正能画进去的宽度。字符预算按它算，不按已经隐藏的表头拉伸列。
+    int payloadAreaWidth() const;
 
     bool wordWrap() const { return m_wrap; }
     void setWordWrap(bool wrap);
@@ -43,6 +46,10 @@ public:
 
     // 视图在改滚动范围时为真。这段时间里滚动条数值变化不是用户翻阅。
     bool isScrollAdjusting() const { return m_adjusting; }
+
+signals:
+    // 视口或字段宽度变了，载荷一行能放下的字符数要重算。
+    void contentWidthChanged();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -62,11 +69,13 @@ private:
     int heightForRow(int viewRow) const;
     int rowAtContentY(int y) const;
     void paintViewport(QPainter *painter);
+    int fieldWidth(int column) const;
 
     QAbstractItemModel *m_model = nullptr;
     QHeaderView *m_header = nullptr;
     QVector<int> m_heights;
     QVector<int> m_prefix; // prefix[i] 是第 i 行的 y，最后一个是内容总高
+    int m_viewportWidth = -1;
     bool m_wrap = false;
     bool m_adjusting = false;
 };

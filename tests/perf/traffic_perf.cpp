@@ -105,7 +105,7 @@ int main(int argc, char **argv)
     wrapAction->setChecked(wrap);
     QTest::qWait(160); // 换行切换 + 字符预算防抖落地
 
-    const int dataColumnWidth = table->columnWidth(TrafficModel::DataColumn);
+    const int dataColumnWidth = table->payloadAreaWidth();
     std::printf("========================================================\n");
     std::printf("监视区刷新基准  Qt %s\n", qVersion());
     std::printf("载荷 %d B/条  每批 %d 条  批数 %d  换行 %s\n",

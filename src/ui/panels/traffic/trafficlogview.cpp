@@ -3,6 +3,7 @@
 
 #include <QAbstractItemModel>
 #include <QEvent>
+#include <QFontDatabase>
 #include <QFontMetrics>
 #include <QHeaderView>
 #include <QHelpEvent>
@@ -24,7 +25,9 @@ constexpr int CellPadX = 8;
 constexpr int CellPadY = 4;
 
 const QColor RowBase(255, 255, 255);
-const QColor RowAlternate(0xF4, 0xF7, 0xFB);
+const QColor RowLine(0xEE, 0xF2, 0xF6);
+const QColor MetaColor(0x5C, 0x6B, 0x7A);
+const QColor BodyColor(0x1C, 0x24, 0x30);
 
 TrafficModel *trafficModelOf(QAbstractItemModel *model)
 {
@@ -42,10 +45,16 @@ TrafficLogView::TrafficLogView(QWidget *parent) : QAbstractScrollArea(parent)
     setObjectName(QStringLiteral("trafficTable"));
     setAttribute(Qt::WA_StyledBackground, true);
     setFrameShape(QFrame::NoFrame);
+    // 整行等宽，字段才能上下对齐，看起来才是命令行而不是比例字体的表格。
+    QFont console = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    console.setPointSize(10);
+    setFont(console);
     viewport()->setAttribute(Qt::WA_OpaquePaintEvent, true);
     viewport()->installEventFilter(this);
 
+    // 表头不显示。它只保存字段宽度和时间戳开关，绘制按这些宽度把一行排开。
     m_header = new QHeaderView(Qt::Horizontal, this);
+    m_header->hide();
     m_header->setHighlightSections(false);
     m_header->setSectionsClickable(false);
     m_header->setSectionsMovable(false);
@@ -92,6 +101,24 @@ void TrafficLogView::setColumnHidden(int column, bool hidden)
     updateBars();
     m_adjusting = false;
     viewport()->update();
+    emit contentWidthChanged();
+}
+
+int TrafficLogView::fieldWidth(int column) const
+{
+    if (!m_header || m_header->isSectionHidden(column)) return 0;
+    return qMax(0, m_header->sectionSize(column));
+}
+
+int TrafficLogView::payloadAreaWidth() const
+{
+    if (viewport()->width() <= 0 || !m_header) return 0;
+    int used = 0;
+    for (int column = 0; column < m_header->count(); ++column) {
+        if (column == TrafficModel::DataColumn) continue;
+        used += fieldWidth(column);
+    }
+    return qMax(0, viewport()->width() - used);
 }
 
 void TrafficLogView::setWordWrap(bool wrap)
@@ -157,12 +184,9 @@ void TrafficLogView::updateBars()
     vbar->setSingleStep(lineHeight());
     vbar->setRange(0, qMax(0, totalH - viewH));
 
-    const int totalW = m_header ? m_header->length() : 0;
-    const int viewW = viewport()->width();
+    // 载荷占用字段右边剩下的宽度，一行不会比视口更宽。
     auto *hbar = horizontalScrollBar();
-    hbar->setPageStep(qMax(1, viewW));
-    hbar->setSingleStep(40);
-    hbar->setRange(0, qMax(0, totalW - viewW));
+    hbar->setRange(0, 0);
 }
 
 void TrafficLogView::relayoutRows()
@@ -258,13 +282,9 @@ void TrafficLogView::scrollToBottom()
 
 void TrafficLogView::layoutChrome()
 {
-    if (!m_header) return;
-    const int headerHeight = qMax(1, m_header->sizeHint().height());
-    if (viewportMargins().top() != headerHeight)
-        setViewportMargins(0, headerHeight, 0, 0);
-    const QRect area = viewport()->geometry();
-    m_header->setGeometry(area.x(), area.y() - headerHeight, area.width(), headerHeight);
-    m_header->setOffset(horizontalScrollBar()->value());
+    if (m_header) m_header->hide();
+    if (viewportMargins().top() != 0)
+        setViewportMargins(0, 0, 0, 0);
 }
 
 void TrafficLogView::resizeEvent(QResizeEvent *event)
@@ -274,6 +294,10 @@ void TrafficLogView::resizeEvent(QResizeEvent *event)
     m_adjusting = true;
     updateBars();
     m_adjusting = false;
+    if (viewport()->width() != m_viewportWidth) {
+        m_viewportWidth = viewport()->width();
+        emit contentWidthChanged();
+    }
 }
 
 void TrafficLogView::showEvent(QShowEvent *event)
@@ -285,7 +309,6 @@ void TrafficLogView::showEvent(QShowEvent *event)
 void TrafficLogView::scrollContentsBy(int, int)
 {
     // 行高不统一，位块搬移会对不齐。可见行很少，整视口重画比纠错便宜。
-    if (m_header) m_header->setOffset(horizontalScrollBar()->value());
     viewport()->update();
 }
 
@@ -345,60 +368,60 @@ void TrafficLogView::paintViewport(QPainter *painter)
     const auto *traffic = trafficModelOf(m_model);
     const int wrapCols = traffic ? traffic->wrapColumns() : 0;
     const int textLine = lineHeight();
+    const QFontMetrics metrics(font());
+    painter->setFont(font());
 
     for (; row < m_heights.size() && top < viewBottom; ++row) {
         const int height = m_heights[row];
-        painter->fillRect(0, top, viewport()->width(), height, (row % 2) ? RowAlternate : RowBase);
-        const int columns = m_header->count();
-        for (int column = 0; column < columns; ++column) {
-            if (m_header->isSectionHidden(column)) continue;
-            const int x = m_header->sectionViewportPosition(column);
-            const int width = m_header->sectionSize(column);
-            if (width <= 0 || x >= viewport()->width() || x + width <= 0) continue;
-
+        const int textTop = m_wrap ? top + CellPadY : top + qMax(0, (height - textLine) / 2);
+        int x = 0;
+        for (int column = 0; column < m_header->count(); ++column) {
+            if (column == TrafficModel::DataColumn) continue;
+            const int width = fieldWidth(column);
+            if (width <= 0) continue;
             const QModelIndex index = m_model->index(row, column);
             const QString text = index.data(Qt::DisplayRole).toString();
-            QFont font = this->font();
-            const QVariant fontData = index.data(Qt::FontRole);
-            if (fontData.isValid()) font = fontData.value<QFont>();
-            painter->setFont(font);
-            const QFontMetrics metrics(font);
-            QColor color = palette().color(QPalette::Text);
-            const QVariant foreground = index.data(Qt::ForegroundRole);
-            if (foreground.isValid()) color = foreground.value<QColor>();
-            painter->setPen(color);
-
-            const QRect cell(x, top, width, height);
-            painter->save();
-            painter->setClipRect(cell);
-            const QRect textRect = cell.adjusted(CellPadX, 0, -CellPadX, 0);
-            const bool wrapData = m_wrap && wrapCols > 0 && column == TrafficModel::DataColumn;
-            if (!wrapData) {
-                int align = Qt::AlignVCenter | Qt::AlignLeft;
-                const QVariant alignData = index.data(Qt::TextAlignmentRole);
-                if (alignData.isValid()) align = alignData.toInt() | Qt::AlignVCenter;
-                painter->drawText(textRect, align,
-                    metrics.elidedText(text, Qt::ElideRight, qMax(0, textRect.width())));
-            } else {
-                // 按字符切开，和行高用的是同一套列数。词边界折行会和这个数对不上，
-                // 多出来的行被裁掉，看起来就是"换行没有一直生效"。
-                const int maxLines = qMax(1, (height - CellPadY * 2) / textLine);
-                int y = cell.top() + CellPadY;
-                int pos = 0;
-                for (int line = 0; line < maxLines && pos < text.size(); ++line) {
-                    const bool last = line == maxLines - 1;
-                    const int count = last ? text.size() - pos : qMin(wrapCols, text.size() - pos);
-                    QString chunk = text.mid(pos, count);
-                    if (metrics.horizontalAdvance(chunk) > textRect.width())
-                        chunk = metrics.elidedText(chunk, Qt::ElideRight, qMax(0, textRect.width()));
-                    painter->drawText(QRect(textRect.left(), y, textRect.width(), textLine),
-                        Qt::AlignLeft | Qt::AlignVCenter, chunk);
-                    pos += count;
-                    y += textLine;
-                }
+            QColor color = MetaColor;
+            if (column == TrafficModel::DirectionColumn) {
+                const QVariant foreground = index.data(Qt::ForegroundRole);
+                color = foreground.isValid() ? foreground.value<QColor>() : BodyColor;
             }
-            painter->restore();
+            painter->setPen(color);
+            const QRect textRect(x + CellPadX, textTop, qMax(0, width - CellPadX * 2), textLine);
+            const int align = column == TrafficModel::BytesColumn
+                ? Qt::AlignRight | Qt::AlignVCenter
+                : Qt::AlignLeft | Qt::AlignVCenter;
+            painter->drawText(textRect, align,
+                metrics.elidedText(text, Qt::ElideRight, textRect.width()));
+            x += width;
         }
+
+        const int payloadWidth = qMax(0, viewport()->width() - x);
+        const QString payload = m_model->index(row, TrafficModel::DataColumn).data(Qt::DisplayRole).toString();
+        painter->setPen(BodyColor);
+        const QRect payloadRect(x + CellPadX, textTop, qMax(0, payloadWidth - CellPadX * 2), textLine);
+        if (!(m_wrap && wrapCols > 0)) {
+            painter->drawText(payloadRect, Qt::AlignLeft | Qt::AlignVCenter,
+                metrics.elidedText(payload, Qt::ElideRight, payloadRect.width()));
+        } else {
+            // 按字符切开，和行高用的是同一套列数。续行对齐到载荷起点。
+            const int maxLines = qMax(1, (height - CellPadY * 2) / textLine);
+            int y = textTop;
+            int pos = 0;
+            for (int line = 0; line < maxLines && pos < payload.size(); ++line) {
+                const bool last = line == maxLines - 1;
+                const int count = last ? payload.size() - pos : qMin(wrapCols, payload.size() - pos);
+                QString chunk = payload.mid(pos, count);
+                if (metrics.horizontalAdvance(chunk) > payloadRect.width())
+                    chunk = metrics.elidedText(chunk, Qt::ElideRight, qMax(0, payloadRect.width()));
+                painter->drawText(QRect(payloadRect.left(), y, payloadRect.width(), textLine),
+                    Qt::AlignLeft | Qt::AlignVCenter, chunk);
+                pos += count;
+                y += textLine;
+            }
+        }
+        painter->setPen(RowLine);
+        painter->drawLine(0, top + height - 1, viewport()->width(), top + height - 1);
         top += height;
     }
 }

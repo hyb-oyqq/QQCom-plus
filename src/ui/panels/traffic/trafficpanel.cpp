@@ -406,7 +406,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     auto *settings = new QPushButton(tr("显示设置"));
     settings->setObjectName("displaySettings");
     settings->setIcon(mutedIcon(QStringLiteral(":/icons/cog.svg"), BarIconSize));
-    settings->setToolTip(tr("日志显示选项：RX/TX、时间戳列、暂停显示"));
+    settings->setToolTip(tr("日志显示选项：RX/TX、时间戳、暂停显示"));
     auto *displayMenu = new QMenu(settings);
     m_rxAction = displayMenu->addAction(tr("显示 RX"));
     m_rxAction->setObjectName("showRx");
@@ -442,7 +442,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         lengthGroup->addAction(action);
     }
     m_lengthMenu = lengthMenu;
-    auto *timeAction = displayMenu->addAction(tr("时间戳列"));
+    auto *timeAction = displayMenu->addAction(tr("时间戳"));
     timeAction->setCheckable(true);
     timeAction->setChecked(true);
     connect(timeAction, &QAction::toggled, this, [this](bool checked) {
@@ -453,7 +453,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_wrapAction = displayMenu->addAction(tr("自动换行"));
     m_wrapAction->setObjectName("wrapTraffic");
     m_wrapAction->setCheckable(true);
-    m_wrapAction->setToolTip(tr("数据内容超出列宽时折行显示（最多 6 行，其余见悬停提示）"));
+    m_wrapAction->setToolTip(tr("载荷超出一行时折行显示（最多 6 行，其余见悬停提示）"));
     connect(m_wrapAction, &QAction::toggled, this, [this](bool checked) {
         applyWrapMode(checked);
         savePreferences();
@@ -523,7 +523,6 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     header->setSectionResizeMode(QHeaderView::Interactive);
     // 列宽一律按枚举写死值。裸下标在上次加"对端"列时就悄悄错位过一次，
     // 枚举让"宽度跟着哪一列走"这件事在代码里是显式的。
-    header->setSectionResizeMode(TrafficModel::DataColumn, QHeaderView::Stretch);
     m_table->setColumnWidth(TrafficModel::TimeColumn, 116);
     // 方向列要容得下复合标记"TX·定时"（转发/示例同理），64px 是纯 RX/TX 时代的宽度。
     m_table->setColumnWidth(TrafficModel::DirectionColumn, 88);
@@ -532,10 +531,11 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_table->setColumnWidth(TrafficModel::SourceColumn, 96);
     m_table->setColumnWidth(TrafficModel::PeerColumn, 120);
     fitFixedColumns();
-    // 数据内容列是 Stretch：窗口缩放与固定列增宽都会改变它的实际宽度，字符预算要跟着走。
-    connect(header, &QHeaderView::sectionResized, this, [this](int section, int, int) {
-        if (section == TrafficModel::DataColumn) m_budgetDebounce->start();
+    // 字段变宽或窗口变窄，载荷一行能放下的字符都会变。
+    connect(header, &QHeaderView::sectionResized, this, [this](int, int, int) {
+        m_budgetDebounce->start();
     });
+    connect(m_table, &TrafficLogView::contentWidthChanged, m_budgetDebounce, qOverload<>(&QTimer::start));
     m_stack = new QStackedWidget;
     m_stack->addWidget(m_table);
     auto *empty = new QLabel(tr("等待接收数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。"));
@@ -659,9 +659,9 @@ void TrafficPanel::flushPending()
 
 void TrafficPanel::updateTextBudget()
 {
-    // 字符预算 = 当前列宽下真正画得出来的字符数。视图只画这一段，
+    // 字符预算 = 载荷区真正画得出来的字符数。视图只画这一段，
     // 文本越长每帧越慢。裁掉的只是绘制用的那一份，悬停提示、导出与搜索都直接读原始字节。
-    const int columnWidth = m_table->columnWidth(TrafficModel::DataColumn);
+    const int columnWidth = m_table->payloadAreaWidth();
     if (columnWidth <= 0) {
         // 还没布局完。可见时再试一次；藏着的面板不要空转定时器。
         if (isVisible()) m_budgetDebounce->start();
