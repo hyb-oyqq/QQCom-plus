@@ -191,6 +191,9 @@ void TrafficLogView::updateBars()
 
 void TrafficLogView::relayoutRows()
 {
+    // 藏在堆栈里的视图不做布局：行高、滚动条与重绘都是给"正在看"的人准备的，
+    // 高速追加时文本模式在前面，这些工作全是纯浪费。显示时 showEvent 统一重算。
+    if (!isVisible()) return;
     const int rows = m_model ? m_model->rowCount() : 0;
     const bool atEnd = verticalScrollBar()->maximum() <= 0
         || verticalScrollBar()->value() >= verticalScrollBar()->maximum();
@@ -207,6 +210,7 @@ void TrafficLogView::relayoutRows()
 
 void TrafficLogView::onRowsInserted(const QModelIndex &, int first, int last)
 {
+    if (!isVisible()) return; // 同 relayoutRows：藏着的视图不追加布局
     const int count = last - first + 1;
     if (count <= 0 || !m_model || m_heights.size() + count != m_model->rowCount()) {
         relayoutRows();
@@ -224,6 +228,7 @@ void TrafficLogView::onRowsInserted(const QModelIndex &, int first, int last)
 
 void TrafficLogView::onRowsRemoved(const QModelIndex &, int first, int last)
 {
+    if (!isVisible()) return; // 同 relayoutRows：藏着的视图不重排
     const int count = last - first + 1;
     if (count <= 0 || !m_model || first < 0 || last >= m_heights.size()
         || m_heights.size() - count != m_model->rowCount()) {
@@ -246,6 +251,7 @@ void TrafficLogView::onRowsRemoved(const QModelIndex &, int first, int last)
 void TrafficLogView::onDataChanged(const QModelIndex &topLeft, const QModelIndex &bottomRight, const QList<int> &roles)
 {
     if (!m_model) return;
+    if (!isVisible()) return; // 同 relayoutRows：藏着的视图不重算行高
     if (!roles.isEmpty() && !roles.contains(Qt::DisplayRole)) {
         viewport()->update();
         return;
@@ -304,6 +310,8 @@ void TrafficLogView::showEvent(QShowEvent *event)
 {
     QAbstractScrollArea::showEvent(event);
     layoutChrome();
+    // 隐藏期间的追加与尺寸变化都跳过了布局，显示时统一补算一次。
+    relayoutRows();
 }
 
 void TrafficLogView::scrollContentsBy(int, int)

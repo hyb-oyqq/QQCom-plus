@@ -684,6 +684,8 @@ private slots:
         window.loadExample();
         // 摘除组合根注入的偏好存储：本用例改显示开关，不该写进真实用户的 preferences.ini。
         window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        // 文本显示模式默认开启，表格被收进堆栈且跳过布局；本用例读表格行高，先切回表格。
+        window.findChild<QAction *>(QStringLiteral("textMode"))->setChecked(false);
         auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
         auto *table = window.findChild<TrafficLogView *>(QStringLiteral("trafficTable"));
         auto *model = window.findChild<TrafficModel *>();
@@ -798,6 +800,8 @@ private slots:
         window.resize(1280, 720);
         window.show();
         window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        // 本用例验证字符预算对绘制文本的裁剪，预算只在表格可见时计算，先切回表格。
+        window.findChild<QAction *>(QStringLiteral("textMode"))->setChecked(false);
         auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
         auto *table = window.findChild<TrafficLogView *>(QStringLiteral("trafficTable"));
         auto *model = window.findChild<TrafficModel *>();
@@ -1621,6 +1625,47 @@ private slots:
         window.findChild<TrafficPanel *>()->appendMessages(afterClear);
         QTRY_COMPARE(text->lineCount(), 3); // 首行复用空文档保底块，3 条即 3 块
         QVERIFY(text->document()->firstBlock().text().trimmed().startsWith(QStringLiteral("1 ")));
+    }
+
+    // 报文里的 \r\n 必须还原成真实换行（按文本本来的样子显示），而不是转义字面量；
+    // 行号时间只标首行，续行紧随其后不带前缀——与 JCom 的多行报文显示一致。
+    void textViewKeepsRealLineBreaks()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        window.findChild<QAction *>(QStringLiteral("textMode"))->setChecked(true);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        QVERIFY(text);
+        // 换行语义属于文本类渲染：HEX/DEC 本身没有换行概念，切到 UTF-8 验证。
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->setCurrentText(QStringLiteral("UTF-8"));
+
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        Traffic::Message message;
+        message.id = 1;
+        message.timestamp = QDateTime::currentDateTime();
+        message.direction = Traffic::Direction::Receive;
+        message.source.endpointId = endpointId;
+        message.source.endpointIndex = 0;
+        message.source.endpointKind = PortDraft::Serial;
+        message.raw = QByteArray("OK\r\nnext");
+        message.rawLength = message.raw.size();
+        window.findChild<TrafficPanel *>()->appendMessages({message});
+
+        // QTRY 重算的是内联表达式，局部变量会被冻结——先等块数落地，再取文本。
+        QTRY_COMPARE(text->document()->blockCount(), 2);
+        const QStringList lines = text->toPlainText().split(QLatin1Char('\n'));
+        QCOMPARE(lines.size(), 2);
+        QVERIFY2(lines.at(0).trimmed().endsWith(QStringLiteral("OK")),
+                 qPrintable(QStringLiteral("首行应以 OK 结尾：") + lines.at(0)));
+        QVERIFY2(lines.at(0).trimmed().startsWith(QStringLiteral("1 ")),
+                 qPrintable(QStringLiteral("首行应有行号：") + lines.at(0)));
+        QCOMPARE(lines.at(1), QStringLiteral("next")); // 续行不带行号
+        QVERIFY2(!text->toPlainText().contains(QStringLiteral("\\r\\n")),
+                 "换行不能再以转义字面量出现");
     }
 };
 

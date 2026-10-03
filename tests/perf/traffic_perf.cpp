@@ -87,6 +87,7 @@ int main(int argc, char **argv)
     const int cycles = argc > 3 ? std::atoi(argv[3]) : 200;
     const bool wrap = argc > 4 ? std::atoi(argv[4]) != 0 : true;
     const bool textView = argc > 5 ? std::atoi(argv[5]) != 0 : false;
+    const bool resizeBench = argc > 6 ? std::atoi(argv[6]) != 0 : false;
 
     MainWindow window;
     window.resize(1400, 900);
@@ -208,6 +209,28 @@ int main(int argc, char **argv)
     std::printf("  帧率 净工作折合 %5.1f fps   最差一拍 %5.1f fps\n",
                 s.mean > 0 ? 1000 / (s.mean - pace.mean) : 0, s.max > 0 ? 1000 / s.max : 0);
     std::printf("  模型 %d 行  文本 %d 行  工作集 %.0f MiB\n", model->rowCount(), text->lineCount(), wsMiB());
+
+    // 拖动窗口基准：跟随开启 + 已有大量历史的情况下连续改窗口尺寸。
+    // resize 事件与整窗重绘都是同步的，直接计时；攒批落在自己的定时器里不混入。
+    if (resizeBench) {
+        QVector<double> perResize;
+        const int baseWidth = window.width();
+        const int widthDelta = qMax(1, baseWidth / 4);
+        if (offset + batchSize > pool.size()) offset = 0;
+        panel->appendMessages(makeBatch(offset));
+        offset += batchSize;
+        QTest::qWait(40); // 让追加先落地，测量窗口缩放本身的成本
+        for (int i = 0; i < 40; ++i) {
+            t.restart();
+            window.resize(i % 2 ? baseWidth - widthDelta : baseWidth, window.height());
+            window.repaint(); // 同步重绘整窗，含文本视图的缩放处理与重绘
+            perResize.append(t.nsecsElapsed() / 1e6);
+        }
+        const Stats r = summarize(perResize);
+        std::printf("\n拖动窗口（跟随 + 历史就位，40 次改尺寸 ±%dpx，同步重绘）\n", widthDelta);
+        std::printf("  mean %8.2f ms   p50 %8.2f   p95 %8.2f   max %9.2f ms   超100ms %d/40\n",
+                    r.mean, r.p50, r.p95, r.max, r.over100);
+    }
 
     std::printf("\n参考：自定义视图不测量全表行高，没有 resizeRowsToContents()。\n");
     return 0;

@@ -32,15 +32,6 @@ const QColor RxColor(0x00, 0x85, 0x77);
 // 行号会自然加宽，只影响那一行的列对齐——先到那个量级的是内存预算。
 constexpr int NumberColumns = 7;
 
-// 载荷里的控制字符会破坏"一条消息一行"的块结构（\r\n 是串口文本的常态），
-// 转成可见的转义序列：显示成换行会让人误读行号，字节事实仍在原始记录里。
-QString visibleText(QString text)
-{
-    text.replace(QLatin1Char('\r'), QStringLiteral("\\r"));
-    text.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
-    return text;
-}
-
 } // namespace
 
 TrafficTextView::TrafficTextView(QWidget *parent) : QPlainTextEdit(parent)
@@ -87,28 +78,44 @@ void TrafficTextView::appendMessages(const QList<Traffic::Message> &messages, Pa
             ? QStringLiteral("%1·%2").arg(name, Traffic::originName(r.origin))
             : name;
 
-        QString payload = visibleText(PayloadCodec::render(r.raw, format));
+        // 载荷里的换行还原成真实换行：文本框就该按文本本来的样子显示。
+        // renderMultiline 让 UTF-8/GBK/ASCII 解码里的 \r \n 保持真实字符，
+        // 这里统一成 \n 后按行展开；行号与时间只标首行，续行紧跟其后，
+        // 多行报文在控制台里展开成多行物理文本，与 JCom 一致。
+        QString payload = PayloadCodec::renderMultiline(r.raw, format);
         if (r.truncated) payload += tr(" …");
         if (r.isFragment() && r.hasMoreFragments) payload += tr(" ⏎");
         if (payload.size() > MaxPayloadChars) {
             payload.truncate(MaxPayloadChars);
             payload += tr(" …");
         }
-
-        if (separate)
-            cursor.insertText(QString(QChar::ParagraphSeparator));
-        cursor.setCharFormat(metaFormat);
-        cursor.insertText(QStringLiteral("%1 %2 ")
-                              .arg(QString::number(m_nextNumber).rightJustified(NumberColumns),
-                                   r.timestamp.toString(QStringLiteral("HH:mm:ss.zzz"))));
-        // 方向色随消息，与表格的 RX/TX 配色一致，扫描时一眼分出收发。
-        QTextCharFormat dirFormat;
-        dirFormat.setForeground(r.direction == Traffic::Direction::Transmit ? TxColor : RxColor);
-        cursor.setCharFormat(dirFormat);
-        cursor.insertText(dir + QLatin1Char(' '));
-        cursor.setCharFormat(bodyFormat);
-        cursor.insertText(payload);
-        separate = true;
+        payload.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        payload.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+        int segmentIndex = 0;
+        const auto number = QStringLiteral("%1 %2 ")
+                                .arg(QString::number(m_nextNumber).rightJustified(NumberColumns),
+                                     r.timestamp.toString(QStringLiteral("HH:mm:ss.zzz")));
+        for (const auto &segment : payload.split(QLatin1Char('\n'))) {
+            if (segmentIndex > 0) {
+                cursor.insertText(QString(QChar::ParagraphSeparator));
+            } else if (separate) {
+                cursor.insertText(QString(QChar::ParagraphSeparator));
+            }
+            if (segmentIndex == 0) {
+                cursor.setCharFormat(metaFormat);
+                cursor.insertText(number);
+                // 方向色随消息，与表格的 RX/TX 配色一致，扫描时一眼分出收发。
+                QTextCharFormat dirFormat;
+                dirFormat.setForeground(r.direction == Traffic::Direction::Transmit ? TxColor : RxColor);
+                cursor.setCharFormat(dirFormat);
+                cursor.insertText(dir + QLatin1Char(' '));
+            }
+            cursor.setCharFormat(bodyFormat);
+            if (!segment.isEmpty()) cursor.insertText(segment);
+            separate = true;
+            ++segmentIndex;
+        }
+        // 行号按消息计，一条多行报文共用一个行号；空载荷也保留前缀行。
         ++m_nextNumber;
     }
     enforceCharBudget();

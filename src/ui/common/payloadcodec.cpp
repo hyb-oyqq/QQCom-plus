@@ -23,15 +23,20 @@ QTextCodec *gbkCodec()
 }
 
 // 控制字符以 \r \n \t \xNN 转义呈现；escapeHighBytes 决定 >=0x80 的字符是否同样转义
-// （ASCII 渲染必须转义，UTF-8/GBK 渲染里它们是正文）。
-QString escapeControlChars(const QString &text, bool escapeHighBytes)
+// （ASCII 渲染必须转义，UTF-8/GBK 渲染里它们是正文）。keepLineBreaks 为真时
+// \r \n 保持真实字符——"按文本样子看"的视图要按报文里的行分隔真实断行。
+QString escapeControlChars(const QString &text, bool escapeHighBytes, bool keepLineBreaks = false)
 {
     QString out;
     for (const QChar c : text) {
         const ushort u = c.unicode();
-        if (u == '\r') out += QLatin1String("\\r");
-        else if (u == '\n') out += QLatin1String("\\n");
-        else if (u == '\t') out += QLatin1String("\\t");
+        if (u == '\r') {
+            if (keepLineBreaks) out += c;
+            else out += QLatin1String("\\r");
+        } else if (u == '\n') {
+            if (keepLineBreaks) out += c;
+            else out += QLatin1String("\\n");
+        } else if (u == '\t') out += QLatin1String("\\t");
         else if (u < 32 || u == 127 || (escapeHighBytes && u > 127)) {
             out += QLatin1String("\\x");
             out += QString::number(u, 16).rightJustified(2, QLatin1Char('0')).toUpper();
@@ -257,6 +262,22 @@ QString render(const QByteArray &payload, Format format)
         return escapeBytes(payload);
     }
     return {};
+}
+
+QString renderMultiline(const QByteArray &payload, Format format)
+{
+    switch (format) {
+    case Format::Utf8:
+        return escapeControlChars(QString::fromUtf8(payload), false, true);
+    case Format::Gbk:
+        if (QTextCodec *codec = gbkCodec())
+            return escapeControlChars(codec->toUnicode(payload), false, true);
+        return render(payload, format);
+    case Format::Ascii:
+        return escapeControlChars(QString::fromLatin1(payload), true, true);
+    default:
+        return render(payload, format);
+    }
 }
 
 } // namespace PayloadCodec

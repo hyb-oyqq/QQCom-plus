@@ -475,7 +475,12 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(m_textModeAction, &QAction::toggled, this, [this](bool checked) {
         updateSummary();
         // 切回文本视图时接着钉在底部，跟随语义不因切换视图而中断。
-        if (checked && m_follow->isChecked()) m_text->scrollToBottom();
+        if (checked) {
+            if (m_follow->isChecked()) m_text->scrollToBottom();
+        } else if (m_table->isVisible()) {
+            // 表格隐藏期间跳过了布局与预算，切回来先补算。
+            m_budgetDebounce->start();
+        }
         savePreferences();
     });
     displayMenu->addSeparator();
@@ -713,6 +718,11 @@ void TrafficPanel::flushPending()
 
 void TrafficPanel::updateTextBudget()
 {
+    // 表格不在看（文本模式或面板未显示）就不重算：预算只喂表格的绘制，
+    // 而它每次变化都对整个模型发 dataChanged。拖动窗口时宽度逐像素变化，
+    // 给隐藏视图连续重建预算与行高正是"开启跟随就卡"的主要来源之一；
+    // 切回表格时由 showEvent / 模式开关重新触发。
+    if (!m_table->isVisible()) return;
     // 字符预算 = 载荷区真正画得出来的字符数。视图只画这一段，
     // 文本越长每帧越慢。裁掉的只是绘制用的那一份，悬停提示、导出与搜索都直接读原始字节。
     const int columnWidth = m_table->payloadAreaWidth();

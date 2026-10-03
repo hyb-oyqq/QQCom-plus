@@ -40,6 +40,11 @@ Parsed parse(const QString &text, Format format, const QByteArray &lineEnding = 
 // 控制字节与 ASCII 之外的字节转义为 \xNN，绝不因数据内容报错。
 QString render(const QByteArray &payload, Format format);
 
+// 显示侧的"按文本样子看"变体：UTF-8/GBK/ASCII 解码里 \r \n 保持真实换行，
+// 其余控制字符仍转义（\t \xNN）。HEX/DEC/BASE64/转义字节本身没有换行概念，
+// 与 render() 相同。文本控制台用它把行分隔的报文展开成真实多行。
+QString renderMultiline(const QByteArray &payload, Format format);
+
 } // namespace PayloadCodec
 
 #endif
