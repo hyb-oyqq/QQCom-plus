@@ -123,6 +123,9 @@ MainWindow::MainWindow(QWidget *parent)
     // 显示选项持久化：监视区开关/列状态与发送区格式/行尾记进 preferences.ini。
     m_traffic->setPreferences(preferences);
     m_sender->setPreferences(preferences);
+    // 监视区摘要放主窗口状态栏：条数是全局信息，不该占用显示区的纵向空间。
+    connect(m_traffic, &TrafficPanel::summaryChanged, this,
+        [this](const QString &text) { m_trafficStatus->setText(text); });
     dataSplitter->addWidget(m_traffic);
     dataSplitter->addWidget(m_sender);
     // 显示区承载更多内容：发送区正文固定约三行、贴着自身内容高度，
@@ -146,8 +149,11 @@ MainWindow::MainWindow(QWidget *parent)
     m_rxStatus->setObjectName("RxStatus");
     m_txStatus = new QLabel(tr("TX   0 B   ·   0 B/s"));
     m_txStatus->setObjectName("TxStatus");
+    m_trafficStatus = new QLabel(tr("共 0 条"));
+    m_trafficStatus->setObjectName("TrafficStatus");
     statusLayout->addWidget(m_rxStatus);
     statusLayout->addWidget(m_txStatus);
+    statusLayout->addWidget(m_trafficStatus);
     m_routeStatus = new QLabel(tr("桥接  未启动"));
     m_routeStatus->setObjectName("RouteStatus");
     statusLayout->addWidget(m_routeStatus);

@@ -69,6 +69,7 @@ private:
     QTimer *m_rateTimer = nullptr;
     QLabel *m_rxStatus = nullptr;
     QLabel *m_txStatus = nullptr;
+    QLabel *m_trafficStatus = nullptr; // 监视区会话累计条数（面板经 summaryChanged 上报）
     QLabel *m_statusNote = nullptr;
 };
 #endif // MAINWINDOW_H
