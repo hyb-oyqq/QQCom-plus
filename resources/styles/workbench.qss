@@ -5,11 +5,8 @@ QWidget {
     color: #182334;
 }
 QMainWindow, QWidget#centralwidget { background: #e9edf4; }
-QLabel#SectionTitle { color: #111b2b; font-size: 15px; font-weight: 600; }
 QLabel#Muted { color: #5c6880; font-size: 12px; }
-QLabel#CountLabel { color: #45526c; font-size: 13px; font-weight: 600; padding-left: 4px; }
 QLabel#ByteCount { color: #1d4ed8; font-weight: 600; }
-QLabel#InfoBox { background: #eef2f9; color: #4a5568; padding: 10px; border-radius: 5px; }
 QLabel#EmptyState { background: #fbfcfe; color: #5c6880; border: 1px dashed #c3ccda; border-radius: 5px; }
 QWidget#Surface { background: #ffffff; border: 1px solid #c8d1e0; border-radius: 8px; }
 QFrame#EndpointBar { background: #ffffff; border-bottom: 1px solid #b9c4d6; }
@@ -48,7 +45,6 @@ QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { background: #eceff5;
 QComboBox { padding-right: 24px; }
 QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 22px; border: none; }
 QComboBox::down-arrow { image: url(:/icons/chevron-down.xpm); width: 10px; height: 6px; }
-QToolButton#refreshSerialPorts { padding: 5px 6px; }
 QComboBox QAbstractItemView { background: white; selection-background-color: #1d4ed8; selection-color: #ffffff; border: 1px solid #a9b5c9; outline: none; }
 QPlainTextEdit { background: #ffffff; border: 1px solid #a9b5c9; border-radius: 5px; padding: 9px; selection-background-color: #1d4ed8; selection-color: #ffffff; }
 QCheckBox { spacing: 6px; color: #1f2a3d; }
@@ -56,17 +52,6 @@ QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #8b99b0; bor
 QCheckBox::indicator:hover { border-color: #1d4ed8; }
 QCheckBox::indicator:checked { background: #1d4ed8; border-color: #1a45c0; }
 QWidget#BridgeRow { background: #eef2f9; }
-QLabel#BridgeTitle { color: #111b2b; font-weight: 600; }
-QLabel#BridgePair { color: #35435c; font-size: 12px; }
-QTableView { background: white; alternate-background-color: #f4f7fb; border: 1px solid #c8d1e0; border-radius: 4px; selection-background-color: #d3e0fa; selection-color: #11214a; outline: none; }
-QFrame#trafficTable { background: white; border: 1px solid #c8d1e0; border-radius: 4px; }
-QTableView::item { padding: 4px 8px; border: none; }
-QTableView::item:selected { background: #d3e0fa; color: #11214a; }
-QHeaderView::section { background: #e4eaf4; color: #35435c; border: none; border-bottom: 1px solid #b9c4d6; padding: 8px; font-weight: 600; text-align: left; }
-QTabWidget::pane { border: none; background: white; }
-QTabBar::tab { background: transparent; padding: 10px 22px 8px 22px; color: #45526c; border-bottom: 2px solid transparent; }
-QTabBar::tab:selected { color: #1d4ed8; border-bottom: 2px solid #1d4ed8; font-weight: 600; }
-QTabBar::tab:hover { color: #1d4ed8; background: #eef2fb; }
 QSplitter::handle { background: transparent; }
 QSplitter::handle:vertical { height: 10px; }
 QSplitter::handle:horizontal { width: 4px; }

@@ -228,7 +228,6 @@ private slots:
     void filtersPreserveRawData()
     {
         TrafficModel model;
-        TrafficFilter filter;
         const auto a = QUuid::createUuid(), b = QUuid::createUuid();
         PortDraft portA, portB;
         portA.id = a;
@@ -243,34 +242,34 @@ private slots:
 
         model.replaceRecords({sample(1, portA, 0, Traffic::Direction::Receive, QByteArray::fromHex("007fff")),
             sample(2, portB, 1, Traffic::Direction::Transmit, "hello")});
-        filter.setSourceModel(&model);
+        // 用例统一按 HEX 格式判定（面板默认格式），断言走静态 accepts。
+        const auto accepted = [&model](const TrafficFilter::Options &options) {
+            int count = 0;
+            for (int i = 0; i < model.rowCount(); ++i)
+                if (TrafficFilter::accepts(model.record(i), options, PayloadCodec::Format::Hex)) ++count;
+            return count;
+        };
         // 端点为独立开关：勾选集合内的才显示，一个都不勾则不显示。
         TrafficFilter::Options options;
         options.endpoints = {a, b};
         options.search = QStringLiteral("7F FF");
-        filter.setOptions(options);
-        QCOMPARE(filter.rowCount(), 1);
-        // 显示格式只影响渲染，模型里的原始字节始终不变。
-        model.setFormat(PayloadCodec::Format::Utf8);
+        QCOMPARE(accepted(options), 1);
+        // 原始字节是事实依据，任何过滤与格式设置都改不了模型里的记录。
         QCOMPARE(model.record(0).raw, QByteArray::fromHex("007fff"));
         options.search.clear();
         options.endpoints = {a};
         options.tx = false;
-        filter.setOptions(options);
-        QCOMPARE(filter.rowCount(), 1);
+        QCOMPARE(accepted(options), 1);
         options.endpoints = {b};
         options.rx = false;
         options.tx = true;
         options.search = QStringLiteral("HELLO");
-        filter.setOptions(options);
-        QCOMPARE(filter.rowCount(), 1);
+        QCOMPARE(accepted(options), 1);
         options.search.clear();
         options.tx = false;
-        filter.setOptions(options);
-        QCOMPARE(filter.rowCount(), 0);
+        QCOMPARE(accepted(options), 0);
         options.endpoints.clear();
-        filter.setOptions(options);
-        QCOMPARE(filter.rowCount(), 0);
+        QCOMPARE(accepted(options), 0);
     }
 
     void messagesCarryStructuredFacts()
@@ -319,8 +318,6 @@ private slots:
     void structuredFiltersUseFactsNotLabels()
     {
         TrafficModel model;
-        TrafficFilter filter;
-        filter.setSourceModel(&model);
 
         PortDraft portA, portB;
         portA.kind = PortDraft::Serial;
@@ -337,34 +334,35 @@ private slots:
             3, QDateTime(), b, Traffic::Direction::Receive, QByteArray(64, 'z'), Traffic::Framing::Message);
         model.replaceRecords({stream, datagram, message});
 
+        const auto accepted = [&model](const TrafficFilter::Options &options) {
+            int count = 0;
+            for (int i = 0; i < model.rowCount(); ++i)
+                if (TrafficFilter::accepts(model.record(i), options, PayloadCodec::Format::Hex)) ++count;
+            return count;
+        };
         TrafficFilter::Options options;
         options.endpoints = {a.endpointId, b.endpointId};
 
         // 只看完整消息：按 framing 字段判定，而不是靠"数据内容里有没有换行"这类猜测。
         options.textOnly = true;
-        filter.setOptions(options);
-        QCOMPARE(filter.rowCount(), 2);
+        QCOMPARE(accepted(options), 2);
         options.textOnly = false;
-        filter.setOptions(options);
-        QCOMPARE(filter.rowCount(), 3);
+        QCOMPARE(accepted(options), 3);
 
         // 最小长度：按真实字节数，不受预览截断影响。
         options.minBytes = 8;
-        filter.setOptions(options);
-        QCOMPARE(filter.rowCount(), 1);
+        QCOMPARE(accepted(options), 1);
         QCOMPARE(model.record(model.rowCount() - 1).raw.size(), 64);
         options.minBytes = 0;
 
         // 对端地址是来源的结构化字段，能被关键词直接命中，不必先渲染成显示文本。
         options.search = QStringLiteral("52344");
-        filter.setOptions(options);
-        QCOMPARE(filter.rowCount(), 2);
+        QCOMPARE(accepted(options), 2);
 
         // 关掉示例数据：真实的 RX/TX 记录不受影响，示例全部隐藏。
         options.search.clear();
         options.sample = false;
-        filter.setOptions(options);
-        QCOMPARE(filter.rowCount(), 0);
+        QCOMPARE(accepted(options), 0);
     }
 
     void portDraftsRemainIndependent()
@@ -1060,36 +1058,32 @@ private slots:
               splitterProbe->widget(0)->sizeHint().height(),
               splitterProbe->widget(1)->sizeHint().height());
         QCOMPARE(model->rowCount(), 12);
-        // 对端独占一列并按 Source.peerAddress 渲染。串口行没有对端概念，显示占位破折号。
-        // 来源列已并入方向（TX·手动/定时）：RX 恒为自动来源，独立列与方向高度绑定。
-        QCOMPARE(TrafficModel::ColumnCount, 6);
-        QCOMPARE(model->index(0, TrafficModel::SourceColumn).data().toString(),
-                 QStringLiteral("A · 串口"));
-        QCOMPARE(model->index(0, TrafficModel::PeerColumn).data().toString(),
-                 QStringLiteral("—"));
-        const int tcpServerRow = [&] {
-            for (int row = 0; row < model->rowCount(); ++row)
-                if (model->index(row, TrafficModel::SourceColumn).data().toString()
-                    == QStringLiteral("B · TCP 服务器"))
-                    return row;
-            return -1;
-        }();
-        QVERIFY(tcpServerRow >= 0);
-        QCOMPARE(model->index(tcpServerRow, TrafficModel::PeerColumn).data().toString(),
-                 QStringLiteral("127.0.0.1:52001"));
         QVERIFY(window.rect().contains(QRect(editor->mapTo(&window, QPoint()), editor->size())));
-        // 切换显示格式：模型的渲染跟着变（HEX 基线 → DEC），原始字节不变。
-        // 第 0 条是字节流片段，内容列在渲染文本后带 ⏎ 续接标记——边界是消息的事实。
-        const QModelIndex firstData = model->index(0, TrafficModel::DataColumn);
-        QCOMPARE(firstData.data().toString(), QStringLiteral("01 03 00 00 00 02 C4 0B ⏎"));
+        // 格式切换只影响新行（控制台语义）：切到 DEC 后，新到达的消息按 DEC 渲染固化进文本视图。
+        // 已知字节流片段（HEX 01 03 00 00 00 02 C4 0B）渲染为 DEC，并带 ⏎ 续接标记——边界是消息的事实。
         trafficFormat->setCurrentIndex(1); // DEC
-        QCOMPARE(model->index(0, TrafficModel::DataColumn).data().toString(),
-                 QStringLiteral("1 3 0 0 0 2 196 11 ⏎"));
-        trafficFormat->setCurrentIndex(0);
-        // 搜索按到达时过滤：命中的记录进文本历史，未命中的只进模型不进显示。
-        auto *search = window.findChild<QLineEdit *>("trafficSearch");
         const QUuid endpointId = window.findChild<QPushButton *>("showPortA")
                                      ->property("endpoint").toUuid();
+        Traffic::Message dec;
+        dec.id = 100000;
+        dec.timestamp = QDateTime::currentDateTime();
+        dec.direction = Traffic::Direction::Receive;
+        dec.source.endpointId = endpointId;
+        dec.source.endpointIndex = 0;
+        dec.source.endpointKind = PortDraft::Serial;
+        dec.framing = Traffic::Framing::Stream;
+        dec.hasMoreFragments = true;
+        dec.raw = QByteArray::fromHex("010300000002c40b");
+        dec.rawLength = dec.raw.size();
+        window.findChild<TrafficPanel *>()->appendMessages({dec});
+        QTRY_COMPARE(model->rowCount(), 13);
+        QCOMPARE(text->lineCount(), 13);
+        const QString decLine = text->document()->lastBlock().text();
+        QVERIFY2(decLine.endsWith(QStringLiteral("1 3 0 0 0 2 196 11 ⏎")),
+                 qPrintable(QStringLiteral("DEC 渲染行不符：") + decLine));
+        trafficFormat->setCurrentIndex(0); // 恢复 HEX，后续消息按 HEX 渲染与搜索
+        // 搜索按到达时过滤：命中的记录进文本历史，未命中的只进模型不进显示。
+        auto *search = window.findChild<QLineEdit *>("trafficSearch");
         Traffic::Message hit;
         hit.id = 100001;
         hit.timestamp = QDateTime::currentDateTime();
@@ -1100,8 +1094,8 @@ private slots:
         hit.raw = QByteArray::fromHex("AABB");
         hit.rawLength = hit.raw.size();
         window.findChild<TrafficPanel *>()->appendMessages({hit});
-        QTRY_COMPARE(model->rowCount(), 13);
-        QCOMPARE(text->lineCount(), 13);
+        QTRY_COMPARE(model->rowCount(), 14);
+        QCOMPARE(text->lineCount(), 14);
         // 搜索按到达时生效：设一个只命中 HEX "AA BB" 的关键词，后续未命中记录不进显示。
         search->setText(QStringLiteral("aa bb"));
         Traffic::Message miss = hit;
@@ -1109,8 +1103,8 @@ private slots:
         miss.raw = QByteArray::fromHex("CCDD");
         miss.rawLength = miss.raw.size();
         window.findChild<TrafficPanel *>()->appendMessages({miss});
-        QTRY_COMPARE(model->rowCount(), 14); // 模型照单全收：导出与记录不依赖显示过滤
-        QCOMPARE(text->lineCount(), 13);     // 搜索未命中 → 不进显示
+        QTRY_COMPARE(model->rowCount(), 15); // 模型照单全收：导出与记录不依赖显示过滤
+        QCOMPARE(text->lineCount(), 14);     // 搜索未命中 → 不进显示
         search->clear();
         window.findChild<QPushButton *>("clearTraffic")->click();
         QCOMPARE(model->rowCount(), 0);

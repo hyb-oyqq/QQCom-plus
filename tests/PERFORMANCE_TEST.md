@@ -7,9 +7,6 @@
 | **A. 基准程序**（`tests/perf`） | 刷新周期的净工作耗时，可重复、可 A/B | 改动了面板/模型/视图后回归 |
 | **B. 真实端点灌数据**（`tests/performance_test.py`） | 真实串口/TCP 端到端观感 | M6 压测、真机长稳 |
 
-自动换行卡顿的根因分析与设计取舍见
-[docs/performance-optimization-wrap-mode.md](../docs/performance-optimization-wrap-mode.md)。
-
 ---
 
 ## A. 基准程序（推荐）

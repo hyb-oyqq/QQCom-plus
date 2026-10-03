@@ -4,10 +4,9 @@
 #include "ui/common/payloadcodec.h"
 #include "domain/trafficmessage.h"
 #include "domain/portdraft.h"
-#include <QAbstractTableModel>
 #include <QDateTime>
+#include <QObject>
 #include <QSet>
-#include <QSortFilterProxyModel>
 #include <QWidget>
 
 class QAction;
@@ -24,49 +23,28 @@ class TrafficTextView;
 class QTimer;
 
 // 消息是 domain 的值类型（Traffic::Message）：原始字节、时间戳、来源、长度都是事实，
-// 显示格式和列开关只是读取它的不同方式。面板不再自带一份精简副本。
-class TrafficModel : public QAbstractTableModel
+// 面板不再自带一份精简副本。TrafficModel 是结构化存储：导出、记录与搜索的事实来源，
+// 不驱动任何绘制（显示由 TrafficTextView 承担）。
+class TrafficModel : public QObject
 {
     Q_OBJECT
 public:
-    enum Column
-    {
-        TimeColumn = 0,
-        SourceColumn,
-        PeerColumn,
-        DirectionColumn,
-        BytesColumn,
-        DataColumn,
-        ColumnCount
-    };
-
     explicit TrafficModel(QObject *parent = nullptr);
-    int rowCount(const QModelIndex &parent = {}) const override;
-    int columnCount(const QModelIndex &parent = {}) const override;
-    QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
-    QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override;
+    int rowCount() const;
     void replaceRecords(QList<Traffic::Message> records);
     void appendRecords(QList<Traffic::Message> records);
-    // 数据内容列的渲染格式，由 PayloadCodec 与发送区共用同一套规则。
-    void setFormat(PayloadCodec::Format format);
     const Traffic::Message &record(int row) const;
 private:
-    // 渲染缓存：按需渲染 DataColumn 文本，避免同一帧内多处询问时重复渲染。
-    // 键为消息 id：会话内唯一，且不随淘汰旧记录导致的行号平移而变化。
-    QString renderDataColumn(int row) const;
-    void clearRenderCache();
     QList<Traffic::Message> m_records;
     qint64 m_rawBytes = 0; // m_records 的原始字节总数，避免每次追加都全量重算
-    PayloadCodec::Format m_format = PayloadCodec::Format::Hex;
-    mutable QHash<quint64, QString> m_renderCache;
 };
 
-class TrafficFilter : public QSortFilterProxyModel
+// 过滤判定的唯一实现：文本显示在消息到达时调用它，Options 与格式都由调用方持有。
+// 全部条件都作用在结构化字段上：端点/方向来自消息本身，
+// 关键词则对同一份原始字节做多种视图的匹配，所见即可搜。
+class TrafficFilter
 {
-    Q_OBJECT
 public:
-    // 过滤条件。全部条件都作用在结构化字段上：端点/方向来自消息本身，
-    // 关键词则对同一份原始字节做多种视图的匹配，所见即可搜。
     struct Options
     {
         QSet<QUuid> endpoints; // 集合为空表示不显示任何端点的记录
@@ -78,18 +56,7 @@ public:
         QString search;
     };
 
-    explicit TrafficFilter(QObject *parent = nullptr);
-    void setOptions(const Options &options);
-    // 搜索同时匹配当前显示格式的渲染文本，切换格式后仍能按所见内容过滤。
-    void setDisplayFormat(PayloadCodec::Format format);
-    // 过滤判定的唯一实现：代理逐行用它；文本显示在消息到达时也用它，
-    // 两处看到的"此刻可见内容"才一致。Options 与格式都由调用方持有。
     static bool accepts(const Traffic::Message &record, const Options &options, PayloadCodec::Format format);
-protected:
-    bool filterAcceptsRow(int row, const QModelIndex &parent) const override;
-private:
-    Options m_options;
-    PayloadCodec::Format m_format = PayloadCodec::Format::Hex;
 };
 
 class TrafficPanel : public QWidget
@@ -104,6 +71,8 @@ public:
     // （显示暂停不拖垮通信）。高频到达时先攒批再入模（见 m_flushTimer），
     // 插入通知次数与消息速率解耦。
     void appendMessages(const QList<Traffic::Message> &messages);
+    // 单条入口：与 appendMessages 同语义，免去逐条消息构造临时批次的开销。
+    void appendMessage(const Traffic::Message &message);
     // 组合根注入的偏好存储；为空时全部显示选项不落盘（示例预览等场景）。
     void setPreferences(PreferencesStore *store);
 private:

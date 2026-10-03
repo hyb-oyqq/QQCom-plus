@@ -32,7 +32,6 @@ public:
     // Set once a transport reports its state; the action button reflects it.
     // 打开期间锁定类型与参数，避免"边连边改"造成配置与运行态不一致。
     void setConnectionOpen(bool open);
-    bool isConnectionOpen() const { return m_open; }
     void setSerialPorts(const QList<SerialPortDescriptor> &ports);
     void setAddressHistory(const QStringList &remote, const QStringList &local);
     void commitAddressHistory();

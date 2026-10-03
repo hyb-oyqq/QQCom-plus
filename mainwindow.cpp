@@ -265,7 +265,7 @@ void MainWindow::handleMessage(const Traffic::Message &message)
     }
     if (message.direction == Traffic::Direction::Error && !message.statusText.isEmpty())
         ui->statusbar->showMessage(message.statusText, 5000);
-    m_traffic->appendMessages({message});
+    m_traffic->appendMessage(message);
 }
 
 void MainWindow::updateEndpointStatus()

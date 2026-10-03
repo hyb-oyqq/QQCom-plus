@@ -16,7 +16,6 @@ class RouteEditorWidget : public QWidget
 public:
     explicit RouteEditorWidget(QWidget *parent = nullptr);
     void setEndpoints(const QList<PortDraft> &ports, bool ready);
-    bool isActive() const { return m_active; }
 signals:
     void draftCountChanged(int count);
 private:

@@ -6,11 +6,9 @@
 #include "persistence/preferencesstore.h"
 
 #include <QActionGroup>
-#include <QColor>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFile>
-#include <QFontDatabase>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -21,6 +19,7 @@
 #include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <utility>
 
 namespace {
 
@@ -31,22 +30,17 @@ constexpr int BarIconSize = 16;
 // 而不是"我们留下了多少"——两者不等即说明发生了截断。
 constexpr int PreviewLimit = 4096;
 
-// 整个模型保留的原始字节预算，与 ARCHITECTURE.md §7 的 GUI 历史模型上限一致。
+// 模型的历史预算：4 MiB 或 20000 条，先到者为准。
 constexpr qint64 HistoryByteBudget = 4 * 1024 * 1024;
 
-// 历史上的条数上限：与字节预算先到者为准，对应 ARCHITECTURE.md §7.1 的
-// "16 MiB 或 20000 条"。只限字节是不够的：串口遥测常见几十字节的小帧，
-// 光靠 4 MiB 预算能堆到六万条以上，而每条 Message（时间、来源、三个 QUuid、
-// 两个 QString）的元数据开销远大于它那 64 字节的载荷——"限了字节"不等于"限了内存"。
+// 只限字节是不够的：串口遥测常见几十字节的小帧，光靠 4 MiB 预算能堆到六万条以上，
+// 而每条 Message（时间、来源、三个 QUuid、两个 QString）的元数据开销远大于它那
+// 64 字节的载荷——"限了字节"不等于"限了内存"。
 constexpr int HistoryRowBudget = 20000;
 
 // 真实消息到达的攒批窗口：一帧左右的时间足够把同一次 readyRead 的多条消息
 // 合成一个插入通知；再长会让人感觉记录"迟一拍"。
 constexpr int FlushIntervalMs = 16;
-
-// 渲染缓存条数上限。命中率只需覆盖"当前可见的一屏"，上限之外整体清空让热点自然重填；
-// 单条缓存约 1KB 量级，512 条把额外内存压在 1MB 以内。
-constexpr int RenderCacheLimit = 512;
 
 // 丢弃最旧记录直到回到预算内。逐条移除而不是整体截断，保留最新的连续上下文。
 // 字节与条数两个上限先到者为准；返回丢弃的条数，由调用方决定用哪种模型通知。
@@ -84,100 +78,9 @@ void applyPreviewLimit(Traffic::Message &record)
 
 } // namespace
 
-TrafficModel::TrafficModel(QObject *parent) : QAbstractTableModel(parent) {}
-int TrafficModel::rowCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : m_records.size(); }
-int TrafficModel::columnCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : ColumnCount; }
+TrafficModel::TrafficModel(QObject *parent) : QObject(parent) {}
+int TrafficModel::rowCount() const { return m_records.size(); }
 const Traffic::Message &TrafficModel::record(int row) const { return m_records.at(row); }
-
-QString TrafficModel::renderDataColumn(int row) const
-{
-    const auto &r = m_records.at(row);
-
-    // 按消息 id 查缓存：id 在会话内唯一，淘汰旧记录造成的行号平移不会让它失效，
-    // 因此滚动与追加都不会因为缓存错位而重复渲染。
-    const auto cached = m_renderCache.constFind(r.id);
-    if (cached != m_renderCache.constEnd())
-        return *cached;
-
-    auto text = PayloadCodec::render(r.raw, m_format);
-    if (r.truncated) text += QObject::tr(" …");
-    if (r.isFragment() && r.hasMoreFragments) text += QObject::tr(" ⏎");
-
-    if (m_renderCache.size() >= RenderCacheLimit)
-        m_renderCache.clear();
-    m_renderCache.insert(r.id, text);
-    return text;
-}
-
-void TrafficModel::clearRenderCache()
-{
-    m_renderCache.clear();
-}
-
-QVariant TrafficModel::data(const QModelIndex &index, int role) const
-{
-    if (!index.isValid() || index.row() >= m_records.size()) return {};
-    const auto &r = m_records.at(index.row());
-    if (role == Qt::ForegroundRole && index.column() == DirectionColumn)
-        return QColor(r.direction == Traffic::Direction::Transmit ? "#3565ce" : "#008577");
-    // 对端地址用等宽字体：IP:port 的数字要能上下对齐着扫，比例字体会让 52344 和 52345 看着一样长。
-    if (role == Qt::FontRole && (index.column() == TimeColumn || index.column() == BytesColumn
-            || index.column() == PeerColumn)) {
-        auto font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-        font.setPointSize(10);
-        return font;
-    }
-    if (role == Qt::TextAlignmentRole && (index.column() == DirectionColumn || index.column() == BytesColumn))
-        return int(Qt::AlignCenter);
-    if (role == Qt::ToolTipRole) {
-        // 悬停展示结构化字段本身：真实长度、边界语义、关联 id，都不是显示列里的内容。
-        QStringList lines{QObject::tr("原始字节（HEX）：%1")
-                              .arg(PayloadCodec::render(r.raw, PayloadCodec::Format::Hex))};
-        if (r.truncated)
-            lines.prepend(QObject::tr("已截断：共 %1 字节，仅保留前 %2 字节").arg(r.rawLength).arg(r.raw.size()));
-        lines << QObject::tr("边界：%1").arg(Traffic::framingName(r.framing));
-        if (r.isFragment())
-            lines << QObject::tr("片段 %1%2").arg(r.fragmentIndex).arg(r.hasMoreFragments ? QObject::tr("，后续仍有片段") : QString());
-        if (r.state != Traffic::State::None)
-            lines << QObject::tr("发送状态：%1%2").arg(Traffic::stateName(r.state),
-                                 r.statusText.isEmpty() ? QString() : QObject::tr("（%1）").arg(r.statusText));
-        if (r.durationUs >= 0) lines << QObject::tr("本地耗时：%1 µs").arg(r.durationUs);
-        if (!r.detail.isEmpty()) lines << r.detail;
-        if (!r.requestId.isNull()) lines << QObject::tr("请求：%1").arg(r.requestId.toString());
-        if (!r.routeId.isNull()) lines << QObject::tr("路由：%1").arg(r.routeId.toString());
-        if (!r.frameId.isNull()) lines << QObject::tr("来源帧：%1").arg(r.frameId.toString());
-        return lines.join(QLatin1Char('\n'));
-    }
-    if (role != Qt::DisplayRole) return {};
-    switch (index.column()) {
-    case TimeColumn: return r.timestamp.toString("HH:mm:ss.zzz");
-    // 行标识由来源的行号与类型派生，不随消息落库：改了端点类型，旧记录的标签也跟着更新。
-    case SourceColumn: return endpointLabel(r.source.endpointIndex, r.source.endpointKind);
-    // 对端独占一列。挤进端口列的第二行会被 33px 的行高裁掉，而 TCP Server 的
-    // "哪个客户端发来的"恰恰是排障时最先要看的信息，不能因为放不下就不显示。
-    case PeerColumn: return r.source.hasPeer() ? r.source.peerAddress : QStringLiteral("—");
-    case DirectionColumn: {
-        // 方向是主语义。来源只在"与方向不绑定"的场合才有信息量（手动/定时/转发/
-        // 示例），以复合标记挂在方向上；RX 恒为自动来源，"接收"不重复播报——
-        // 单独的来源列在转发落地前与方向高度绑定，只是屏幕宽度的净浪费。
-        auto name = Traffic::directionName(r.direction);
-        if (r.isData() && r.origin != Traffic::Origin::Automatic)
-            name += QStringLiteral("·") + Traffic::originName(r.origin);
-        if (r.state == Traffic::State::None || r.state == Traffic::State::LocalCompleted) return name;
-        return QStringLiteral("%1 %2").arg(name, Traffic::stateName(r.state));
-    }
-    // 显示真实长度，截断标记交给悬停与状态列，不在数字里掺信息。
-    case BytesColumn: return r.displayBytes();
-    case DataColumn: return renderDataColumn(index.row());
-    default: return {};
-    }
-}
-
-QVariant TrafficModel::headerData(int section, Qt::Orientation orientation, int role) const
-{
-    if (orientation != Qt::Horizontal || role != Qt::DisplayRole) return {};
-    return QStringList{tr("时间"), tr("端口"), tr("对端"), tr("方向"), tr("字节"), tr("数据内容")}.value(section);
-}
 
 void TrafficModel::replaceRecords(QList<Traffic::Message> records)
 {
@@ -186,13 +89,10 @@ void TrafficModel::replaceRecords(QList<Traffic::Message> records)
     for (auto &r : records)
         applyPreviewLimit(r);
     enforceBudget(records);
-    m_rawBytes = 0;
-    for (const auto &r : records)
-        m_rawBytes += r.raw.size();
-    beginResetModel();
     m_records = std::move(records);
-    clearRenderCache();  // 记录全部替换，缓存失效
-    endResetModel();
+    m_rawBytes = 0;
+    for (const auto &r : m_records)
+        m_rawBytes += r.raw.size();
 }
 
 void TrafficModel::appendRecords(QList<Traffic::Message> records)
@@ -217,83 +117,46 @@ void TrafficModel::appendRecords(QList<Traffic::Message> records)
         ++drop;
     }
 
-    // 增量的移除 + 插入，而不是整表 beginResetModel：reset 会让视图丢弃选中项、
-    // 滚动位置与全部行状态，是"日志写满之后越来越卡"的直接来源。
-    // 渲染缓存按消息 id 索引，淘汰造成的行号平移不会让它失效。
-    if (drop > 0) {
-        beginRemoveRows({}, 0, drop - 1);
-        m_records.remove(0, drop);
-        endRemoveRows();
-    }
+    if (drop > 0) m_records.remove(0, drop);
     m_rawBytes = keptBytes + incomingBytes;
-    const int first = m_records.size();
-    beginInsertRows({}, first, first + added - 1);
     m_records += records;
-    endInsertRows();
 }
 
-void TrafficModel::setFormat(PayloadCodec::Format format)
-{
-    // 渲染格式只影响显示列，原始字节始终是事实依据。
-    m_format = format;
-    clearRenderCache();
-    if (!m_records.isEmpty())
-        emit dataChanged(index(0, DataColumn), index(m_records.size() - 1, DataColumn));
-}
-
-TrafficFilter::TrafficFilter(QObject *parent) : QSortFilterProxyModel(parent) {}
-void TrafficFilter::setDisplayFormat(PayloadCodec::Format format)
-{
-    m_format = format;
-}
-void TrafficFilter::setOptions(const Options &options)
-{
-    beginFilterChange();
-    m_options = options;
-    m_options.search = options.search.trimmed();
-    endFilterChange(QSortFilterProxyModel::Direction::Rows);
-}
-
-bool TrafficFilter::accepts(const Traffic::Message &r, const Options &m_options, PayloadCodec::Format m_format)
+bool TrafficFilter::accepts(const Traffic::Message &r, const Options &options, PayloadCodec::Format format)
 {
     // 端点与方向是消息自带的事实字段，直接按结构判等，不解析显示文本。
-    if (m_options.endpoints.isEmpty() || !m_options.endpoints.contains(r.source.endpointId)) return false;
+    if (options.endpoints.isEmpty() || !options.endpoints.contains(r.source.endpointId)) return false;
     switch (r.direction) {
     case Traffic::Direction::Receive:
-        if (!m_options.rx) return false;
+        if (!options.rx) return false;
         break;
     case Traffic::Direction::Transmit:
-        if (!m_options.tx) return false;
+        if (!options.tx) return false;
         break;
     default:
         // 状态与错误不属于任何一个方向开关，跟随 RX 一起显示。
-        if (!m_options.rx && !m_options.tx) return false;
+        if (!options.rx && !options.tx) return false;
         break;
     }
     // 示例数据单独开关：调试时最怕把预览数据和真实收发混在一起看。
-    if (r.origin == Traffic::Origin::Sample && !m_options.sample) return false;
-    if (m_options.textOnly && r.isFragment()) return false;
+    if (r.origin == Traffic::Origin::Sample && !options.sample) return false;
+    if (options.textOnly && r.isFragment()) return false;
     // 长度用真实字节数过滤，不用预览后剩下的长度，否则大消息会被误判为小。
-    if (r.displayBytes() < m_options.minBytes) return false;
-    if (m_options.search.isEmpty()) return true;
+    if (r.displayBytes() < options.minBytes) return false;
+    if (options.search.isEmpty()) return true;
 
     // 搜索匹配当前显示格式的渲染文本、UTF-8 文本与两种 HEX 写法，所见即可搜；
     // 也匹配来源的对端地址和自由说明文本。逐项短路，命中即返回，
     // 避免对每行做无谓的渲染与 HEX 展开。
-    const auto needle = m_options.search;
+    const auto needle = options.search;
     if (r.source.peerAddress.contains(needle, Qt::CaseInsensitive)) return true;
     if (r.source.endpointName.contains(needle, Qt::CaseInsensitive)) return true;
     if (r.statusText.contains(needle, Qt::CaseInsensitive)) return true;
     if (r.detail.contains(needle, Qt::CaseInsensitive)) return true;
-    if (PayloadCodec::render(r.raw, m_format).contains(needle, Qt::CaseInsensitive)) return true;
+    if (PayloadCodec::render(r.raw, format).contains(needle, Qt::CaseInsensitive)) return true;
     if (PayloadCodec::render(r.raw, PayloadCodec::Format::Utf8).contains(needle, Qt::CaseInsensitive)) return true;
     if (QString(r.raw.toHex()).contains(needle, Qt::CaseInsensitive)) return true;
     return QString::fromLatin1(r.raw.toHex(' ')).contains(needle, Qt::CaseInsensitive);
-}
-
-bool TrafficFilter::filterAcceptsRow(int row, const QModelIndex &) const
-{
-    return accepts(static_cast<TrafficModel *>(sourceModel())->record(row), m_options, m_format);
 }
 
 TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
@@ -447,7 +310,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // RX/TX 的过滤连接在创建菜单动作时已完成，这里不再重复 connect。
     connect(m_search, &QLineEdit::textChanged, this, &TrafficPanel::updateFilter);
     connect(m_format, &QComboBox::currentIndexChanged, this, [this](int) {
-        m_model->setFormat(currentDisplayFormat());
+        // 控制台语义：格式切换只影响新到达的行，已固化的文本不重渲染。
         savePreferences();
     });
     connect(clear, &QPushButton::clicked, this, [this] {
@@ -533,16 +396,27 @@ void TrafficPanel::appendMessages(const QList<Traffic::Message> &messages)
         updateSummary();
         return;
     }
-    // 逐条 beginInsertRows + scrollToBottom 的事件开销与消息速率成正比；
+    // 逐条入模 + 滚动的事件开销与消息速率成正比；
     // 先攒进缓冲，16ms 一拍整批入模，插入通知次数与消息速率解耦。
     m_pending += messages;
+    if (!m_flushTimer->isActive()) m_flushTimer->start();
+}
+
+void TrafficPanel::appendMessage(const Traffic::Message &message)
+{
+    if (m_paused) {
+        ++m_droppedWhilePaused;
+        updateSummary();
+        return;
+    }
+    m_pending.append(message);
     if (!m_flushTimer->isActive()) m_flushTimer->start();
 }
 
 void TrafficPanel::flushPending()
 {
     if (m_pending.isEmpty()) return;
-    const auto batch = m_pending;
+    auto batch = std::move(m_pending);
     m_pending.clear();
     m_model->appendRecords(batch);
     writeLog(batch); // 记录与显示同流：进模型的批次才落日志，暂停即同停
