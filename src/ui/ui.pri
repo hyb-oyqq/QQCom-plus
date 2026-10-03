@@ -8,7 +8,6 @@ include($$PWD/common/codec.pri)
 SOURCES += \
     $$PWD/panels/portselector/portselectorwidget.cpp \
     $$PWD/panels/traffic/trafficpanel.cpp \
-    $$PWD/panels/traffic/trafficlogview.cpp \
     $$PWD/panels/traffic/traffictextview.cpp \
     $$PWD/panels/sending/sendpanel.cpp \
     $$PWD/panels/routing/routeeditorwidget.cpp \
@@ -21,7 +20,6 @@ HEADERS += \
     $$PWD/common/trafficdisplayoptions.h \
     $$PWD/panels/portselector/portselectorwidget.h \
     $$PWD/panels/traffic/trafficpanel.h \
-    $$PWD/panels/traffic/trafficlogview.h \
     $$PWD/panels/traffic/traffictextview.h \
     $$PWD/panels/sending/sendpanel.h \
     $$PWD/panels/routing/routeeditorwidget.h

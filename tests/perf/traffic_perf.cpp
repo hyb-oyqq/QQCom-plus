@@ -1,13 +1,12 @@
 // 监视区刷新性能基准：在真实 MainWindow + TrafficPanel 上，按"每 16ms 一批新消息"
 // 的节奏持续灌入数据，测每个刷新周期的墙钟耗时。
 //
-// 这件事只能测出货代码：卡顿来自面板与视图的协作方式（行高怎么定、单元格文本给多长、
-// 预算溢出怎么通知模型），任何用假模型搭出来的复现都测不到同一个瓶颈。
+// 这件事只能测出货代码：卡顿来自面板与视图的协作方式（攒批怎么落、文本怎么追加、
+// 跟随怎么滚动），任何用假模型搭出来的复现都测不到同一个瓶颈。
 //
-// 用法：easyDebug_traffic_perf.exe [载荷字节数] [每批条数] [批数] [是否开启换行:0/1] [视图:0=表格 1=文本]
+// 用法：easyDebug_traffic_perf.exe [载荷字节数] [每批条数] [批数] [拖动窗口基准:0/1]
 // 判读：mean/p50 是流畅度，max 与 over100 是"卡顿"——用户感知到的正是长尾。
 #include "mainwindow.h"
-#include "ui/panels/traffic/trafficlogview.h"
 #include "ui/panels/traffic/trafficpanel.h"
 #include "ui/panels/traffic/traffictextview.h"
 
@@ -85,43 +84,27 @@ int main(int argc, char **argv)
     const int payloadBytes = argc > 1 ? std::atoi(argv[1]) : 1024;
     const int batchSize = argc > 2 ? std::atoi(argv[2]) : 20;
     const int cycles = argc > 3 ? std::atoi(argv[3]) : 200;
-    const bool wrap = argc > 4 ? std::atoi(argv[4]) != 0 : true;
-    const bool textView = argc > 5 ? std::atoi(argv[5]) != 0 : false;
-    const bool resizeBench = argc > 6 ? std::atoi(argv[6]) != 0 : false;
+    const bool resizeBench = argc > 4 ? std::atoi(argv[4]) != 0 : false;
 
     MainWindow window;
     window.resize(1400, 900);
     window.show();
-    QTest::qWait(120); // 等列宽/样式完成布局
+    QTest::qWait(120); // 等样式完成布局
 
     auto *panel = window.findChild<TrafficPanel *>();
-    auto *table = window.findChild<TrafficLogView *>(QStringLiteral("trafficTable"));
     auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
     auto *model = window.findChild<TrafficModel *>();
-    auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
-    auto *textModeAction = window.findChild<QAction *>(QStringLiteral("textMode"));
     auto *portA = window.findChild<QPushButton *>(QStringLiteral("showPortA"));
-    Q_ASSERT(panel && table && model && wrapAction && portA && text && textModeAction);
-
-    // 文本视图默认开启：表格基准必须显式切回表格，否则被测控件被堆栈藏起来，
-    // viewport()->repaint() 就测不到任何绘制。
-    textModeAction->setChecked(textView);
+    Q_ASSERT(panel && text && model && portA);
 
     window.loadExample();
     QTest::qWait(60);
 
     const QUuid endpointId = portA->property("endpoint").toUuid();
-    wrapAction->setChecked(wrap);
-    QTest::qWait(160); // 换行切换 + 字符预算防抖落地
-
-    const int dataColumnWidth = table->payloadAreaWidth();
     std::printf("========================================================\n");
-    std::printf("监视区刷新基准  Qt %s  视图 %s\n", qVersion(), textView ? "文本框" : "表格");
-    std::printf("载荷 %d B/条  每批 %d 条  批数 %d  换行 %s\n",
-                payloadBytes, batchSize, cycles, wrap ? "开启" : "关闭");
-    std::printf("窗口 %dx%d  数据列宽 %dpx  行高 %dpx  工作集 %.0f MiB\n",
-                window.width(), window.height(), dataColumnWidth,
-                table->defaultRowHeight(), wsMiB());
+    std::printf("监视区刷新基准  Qt %s  视图 文本框\n", qVersion());
+    std::printf("载荷 %d B/条  每批 %d 条  批数 %d\n", payloadBytes, batchSize, cycles);
+    std::printf("窗口 %dx%d  工作集 %.0f MiB\n", window.width(), window.height(), wsMiB());
     std::printf("========================================================\n");
 
     // 预先造好全部 payload，避免把随机数生成计入计时。
@@ -155,14 +138,13 @@ int main(int argc, char **argv)
         return batch;
     };
 
-    // 预热：先把模型灌到预算附近，让稳态（含淘汰）成为被测对象。
+    // 预热：先把文本历史灌起来，让稳态（含可能的头部淘汰）成为被测对象。
     for (int i = 0; i < WarmupBatches; ++i) {
         panel->appendMessages(makeBatch(i * batchSize));
         QTest::qWait(20);
     }
-    // 计时器留到循环之后再用：逐行精确行高会给每一行写死高度，先做会污染被测的稳态。
     QElapsedTimer t;
-    std::printf("预热完成：模型 %d 行\n\n", model->rowCount());
+    std::printf("预热完成：模型 %d 行  文本 %d 行\n\n", model->rowCount(), text->lineCount());
 
     QVector<double> perCycle;
     QVector<double> perPace; // 每拍刻意等待攒批的时间，从净工作耗时里扣除
@@ -177,7 +159,7 @@ int main(int argc, char **argv)
         // 攒批是 16ms 一拍的异步过程。等到"最后一条真的进了模型"为止，
         // 而不是等行数变大——记录数到达历史预算上限后，每批都是"丢最旧 + 加最新"，
         // 行数不再增长，只有消息 id 能证明这一拍刷新已经落地。
-        // 至少等满 25ms：给旧实现的 200ms 防抖定时器留出触发的机会，
+        // 至少等满 25ms：给防抖定时器留出触发的机会，
         // 否则测不到"数据停顿时才发作"的整秒冻结。
         QElapsedTimer wait;
         wait.start();
@@ -188,13 +170,8 @@ int main(int argc, char **argv)
             if (landed && wait.elapsed() >= 25) break;
         }
         perPace.append(wait.nsecsElapsed() / 1e6);
-        if (textView) {
-            text->scrollToBottom();
-            text->viewport()->repaint();
-        } else {
-            table->scrollToBottom();
-            table->viewport()->repaint();
-        }
+        text->scrollToBottom();
+        text->viewport()->repaint();
         perCycle.append(t.nsecsElapsed() / 1e6);
     }
 
@@ -232,6 +209,5 @@ int main(int argc, char **argv)
                     r.mean, r.p50, r.p95, r.max, r.over100);
     }
 
-    std::printf("\n参考：自定义视图不测量全表行高，没有 resizeRowsToContents()。\n");
     return 0;
 }

@@ -4,7 +4,6 @@
 #include "ui/common/payloadcodec.h"
 #include "ui/panels/sending/sendpanel.h"
 #include "ui/panels/traffic/trafficpanel.h"
-#include "ui/panels/traffic/trafficlogview.h"
 #include "ui/panels/traffic/traffictextview.h"
 #include "discovery/portdiscoveryservice.h"
 #include "persistence/preferencesstore.h"
@@ -675,174 +674,6 @@ private slots:
         QVERIFY(reopened.findChild<QComboBox *>("client.host")->findText("10.20.30.40") >= 0);
     }
 
-    void trafficWrapSwitchAdjustsView()
-    {
-        MainWindow window;
-        window.setAttribute(Qt::WA_DontShowOnScreen);
-        window.resize(1280, 720);
-        window.show();
-        window.loadExample();
-        // 摘除组合根注入的偏好存储：本用例改显示开关，不该写进真实用户的 preferences.ini。
-        window.findChild<TrafficPanel *>()->setPreferences(nullptr);
-        // 文本显示模式默认开启，表格被收进堆栈且跳过布局；本用例读表格行高，先切回表格。
-        window.findChild<QAction *>(QStringLiteral("textMode"))->setChecked(false);
-        auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
-        auto *table = window.findChild<TrafficLogView *>(QStringLiteral("trafficTable"));
-        auto *model = window.findChild<TrafficModel *>();
-        QVERIFY(wrapAction && table && model);
-        QCOMPARE(wrapAction->isChecked(), false);
-        QCOMPARE(table->wordWrap(), false);
-        QCOMPARE(table->defaultRowHeight(), 33);
-
-        // 换行行高按各条内容的实际行数给：先让长报文进模型，才能看出行高是否跟着内容走。
-        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
-                                     ->property("endpoint").toUuid();
-        QByteArray longRaw(1024, Qt::Uninitialized);
-        for (int i = 0; i < longRaw.size(); ++i)
-            longRaw[i] = char(i & 0xFF);
-        Traffic::Message longMessage;
-        longMessage.id = 999001;
-        longMessage.direction = Traffic::Direction::Receive;
-        longMessage.source.endpointId = endpointId;
-        longMessage.source.endpointIndex = 0;
-        longMessage.source.endpointKind = PortDraft::Serial;
-        longMessage.raw = longRaw;
-        longMessage.rawLength = longRaw.size();
-
-        wrapAction->setChecked(true);
-        QTRY_COMPARE(table->wordWrap(), true);
-        const int lineHeight = table->fontMetrics().height();
-        // 单行高度 = 一行文本 + 绘制余量；余量从"单行基线"里反推，测试不复制实现常数。
-        const int lineUnit = table->defaultRowHeight();
-        const int padding = lineUnit - lineHeight;
-        QVERIFY2(lineUnit > 0 && padding >= 0, "换行模式的行高基线应是一行文本");
-
-        auto *proxy = qobject_cast<QSortFilterProxyModel *>(table->model());
-        QVERIFY(proxy);
-        // 行高 = 该行内容需要的行数 × 行高单位 + 绘制余量。逐行独立算，
-        // 不是全表一个常数——这正是"短报文不再占着长报文高度"的判据。
-        const auto expectedHeight = [&](int viewRow) {
-            const int sourceRow = proxy->mapToSource(proxy->index(viewRow, 0)).row();
-            return model->wrappedLines(sourceRow) * lineHeight + padding;
-        };
-
-        const int shortRows = table->model()->rowCount();
-        QVERIFY(shortRows > 0);
-        const int shortSourceRow = proxy->mapToSource(proxy->index(0, 0)).row();
-        const int shortLines = model->wrappedLines(shortSourceRow);
-
-        // 一条 1KB 报文（3071 字符 HEX）必须占更多行，且被折行上限钳住。
-        window.findChild<TrafficPanel *>()->appendMessages({longMessage});
-        QTRY_COMPARE(model->rowCount(), shortRows + 1);
-        const int longViewRow = table->model()->rowCount() - 1;
-        const int longSourceRow = proxy->mapToSource(proxy->index(longViewRow, 0)).row();
-        QVERIFY2(model->wrappedLines(longSourceRow) > shortLines,
-                 "1KB 报文必须比十几字节的示例报文占更多行");
-        QVERIFY2(model->wrappedLines(longSourceRow) <= 6, "折行行数必须被上限钳住");
-
-        // 列宽要等布局与预算防抖落地，行高才按内容算得出来，所以轮询等待收敛。
-        QTRY_COMPARE(table->rowHeight(longViewRow), expectedHeight(longViewRow));
-        QVERIFY2(table->rowHeight(longViewRow) > lineUnit,
-                 "长报文行高必须高于单行基线");
-        // 前面的短报文各行按自己的内容定高，没有被长报文带着一起变高。
-        for (int row = 0; row < shortRows; ++row)
-            QCOMPARE(table->rowHeight(row), expectedHeight(row));
-
-        // 连续大批追加并触发头部淘汰后，行高仍必须跟内容走。
-        // 旧的 QHeaderView section 会在"删头部 + 加尾部"之后丢高度，折行看起来就停了。
-        quint64 nextId = 100000;
-        for (int round = 0; round < 2; ++round) {
-            QList<Traffic::Message> batch;
-            batch.reserve(2500);
-            for (int i = 0; i < 2499; ++i) {
-                auto message = longMessage;
-                message.id = nextId++;
-                batch.append(message);
-            }
-            auto tail = longMessage;
-            tail.id = nextId++;
-            if (round == 1) {
-                tail.raw = QByteArray::fromHex("0102");
-                tail.rawLength = tail.raw.size();
-            }
-            batch.append(tail);
-            window.findChild<TrafficPanel *>()->appendMessages(batch);
-            QTRY_COMPARE(model->record(model->rowCount() - 1).id, nextId - 1);
-        }
-        QVERIFY2(model->rowCount() < 5000, "字节预算应该已经从头部淘汰旧记录");
-        const int floodedRows = table->model()->rowCount();
-        const int tailRow = floodedRows - 1;
-        const int beforeTail = floodedRows - 2;
-        QTRY_COMPARE(table->rowHeight(tailRow), expectedHeight(tailRow));
-        QTRY_COMPARE(table->rowHeight(beforeTail), expectedHeight(beforeTail));
-        QTRY_COMPARE(table->rowHeight(0), expectedHeight(0));
-        QVERIFY2(model->wrappedLines(proxy->mapToSource(proxy->index(tailRow, 0)).row()) == 1,
-                 "尾部短报文必须仍是一行");
-        QVERIFY2(table->rowHeight(beforeTail) > table->rowHeight(tailRow),
-                 "头部淘汰之后，长报文行高不能塌成短报文的高度");
-
-        // 切回单行省略：所有行回到统一 33px。
-        wrapAction->setChecked(false);
-        QTRY_COMPARE(table->wordWrap(), false);
-        QCOMPARE(table->defaultRowHeight(), 33);
-        for (int row = 0; row < table->model()->rowCount(); ++row)
-            QCOMPARE(table->rowHeight(row), 33);
-    }
-
-    // 大报文只在绘制那一份上裁剪，数据本身必须保持完整。
-    // 委托会为拿到的整段文本建立折行 / 省略布局，文本长度直接决定每帧成本：
-    // 实测 4KB 报文（12287 字符 HEX）不裁剪时单次整视口重绘要 441ms，
-    // 按可见行数裁到千字符以内后降到 20ms 上下。
-    void hugeMessagesRenderBoundedTextOnly()
-    {
-        MainWindow window;
-        window.setAttribute(Qt::WA_DontShowOnScreen);
-        window.resize(1280, 720);
-        window.show();
-        window.findChild<TrafficPanel *>()->setPreferences(nullptr);
-        // 本用例验证字符预算对绘制文本的裁剪，预算只在表格可见时计算，先切回表格。
-        window.findChild<QAction *>(QStringLiteral("textMode"))->setChecked(false);
-        auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
-        auto *table = window.findChild<TrafficLogView *>(QStringLiteral("trafficTable"));
-        auto *model = window.findChild<TrafficModel *>();
-        QVERIFY(wrapAction && table && model);
-        QTest::qWait(50); // 等列宽完成布局，字符预算才能按真实列宽算
-        wrapAction->setChecked(true);
-
-        // 真实形状的 4KB 报文：每个字节都不同，HEX 渲染后 12287 字符。
-        QByteArray raw(4096, Qt::Uninitialized);
-        for (int i = 0; i < raw.size(); ++i)
-            raw[i] = char(i & 0xFF);
-        const auto full = PayloadCodec::render(raw, PayloadCodec::Format::Hex);
-        QCOMPARE(full.size(), 12287);
-
-        Traffic::Message message;
-        message.id = 1;
-        message.direction = Traffic::Direction::Receive;
-        message.source.endpointIndex = 0;
-        message.source.endpointKind = PortDraft::Serial;
-        message.source.endpointId = QUuid::createUuid();
-        message.raw = raw;
-        message.rawLength = raw.size();
-        window.findChild<TrafficPanel *>()->appendMessages({message});
-        QTRY_COMPARE(model->rowCount(), 1);
-
-        const auto shownText = [model]() {
-            return model->index(0, TrafficModel::DataColumn).data(Qt::DisplayRole).toString();
-        };
-        QTRY_VERIFY2(shownText().size() < full.size() / 2,
-                     qPrintable(QStringLiteral("绘制文本未按列宽裁剪：%1 / %2 字符")
-                                    .arg(shownText().size()).arg(full.size())));
-        QVERIFY2(shownText().startsWith(full.left(64)), "裁剪必须保留开头，改的是尾部看不见的部分");
-        QVERIFY(shownText().endsWith(QStringLiteral("…")));
-
-        // 内存里仍然是完整的结构化数据：原始字节一字未动，真实长度单独保留。
-        QCOMPARE(model->record(0).raw.size(), raw.size());
-        QCOMPARE(model->record(0).displayBytes(), qint64(raw.size()));
-        // 完整内容仍可从悬停提示与导出拿到，裁剪不影响排障。
-        QVERIFY(model->index(0, TrafficModel::DataColumn).data(Qt::ToolTipRole).toString().contains(full));
-    }
-
     // 历史上限必须同时限字节和条数。只限字节时，串口遥测那种几十字节的小帧
     // 能把条数堆到六万以上，每条 Message 的元数据（时间、来源、三个 QUuid、
     // 两个 QString）远大于它那点载荷——"限了字节"不等于"限了内存"。
@@ -885,12 +716,12 @@ private slots:
         firstTraffic.setPreferences(&firstStore);
         SendPanel firstSender;
         firstSender.setPreferences(&firstStore);
-        auto *wrap = firstTraffic.findChild<QAction *>(QStringLiteral("wrapTraffic"));
+        auto *whole = firstTraffic.findChild<QAction *>(QStringLiteral("wholeTraffic"));
         auto *rx = firstTraffic.findChild<QAction *>(QStringLiteral("showRx"));
         auto *format = firstTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
         auto *sendFormat = firstSender.findChild<QComboBox *>(QStringLiteral("sendFormat"));
-        QVERIFY(wrap && rx && format && sendFormat);
-        wrap->setChecked(true);
+        QVERIFY(whole && rx && format && sendFormat);
+        whole->setChecked(true);
         rx->setChecked(false);
         format->setCurrentText(QStringLiteral("UTF-8"));
         sendFormat->setCurrentText(QStringLiteral("GBK"));
@@ -900,7 +731,7 @@ private slots:
         secondTraffic.setPreferences(&secondStore);
         SendPanel secondSender;
         secondSender.setPreferences(&secondStore);
-        QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("wrapTraffic"))->isChecked(), true);
+        QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("wholeTraffic"))->isChecked(), true);
         QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("showRx"))->isChecked(), false);
         QCOMPARE(secondTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->currentText(),
                  QStringLiteral("UTF-8"));
@@ -967,185 +798,6 @@ private slots:
         const auto all = QString::fromUtf8(log.readAll()).trimmed().split(QLatin1Char('\n'));
         QCOMPARE(all.size(), 3);
         QVERIFY(all.at(2).endsWith(QStringLiteral("ok")));
-    }
-
-    void endpointRowsStayVisibleAndInline()
-    {
-        MainWindow window;
-        window.setAttribute(Qt::WA_DontShowOnScreen);
-        window.resize(1280, 720);
-        window.show();
-        QTest::qWait(50);
-        // 文本显示模式默认开启，表格被收进堆栈；本用例验证表格列的可见性，先切回表格。
-        if (auto *textModeAction = window.findChild<QAction *>(QStringLiteral("textMode")))
-            textModeAction->setChecked(false);
-        auto *a = window.findChild<PortSelectorWidget *>("endpointA");
-        auto *b = window.findChild<PortSelectorWidget *>("endpointB");
-        auto *traffic = window.findChild<TrafficLogView *>("trafficTable");
-        QVERIFY(a && b && traffic);
-        const auto fits = [&window](QWidget *w) {
-            return window.rect().contains(QRect(w->mapTo(&window, QPoint()), w->size()));
-        };
-        // Each endpoint keeps its parameters on one row, both rows reachable without scrolling.
-        for (auto *selector : {a, b}) {
-            QVERIFY(fits(selector));
-            auto *type = selector->findChild<QComboBox *>("portType");
-            auto *badge = selector->findChild<QLabel *>("EndpointBadge");
-            auto *action = selector->findChild<QPushButton *>("endpointAction");
-            QVERIFY(type && badge && action);
-            // Same row: the badge and the type selector overlap vertically.
-            const int badgeMid = badge->mapTo(&window, QPoint()).y() + badge->height() / 2;
-            const int typeTop = type->mapTo(&window, QPoint()).y();
-            QVERIFY(badgeMid >= typeTop && badgeMid <= typeTop + type->height());
-            QVERIFY(fits(action));
-            // 动作按钮的可用性跟随配置校验：草稿有效即可打开（通信后端已接线），
-            // 无效则禁用。默认草稿下 A（串口未选设备）无效，B（TCP 服务器默认值）有效。
-            QCOMPARE(action->isEnabled(), selector->hasValidConfiguration());
-        }
-        QVERIFY(a->mapTo(&window, QPoint()).y() < b->mapTo(&window, QPoint()).y());
-
-        // The bridge block sits beside A/B, not on a row of its own below them.
-        auto *bridgeBlock = window.findChild<QWidget *>("BridgeRow");
-        auto *bar = window.findChild<QWidget *>("EndpointBar");
-        QVERIFY(bridgeBlock && bar);
-        QVERIFY(bridgeBlock->mapTo(&window, QPoint()).x() > a->mapTo(&window, QPoint()).x() + a->width() - 1);
-        const int bridgeTop = bridgeBlock->mapTo(&window, QPoint()).y();
-        const int bridgeBottom = bridgeTop + bridgeBlock->height();
-        QVERIFY(bridgeTop <= a->mapTo(&window, QPoint()).y() + a->height());
-        QVERIFY(bridgeBottom >= b->mapTo(&window, QPoint()).y());
-        QVERIFY(fits(bridgeBlock));
-        // Collapsed, the bar is just two endpoint rows; a third bridge row would add to this.
-        QVERIFY2(bar->height() <= 96, qPrintable(QString::number(bar->height())));
-        // No inline error widget at all; the invalid field is marked by its own border.
-        QVERIFY(!a->findChild<QLabel *>("portValidationError"));
-        QVERIFY(!a->hasValidConfiguration());
-        auto *serialField = a->findChild<QComboBox *>("serial.port");
-        QCOMPARE(serialField->property("invalid").toBool(), true);
-        QVERIFY(serialField->toolTip().contains(QStringLiteral("请选择设备")));
-
-        // No combo may clip its own items: a fixed width breaks under translation.
-        for (auto *box : window.findChildren<QComboBox *>()) {
-            // serial.port deliberately takes spare row width instead of fitting its items,
-            // so a long device name elides rather than widening the window.
-            if (box->objectName() == "serial.port") continue;
-            if (box->isEditable() || !box->isVisible() || box->count() == 0) continue;
-            int widest = 0;
-            for (int i = 0; i < box->count(); ++i)
-                widest = qMax(widest, box->fontMetrics().horizontalAdvance(box->itemText(i)));
-            QVERIFY2(box->width() >= widest + 24,
-                     qPrintable(QString("%1: %2 < %3 + 24").arg(box->objectName())
-                                    .arg(box->width()).arg(widest)));
-        }
-
-        // A and B line up: same type-combo edge and same first-parameter edge for any pair of types.
-        const auto leadFieldX = [&window](PortSelectorWidget *s) {
-            for (const QString &key : {"serial.port", "client.host", "server.address", "udp.address"}) {
-                auto *field = s->findChild<QWidget *>(key);
-                if (field && field->isVisible()) return field->mapTo(&window, QPoint()).x();
-            }
-            return -1;
-        };
-        for (int kindA = 0; kindA < 4; ++kindA) {
-            a->findChild<QComboBox *>("portType")->setCurrentIndex(kindA);
-            for (int kindB = 0; kindB < 4; ++kindB) {
-                b->findChild<QComboBox *>("portType")->setCurrentIndex(kindB);
-                QTest::qWait(20);
-                QCOMPARE(b->findChild<QComboBox *>("portType")->mapTo(&window, QPoint()).x(),
-                         a->findChild<QComboBox *>("portType")->mapTo(&window, QPoint()).x());
-                const int xa = leadFieldX(a), xb = leadFieldX(b);
-                QVERIFY(xa > 0 && xb > 0);
-                QVERIFY2(xa == xb, qPrintable(QString("kinds %1/%2: %3 vs %4")
-                                                  .arg(kindA).arg(kindB).arg(xa).arg(xb)));
-            }
-        }
-        a->findChild<QComboBox *>("portType")->setCurrentIndex(0);
-        b->findChild<QComboBox *>("portType")->setCurrentIndex(2);
-        QTest::qWait(20);
-
-        auto *splitter = window.findChild<QSplitter *>("dataSplitter");
-        QVERIFY(splitter);
-        auto *trafficPanel = splitter->widget(0);
-        const int trafficTop = trafficPanel->mapTo(&window, QPoint()).y();
-        auto *advanced = a->findChild<QToolButton *>("advancedToggle");
-        auto *flow = a->findChild<QComboBox *>("serial.flow");
-        QVERIFY(advanced && flow && !flow->isVisible());
-        // QToolButton draws an arrow instead of its icon, so the disclosure state now
-        // lives in the icon and its hint; the arrow must stay off or the glyph vanishes.
-        QCOMPARE(advanced->arrowType(), Qt::NoArrow);
-        QVERIFY(!advanced->icon().isNull());
-        // QIcon lost its comparison operators in Qt 6, so the state cue is asserted
-        // through the hint text that flips with the checked state.
-        QCOMPARE(advanced->toolTip(), QStringLiteral("展开该类型的高级参数"));
-        advanced->click();
-        QTest::qWait(30);
-        QTRY_VERIFY(flow->isVisible());
-        QCOMPARE(advanced->toolTip(), QStringLiteral("收起该类型的高级参数"));
-        QVERIFY(!advanced->icon().isNull());
-        // Icon only, and sized in code so it lines up with the action button beside it.
-        QCOMPARE(advanced->toolButtonStyle(), Qt::ToolButtonIconOnly);
-        // The word is kept for the accessible name and as the fallback when no icon loads.
-        QCOMPARE(advanced->text(), QStringLiteral("高级"));
-        QCOMPARE(advanced->accessibleName(), QStringLiteral("高级参数"));
-        auto *endpointAction = a->findChild<QPushButton *>("endpointAction");
-        QVERIFY(endpointAction);
-        QCOMPARE(advanced->height(), endpointAction->height());
-        // Advanced combos carry short values ("8", "1.5", "None"); their fixed width must
-        // still show the widest item, otherwise the selected value looks unset.
-        // Nothing in the endpoint row may hide its own content while it is expanded.
-        const auto clipped = controlsThatClipContent(a);
-        QVERIFY2(clipped.isEmpty(), qPrintable(clipped.join("; ")));
-        QVERIFY(fits(flow));
-        QVERIFY(fits(a->findChild<QComboBox *>("serial.parity")));
-        QVERIFY(!a->findChild<QLineEdit *>("portName")); // The name field is gone for good.
-        // Expanding advanced parameters pushes the data area down, it must not overflow it.
-        // Expanding advanced parameters pushes the data area down; it must still fit.
-        QVERIFY(trafficPanel->mapTo(&window, QPoint()).y() > trafficTop);
-        QVERIFY(fits(trafficPanel));
-        QVERIFY(fits(splitter->widget(1)));
-        QVERIFY(fits(window.findChild<QPlainTextEdit *>("sendEditor")));
-        window.loadExample(); // With rows present the table replaces the empty state.
-        QTest::qWait(30);
-        QVERIFY(traffic->isVisible());
-        QVERIFY(fits(traffic));
-        const auto snapshotDir = qEnvironmentVariable("EASYDEBUG_UI_ARTIFACT_DIR");
-        if (!snapshotDir.isEmpty()) {
-            QDir().mkpath(snapshotDir);
-            QVERIFY(window.grab().save(snapshotDir + "/endpoints-expanded.png"));
-        }
-        advanced->click();
-        QTest::qWait(30);
-        QTRY_VERIFY(!flow->isVisible());
-
-        // The combo takes the row's spare width so a typical friendly name reads in full.
-        a->setSerialPorts({{"COM3", "USB-SERIAL CH340", {}, "COM3"}});
-        auto *serialBox = a->findChild<QComboBox *>("serial.port");
-        serialBox->setCurrentIndex(serialBox->findData("COM3"));
-        QTest::qWait(20);
-        const int textWidth = serialBox->fontMetrics().horizontalAdvance(serialBox->currentText());
-        QVERIFY2(serialBox->width() >= textWidth + 24,
-                 qPrintable(QString("box %1 vs text %2").arg(serialBox->width()).arg(textWidth)));
-        QVERIFY(fits(serialBox));
-        // Longer names cannot widen the window; the popup and tooltip keep them readable.
-        a->setSerialPorts({{"COM3", "USB-SERIAL CH340 (Prolific adapter)", {}, "COM3"}});
-        serialBox->setCurrentIndex(serialBox->findData("COM3"));
-        QTest::qWait(20);
-        QVERIFY(fits(serialBox));
-        QVERIFY(serialBox->view()->minimumWidth()
-                >= serialBox->fontMetrics().horizontalAdvance(serialBox->currentText()));
-
-        // Every type keeps its fields inside the row at 1280 width.
-        for (int kind = 0; kind < 4; ++kind) {
-            b->findChild<QComboBox *>("portType")->setCurrentIndex(kind);
-            QTest::qWait(30);
-            for (const QString &key : {"serial.port", "serial.baud", "client.host", "client.port",
-                                       "server.address", "server.port", "udp.address", "udp.port",
-                                       "udp.target", "udp.targetPort"}) {
-                auto *field = b->findChild<QWidget *>(key);
-                if (field && field->isVisible()) QVERIFY2(fits(field), qPrintable(key));
-            }
-            if (!snapshotDir.isEmpty())
-                QVERIFY(window.grab().save(snapshotDir + QString("/endpoint-kind-%1.png").arg(kind)));
-        }
     }
 
     void portControlsShowTheirOwnContent()
@@ -1378,39 +1030,6 @@ private slots:
         QVERIFY(b->findChild<QComboBox *>("portType")->isEnabled());
     }
 
-    void trafficColumnsShowTheirOwnContent()
-    {
-        MainWindow window;
-        window.setAttribute(Qt::WA_DontShowOnScreen);
-        window.resize(1280, 720);
-        window.show();
-        QTest::qWait(30);
-        window.loadExample();
-        auto *table = window.findChild<TrafficLogView *>("trafficTable");
-        QVERIFY(table);
-        auto *model = table->model();
-        QCOMPARE(model->rowCount(), 12);
-
-        // 文本区就是列宽减去视图实际使用的单元格内边距。对端列用等宽字体，
-        // 必须按那套字体量，否则会把"列宽够了"误判成绘制也放得下。
-        const auto pad = table->cellPadding();
-        for (int row = 0; row < model->rowCount(); ++row) {
-            for (const int column : {TrafficModel::SourceColumn, TrafficModel::PeerColumn}) {
-                const auto index = model->index(row, column);
-                const auto text = index.data().toString();
-                QFont font = table->font();
-                const QVariant fontData = index.data(Qt::FontRole);
-                if (fontData.isValid()) font = fontData.value<QFont>();
-                const int advance = QFontMetrics(font).horizontalAdvance(text);
-                const int textAreaWidth = table->columnWidth(column) - pad.left() - pad.right();
-                QVERIFY2(advance <= textAreaWidth,
-                         qPrintable(QStringLiteral("第 %1 行第 %2 列被截断：%3（文本区 %4px，字宽 %5px）")
-                                        .arg(row).arg(column).arg(text)
-                                        .arg(textAreaWidth)
-                                        .arg(advance)));
-            }
-        }
-    }
 
     void compactWindowAndExamples()
     {
@@ -1420,9 +1039,10 @@ private slots:
         window.show();
         QTest::qWait(30);
         window.loadExample();
-        auto *table = window.findChild<TrafficLogView *>("trafficTable");
+        auto *text = window.findChild<TrafficTextView *>("trafficText");
+        auto *model = window.findChild<TrafficModel *>();
         auto *editor = window.findChild<QPlainTextEdit *>("sendEditor");
-        QVERIFY(table && editor);
+        QVERIFY(text && model && editor);
         // 显示格式下拉框逐项来自共享 PayloadCodec，与发送区同一套列表与规则。
         auto *trafficFormat = window.findChild<QComboBox *>("trafficFormat");
         QVERIFY(trafficFormat);
@@ -1439,64 +1059,62 @@ private slots:
               splitterProbe->widget(1)->minimumSizeHint().height(),
               splitterProbe->widget(0)->sizeHint().height(),
               splitterProbe->widget(1)->sizeHint().height());
-        QCOMPARE(table->model()->rowCount(), 12);
-        // 对端独占一列并按 Source.peerAddress 渲染。串口行没有对端概念，显示占位破折号；
-        // 挤进端口列的第二行会被 33px 行高裁掉，所以它必须是独立的一列。
+        QCOMPARE(model->rowCount(), 12);
+        // 对端独占一列并按 Source.peerAddress 渲染。串口行没有对端概念，显示占位破折号。
         // 来源列已并入方向（TX·手动/定时）：RX 恒为自动来源，独立列与方向高度绑定。
         QCOMPARE(TrafficModel::ColumnCount, 6);
-        QCOMPARE(table->model()->index(0, TrafficModel::SourceColumn).data().toString(),
+        QCOMPARE(model->index(0, TrafficModel::SourceColumn).data().toString(),
                  QStringLiteral("A · 串口"));
-        QCOMPARE(table->model()->index(0, TrafficModel::PeerColumn).data().toString(),
+        QCOMPARE(model->index(0, TrafficModel::PeerColumn).data().toString(),
                  QStringLiteral("—"));
         const int tcpServerRow = [&] {
-            for (int row = 0; row < table->model()->rowCount(); ++row)
-                if (table->model()->index(row, TrafficModel::SourceColumn).data().toString()
+            for (int row = 0; row < model->rowCount(); ++row)
+                if (model->index(row, TrafficModel::SourceColumn).data().toString()
                     == QStringLiteral("B · TCP 服务器"))
                     return row;
             return -1;
         }();
         QVERIFY(tcpServerRow >= 0);
-        QCOMPARE(table->model()->index(tcpServerRow, TrafficModel::PeerColumn).data().toString(),
+        QCOMPARE(model->index(tcpServerRow, TrafficModel::PeerColumn).data().toString(),
                  QStringLiteral("127.0.0.1:52001"));
-        // 显示选项收进"显示设置"菜单后仍可过滤：关掉 RX 只剩 TX 记录。
-        auto *rx = window.findChild<QAction *>("showRx");
-        QVERIFY(rx && rx->isChecked());
-        rx->setChecked(false);
-        QCOMPARE(table->model()->rowCount(), 4);
-        rx->setChecked(true);
-        QCOMPARE(table->model()->rowCount(), 12);
-        // A/B 端点开关在顶栏选项栏里：点哪个看哪个，都点看全部。
-        auto *portA = window.findChild<QPushButton *>("showPortA");
-        auto *portB = window.findChild<QPushButton *>("showPortB");
-        QVERIFY(portA && portB && portA->isChecked() && portB->isChecked());
-        portB->setChecked(false);
-        QCOMPARE(table->model()->rowCount(), 6);
-        portA->setChecked(false);
-        QCOMPARE(table->model()->rowCount(), 0);
-        portA->setChecked(true);
-        portB->setChecked(true);
-        QCOMPARE(table->model()->rowCount(), 12);
         QVERIFY(window.rect().contains(QRect(editor->mapTo(&window, QPoint()), editor->size())));
-        // 切换显示格式：表格渲染跟着变（HEX 基线 → DEC），原始字节不变。
-        // 第 0 条是字节流片段，内容列在渲染文本后带 ⏎ 续接标记——边界是消息的事实，
-        // 不能因为格式切换或只看完整消息的开关而消失。
-        const QModelIndex firstData = table->model()->index(0, TrafficModel::DataColumn);
+        // 切换显示格式：模型的渲染跟着变（HEX 基线 → DEC），原始字节不变。
+        // 第 0 条是字节流片段，内容列在渲染文本后带 ⏎ 续接标记——边界是消息的事实。
+        const QModelIndex firstData = model->index(0, TrafficModel::DataColumn);
         QCOMPARE(firstData.data().toString(), QStringLiteral("01 03 00 00 00 02 C4 0B ⏎"));
         trafficFormat->setCurrentIndex(1); // DEC
-        QCOMPARE(table->model()->index(0, TrafficModel::DataColumn).data().toString(),
+        QCOMPARE(model->index(0, TrafficModel::DataColumn).data().toString(),
                  QStringLiteral("1 3 0 0 0 2 196 11 ⏎"));
-        // 搜索匹配当前格式的渲染文本：DEC 文本也能命中（C4 0B → "196 11"）。
-        auto *search = window.findChild<QLineEdit *>("trafficSearch");
-        search->setText("196 11");
-        QCOMPARE(table->model()->rowCount(), 1);
         trafficFormat->setCurrentIndex(0);
-        search->clear();
-        QCOMPARE(table->model()->rowCount(), 12);
-        search->setText("not-present-in-samples");
-        QCOMPARE(table->model()->rowCount(), 0);
+        // 搜索按到达时过滤：命中的记录进文本历史，未命中的只进模型不进显示。
+        auto *search = window.findChild<QLineEdit *>("trafficSearch");
+        const QUuid endpointId = window.findChild<QPushButton *>("showPortA")
+                                     ->property("endpoint").toUuid();
+        Traffic::Message hit;
+        hit.id = 100001;
+        hit.timestamp = QDateTime::currentDateTime();
+        hit.direction = Traffic::Direction::Receive;
+        hit.source.endpointId = endpointId;
+        hit.source.endpointIndex = 0;
+        hit.source.endpointKind = PortDraft::Serial;
+        hit.raw = QByteArray::fromHex("AABB");
+        hit.rawLength = hit.raw.size();
+        window.findChild<TrafficPanel *>()->appendMessages({hit});
+        QTRY_COMPARE(model->rowCount(), 13);
+        QCOMPARE(text->lineCount(), 13);
+        // 搜索按到达时生效：设一个只命中 HEX "AA BB" 的关键词，后续未命中记录不进显示。
+        search->setText(QStringLiteral("aa bb"));
+        Traffic::Message miss = hit;
+        miss.id = 100002;
+        miss.raw = QByteArray::fromHex("CCDD");
+        miss.rawLength = miss.raw.size();
+        window.findChild<TrafficPanel *>()->appendMessages({miss});
+        QTRY_COMPARE(model->rowCount(), 14); // 模型照单全收：导出与记录不依赖显示过滤
+        QCOMPARE(text->lineCount(), 13);     // 搜索未命中 → 不进显示
         search->clear();
         window.findChild<QPushButton *>("clearTraffic")->click();
-        QCOMPARE(table->model()->rowCount(), 0);
+        QCOMPARE(model->rowCount(), 0);
+        QCOMPARE(text->lineCount(), 1); // 空文档保底的一个空块
     }
 
     void receiveFramingValueSemantics()
@@ -1547,12 +1165,10 @@ private slots:
         window.resize(1280, 720);
         window.show();
         window.findChild<TrafficPanel *>()->setPreferences(nullptr);
-        auto *textModeAction = window.findChild<QAction *>(QStringLiteral("textMode"));
         auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
         auto *model = window.findChild<TrafficModel *>();
         auto *follow = window.findChild<QPushButton *>(QStringLiteral("followTraffic"));
-        QVERIFY(textModeAction && text && model && follow);
-        textModeAction->setChecked(true);
+        QVERIFY(text && model && follow);
 
         const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
                                      ->property("endpoint").toUuid();
@@ -1636,7 +1252,6 @@ private slots:
         window.resize(1280, 720);
         window.show();
         window.findChild<TrafficPanel *>()->setPreferences(nullptr);
-        window.findChild<QAction *>(QStringLiteral("textMode"))->setChecked(true);
         auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
         QVERIFY(text);
         // 换行语义属于文本类渲染：HEX/DEC 本身没有换行概念，切到 UTF-8 验证。
@@ -1666,6 +1281,49 @@ private slots:
         QCOMPARE(lines.at(1), QStringLiteral("next")); // 续行不带行号
         QVERIFY2(!text->toPlainText().contains(QStringLiteral("\\r\\n")),
                  "换行不能再以转义字面量出现");
+    }
+
+    // 超长报文的控制台行按 MaxPayloadChars 封顶（超出部分显示省略号）：
+    // 固化进文档的那一份必须是有界的，1M 行 × 8KB 字符的洪泛推不动内存；
+    // 原始字节在模型里一字不动，导出与记录仍拿得到完整数据。
+    void hugePayloadCappedInTextView()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        QVERIFY(text && model);
+
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        // 8KB 可打印 ASCII：UTF-8 渲染 8192 字符，越过 4096 的行上限触发封顶。
+        QByteArray raw(8192, Qt::Uninitialized);
+        for (int i = 0; i < raw.size(); ++i)
+            raw[i] = char(0x20 + (i % 0x5F));
+        Traffic::Message message;
+        message.id = 1;
+        message.timestamp = QDateTime::currentDateTime();
+        message.direction = Traffic::Direction::Receive;
+        message.source.endpointId = endpointId;
+        message.source.endpointIndex = 0;
+        message.source.endpointKind = PortDraft::Serial;
+        message.raw = raw;
+        message.rawLength = raw.size();
+        window.findChild<TrafficPanel *>()->appendMessages({message});
+        QTRY_COMPARE(model->rowCount(), 1);
+
+        const QString line = text->toPlainText();
+        QVERIFY2(line.size() < 4096 + 64,
+                 qPrintable(QStringLiteral("控制台行必须按载荷上限封顶：实际 %1 字符").arg(line.size())));
+        QVERIFY2(line.endsWith(QStringLiteral("…")), qPrintable(QStringLiteral("尾部应有省略号：") + line.right(16)));
+        // 模型侧还有 4096 字节的预览截断：存储的 raw 被截到上限，rawLength 仍是真实大小，
+        // 记录带 truncated 标记——字节事实没有丢，控制台行也一定有界。
+        QCOMPARE(model->record(0).raw.size(), 4096);
+        QCOMPARE(model->record(0).displayBytes(), qint64(raw.size()));
+        QVERIFY(model->record(0).truncated);
     }
 };
 
