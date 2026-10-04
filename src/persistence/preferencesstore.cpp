@@ -32,6 +32,13 @@ void PreferencesStore::setValue(const QString &key, const QVariant &value)
     m_settings->setValue(key, value);
 }
 
+void PreferencesStore::remove(const QString &key)
+{
+    // 真正的删键。写 QVariant() 只会留下 "@Invalid()"，读回时拿到的不是"键不存在"
+    // 而是"值无效"——调用方再 toBool() 就得到 false，等于把默认开启的开关悄悄关掉。
+    m_settings->remove(key);
+}
+
 QStringList PreferencesStore::addressHistory(bool localAddress) const
 {
     QStringList result;

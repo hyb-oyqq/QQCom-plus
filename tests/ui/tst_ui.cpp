@@ -20,6 +20,7 @@
 #include <QInputMethodEvent>
 #include <QLineEdit>
 #include <QLabel>
+#include <QMenu>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
@@ -253,24 +254,129 @@ private slots:
         // 端点为独立开关：勾选集合内的才显示，一个都不勾则不显示。
         TrafficFilter::Options options;
         options.endpoints = {a, b};
-        options.search = QStringLiteral("7F FF");
+        options.keywords = {QStringLiteral("7F FF")};
         QCOMPARE(accepted(options), 1);
         // 原始字节是事实依据，任何过滤与格式设置都改不了模型里的记录。
         QCOMPARE(model.record(0).raw, QByteArray::fromHex("007fff"));
-        options.search.clear();
+        options.keywords.clear();
         options.endpoints = {a};
         options.tx = false;
         QCOMPARE(accepted(options), 1);
         options.endpoints = {b};
         options.rx = false;
         options.tx = true;
-        options.search = QStringLiteral("HELLO");
+        options.keywords = {QStringLiteral("HELLO")};
         QCOMPARE(accepted(options), 1);
-        options.search.clear();
+        options.keywords.clear();
         options.tx = false;
         QCOMPARE(accepted(options), 0);
         options.endpoints.clear();
         QCOMPARE(accepted(options), 0);
+    }
+
+    // 内容条件的分组语义：关键词组内 OR、排除词压过关键词、大小写开关、
+    // 非法正则**不参与判定**（退化为不过滤，绝不静默吞掉整屏数据）。
+    void contentConditionsCombineAsGroups()
+    {
+        PortDraft port;
+        port.kind = PortDraft::Serial;
+        const auto source = Traffic::makeSource(port, 0);
+        const auto make = [&source](const QByteArray &raw) {
+            return Traffic::makeSampleMessage(1, QDateTime(), source, Traffic::Direction::Receive, raw);
+        };
+        const auto heartbeat = make(QByteArray("heartbeat ok"));
+        const auto temperature = make(QStringLiteral("温度 25.0").toUtf8());
+        const auto upper = make(QByteArray("HEARTBEAT"));
+
+        const auto hits = [&](const TrafficFilter::Options &options) {
+            int count = 0;
+            for (const auto &record : {heartbeat, temperature, upper})
+                if (TrafficFilter::accepts(record, options, PayloadCodec::Format::Utf8)) ++count;
+            return count;
+        };
+
+        TrafficFilter::Options options;
+        options.endpoints = {source.endpointId};
+        // 组内 OR：两个词命中任一即显示，大小写默认不敏感。
+        options.keywords = {QStringLiteral("heartbeat"), QStringLiteral("温度")};
+        QCOMPARE(hits(options), 3);
+        // 排除词优先于关键词：命中即隐藏，压过已满足的关键词。
+        options.excludes = {QStringLiteral("温度")};
+        QCOMPARE(hits(options), 2);
+        options.excludes.clear();
+        options.caseSensitive = true;
+        QCOMPARE(hits(options), 2); // 区分大小写后 HEARTBEAT 不再命中
+
+        options.caseSensitive = false;
+        options.regex = true;
+        options.keywords = {QStringLiteral("heart.*")};
+        QCOMPARE(hits(options), 2); // 合法正则按正则解释
+        // 非法正则这条条件被丢掉，等价于"没写关键词"——不是"什么都不显示"。
+        options.keywords = {QStringLiteral("heart[")};
+        QCOMPARE(hits(options), 3);
+    }
+
+    // 形态铁律：过滤条恒为一行（不因条件增多或窗口变窄而换行）、按钮全带字形、
+    // chip 与输入框是同一份数据的两种视图、折叠只隐藏第二行而不清条件。
+    void filterBarKeepsToASingleRow()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *bar = window.findChild<QWidget *>(QStringLiteral("filterBar"));
+        auto *toggle = window.findChild<QPushButton *>(QStringLiteral("filterToggle"));
+        QVERIFY(bar && toggle);
+        // 默认展开，且条子高度就是一行控件——"两行头"的全部意义都在这里。
+        QVERIFY(toggle->isChecked());
+        QVERIFY(bar->isVisibleTo(&window));
+        const int rowHeight = window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->height();
+        QVERIFY2(bar->height() <= rowHeight + 12,
+            qPrintable(QStringLiteral("过滤条高 %1 超过一行 %2").arg(bar->height()).arg(rowHeight)));
+
+        // 每个按钮都必须带 Material 字形：只有文字说明的按钮在窄宽度下会先被牺牲。
+        const QStringList named{QStringLiteral("filterRx"), QStringLiteral("filterTx"),
+            QStringLiteral("filterState"), QStringLiteral("filterWarning"), QStringLiteral("filterError"),
+            QStringLiteral("filterMore"), QStringLiteral("filterReset")};
+        for (const auto &name : named) {
+            auto *button = bar->findChild<QPushButton *>(name);
+            QVERIFY2(button, qPrintable(QStringLiteral("缺按钮：") + name));
+            QVERIFY2(!button->icon().isNull(), qPrintable(QStringLiteral("缺字形：") + name));
+        }
+
+        // chip 只是关键词的可视化：点它等于从输入框文本里删掉那个词，不引入第二份状态。
+        auto *keywords = bar->findChild<QLineEdit *>(QStringLiteral("filterKeywords"));
+        QVERIFY(keywords);
+        keywords->setText(QStringLiteral("心跳 0D0A error"));
+        const auto chips = bar->findChildren<QPushButton *>(QStringLiteral("filterChip"));
+        QCOMPARE(chips.size(), 3);
+        QVERIFY(chips.first()->text().startsWith(QStringLiteral("心跳")));
+        chips.first()->click();
+        QCOMPARE(keywords->text(), QStringLiteral("0D0A error"));
+        QCOMPARE(bar->findChildren<QPushButton *>(QStringLiteral("filterChip")).size(), 2);
+
+        // 更多条件浮层：勾选型条目只切换勾选、不关闭菜单——与"显示设置"共用同一套交互。
+        auto *more = bar->findChild<QPushButton *>(QStringLiteral("filterMore"));
+        auto *regexAction = window.findChild<QAction *>(QStringLiteral("filterRegex"));
+        QVERIFY(more && regexAction && more->menu());
+        more->menu()->popup(QPoint(0, 0));
+        QVERIFY(QTest::qWaitForWindowExposed(more->menu(), 2000));
+        more->menu()->setActiveAction(regexAction);
+        QTest::keyClick(more->menu(), Qt::Key_Space);
+        QVERIFY(regexAction->isChecked());
+        QVERIFY2(more->menu()->isVisible(), "勾选后浮层不应关闭");
+        QVERIFY(more->text().contains(QStringLiteral("1"))); // 浮层里的条件数写在按钮上
+        more->menu()->close();
+        regexAction->setChecked(false);
+
+        // 折叠只隐藏第二行：条件、判定器与记忆状态一律不动。
+        toggle->setChecked(false);
+        QVERIFY(!bar->isVisibleTo(&window));
+        QVERIFY2(toggle->text().contains(QStringLiteral("▸")), qPrintable(toggle->text()));
+        QCOMPARE(keywords->text(), QStringLiteral("0D0A error"));
+        toggle->setChecked(true);
+        QVERIFY(bar->isVisibleTo(&window));
     }
 
     void messagesCarryStructuredFacts()
@@ -346,31 +452,49 @@ private slots:
         QCOMPARE(accepted(options), 3);
 
         // 对端地址是来源的结构化字段，能被关键词直接命中，不必先渲染成显示文本。
-        options.search = QStringLiteral("52344");
+        options.keywords = {QStringLiteral("52344")};
         QCOMPARE(accepted(options), 2);
-        options.search.clear();
+        options.keywords.clear();
 
-        // 错误/警告日志有独立开关：关闭后 Warning/Error 事件不进显示，数据不受影响。
+        // 错误/警告日志各自有独立开关：关闭后 Warning/Error 事件不进显示，数据不受影响。
         const auto warning = Traffic::makeSampleMessage(
             4, QDateTime(), b, Traffic::Direction::Warning, {});
         const auto error = Traffic::makeSampleMessage(
             5, QDateTime(), b, Traffic::Direction::Error, {});
         model.replaceRecords({stream, datagram, message, warning, error});
         QCOMPARE(accepted(options), 5);
-        options.events = false;
+        options.warnings = false;
+        options.errors = false;
         QCOMPARE(accepted(options), 3);
-        options.events = true;
+        options.warnings = true;
+        options.errors = true;
     }
 
     // 端点草稿现在随配置即时持久化（endpoint/A、endpoint/B）：共享 ini 里
     // 前序用例留下的端点状态会污染"默认端点"假设，依赖该假设的用例先清场。
+    // 用 remove 而不是写 QVariant()：后者留下 @Invalid()，不是"没有这个键"。
     void clearEndpointDrafts()
     {
         const QString ini = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
             + QStringLiteral("/preferences.ini");
         PreferencesStore sweep(nullptr, ini);
-        sweep.setValue(QStringLiteral("endpoint/A"), QVariant());
-        sweep.setValue(QStringLiteral("endpoint/B"), QVariant());
+        sweep.remove(QStringLiteral("endpoint/A"));
+        sweep.remove(QStringLiteral("endpoint/B"));
+    }
+
+    // 每个用例跑完清掉共享 ini 里的过滤条件。过滤条会把条件写进共享配置，
+    // 前一个用例留下的关键词会让后面的用例"一条都收不到"——与端点草稿同一类串扰，
+    // 只是后果更隐蔽：屏幕全空看起来像面板坏了，而不是配置被污染了。
+    // 放在 cleanup() 而不是各用例开头，是为了让用例中途断言失败也照样清场。
+    void cleanup()
+    {
+        const QString ini = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+            + QStringLiteral("/preferences.ini");
+        PreferencesStore sweep(nullptr, ini);
+        for (const auto *key : {"filter/keywords", "filter/excludes", "filter/regex",
+                 "filter/caseSensitive", "filter/rx", "filter/tx", "filter/states",
+                 "filter/warnings", "filter/errors", "filter/expanded"})
+            sweep.remove(QString::fromLatin1(key));
     }
 
     void portDraftsRemainIndependent()
@@ -725,7 +849,7 @@ private slots:
         SendPanel firstSender;
         firstSender.setPreferences(&firstStore);
         auto *wrap = firstTraffic.findChild<QAction *>(QStringLiteral("wrapTraffic"));
-        auto *rx = firstTraffic.findChild<QAction *>(QStringLiteral("showRx"));
+        auto *rx = firstTraffic.findChild<QPushButton *>(QStringLiteral("filterRx"));
         auto *format = firstTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
         auto *sendFormat = firstSender.findChild<QComboBox *>(QStringLiteral("sendFormat"));
         QVERIFY(wrap && rx && format && sendFormat);
@@ -740,7 +864,7 @@ private slots:
         SendPanel secondSender;
         secondSender.setPreferences(&secondStore);
         QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("wrapTraffic"))->isChecked(), true);
-        QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("showRx"))->isChecked(), false);
+        QCOMPARE(secondTraffic.findChild<QPushButton *>(QStringLiteral("filterRx"))->isChecked(), false);
         QCOMPARE(secondTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->currentText(),
                  QStringLiteral("UTF-8"));
         QCOMPARE(secondSender.findChild<QComboBox *>(QStringLiteral("sendFormat"))->currentText(),
@@ -1190,7 +1314,7 @@ private slots:
                  qPrintable(QStringLiteral("DEC 渲染行不符：") + decLine));
         trafficFormat->setCurrentIndex(0); // 恢复 HEX，后续消息按 HEX 渲染与搜索
         // 搜索按到达时过滤：命中的记录进文本历史，未命中的只进模型不进显示。
-        auto *search = window.findChild<QLineEdit *>("trafficSearch");
+        auto *search = window.findChild<QLineEdit *>("filterKeywords");
         Traffic::Message hit;
         hit.id = 100001;
         hit.timestamp = QDateTime::currentDateTime();
@@ -1577,13 +1701,13 @@ private slots:
         // 关闭错误日志：错误事件进模型不进显示，数据行纹丝不动。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
-        window.findChild<QAction *>(QStringLiteral("showErrorLog"))->setChecked(false);
+        window.findChild<QPushButton *>(QStringLiteral("filterError"))->setChecked(false);
         panel->appendMessages({makeMessage(2, Traffic::Direction::Error, "boom")});
         QTRY_COMPARE(model->rowCount(), 2);
         QCOMPARE(text->lineCount(), 1);
         QCOMPARE(text->document()->lastBlock().text(), baseline);
         // 重新开启：后续错误事件恢复显示。
-        window.findChild<QAction *>(QStringLiteral("showErrorLog"))->setChecked(true);
+        window.findChild<QPushButton *>(QStringLiteral("filterError"))->setChecked(true);
         panel->appendMessages({makeMessage(3, Traffic::Direction::Error, "boom2")});
         QTRY_COMPARE(text->lineCount(), 2);
         QVERIFY2(text->document()->lastBlock().text().endsWith(QStringLiteral("boom2")),

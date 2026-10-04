@@ -9,16 +9,19 @@ SOURCES += \
     $$PWD/panels/portselector/portselectorwidget.cpp \
     $$PWD/panels/traffic/trafficpanel.cpp \
     $$PWD/panels/traffic/traffictextview.cpp \
+    $$PWD/panels/traffic/filterbar.cpp \
     $$PWD/panels/sending/sendpanel.cpp \
     $$PWD/panels/routing/routeeditorwidget.cpp \
     $$PWD/common/endpointformat.cpp
 
 HEADERS += \
     $$PWD/common/tintedicon.h \
+    $$PWD/common/stayopenmenu.h \
     $$PWD/common/endpointformat.h \
     $$PWD/common/combometrics.h \
     $$PWD/panels/portselector/portselectorwidget.h \
     $$PWD/panels/traffic/trafficpanel.h \
     $$PWD/panels/traffic/traffictextview.h \
+    $$PWD/panels/traffic/filterbar.h \
     $$PWD/panels/sending/sendpanel.h \
     $$PWD/panels/routing/routeeditorwidget.h

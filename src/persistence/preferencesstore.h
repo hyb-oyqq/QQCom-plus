@@ -20,6 +20,9 @@ public:
     // 方法；这里只承载"记住用户上次的界面选择"这类无结构偏好的存取。
     QVariant value(const QString &key, const QVariant &fallback = {}) const;
     void setValue(const QString &key, const QVariant &value);
+    // 删除一个键（清场用）。与 setValue(key, QVariant()) 不等价：后者留下 @Invalid()，
+    // 读回来是"无效值"而不是"默认值"，toBool() 会得到 false。
+    void remove(const QString &key);
 
 signals:
     void addressHistoryChanged();

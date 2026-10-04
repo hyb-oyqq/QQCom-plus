@@ -1,7 +1,9 @@
 #include "trafficpanel.h"
+#include "filterbar.h"
 #include "traffictextview.h"
 #include "ui/common/combometrics.h"
 #include "ui/common/endpointformat.h"
+#include "ui/common/stayopenmenu.h"
 #include "ui/common/tintedicon.h"
 #include "persistence/preferencesstore.h"
 
@@ -16,6 +18,7 @@
 #include <QPushButton>
 #include <QSaveFile>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QStackedWidget>
 #include <QTextStream>
 #include <QTimer>
@@ -24,41 +27,8 @@
 
 namespace {
 
-// 顶栏按钮与菜单条目的字形尺寸，与动作按钮一致。
+// 顶栏与过滤条的字形尺寸，与动作按钮一致；两行并排出现，尺寸必须一样。
 constexpr int BarIconSize = 16;
-
-// 显示设置菜单：勾选型条目点击后保持展开，便于连续调整多个开关；
-// 只有点击菜单外、再点按钮或按 Esc 才关闭。非勾选条目保持系统默认行为。
-class StayOpenMenu final : public QMenu
-{
-public:
-    using QMenu::QMenu;
-
-protected:
-    void mouseReleaseEvent(QMouseEvent *event) override
-    {
-        if (auto *action = activeAction(); action && action->isEnabled() && action->isCheckable()
-            && !action->menu()) {
-            action->setChecked(!action->isChecked());
-            update();
-            return;
-        }
-        QMenu::mouseReleaseEvent(event);
-    }
-    void keyPressEvent(QKeyEvent *event) override
-    {
-        // 键盘激活（Return/Space）同样只切换勾选、不关闭。
-        if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Space)
-            && activeAction() && activeAction()->isEnabled() && activeAction()->isCheckable()
-            && !activeAction()->menu()) {
-            activeAction()->setChecked(!activeAction()->isChecked());
-            update();
-            return;
-        }
-        QMenu::keyPressEvent(event);
-    }
-};
-
 
 // 单条消息最多保留的预览字节数。原始长度另存于 rawLength，显示的是"本条实际有多大"，
 // 而不是"我们留下了多少"——两者不等即说明发生了截断。
@@ -156,40 +126,131 @@ void TrafficModel::appendRecords(QList<Traffic::Message> records)
     m_records += records;
 }
 
-bool TrafficFilter::accepts(const Traffic::Message &r, const Options &options, PayloadCodec::Format format)
+TrafficFilter::TextCondition::TextCondition(const QString &expression, bool regex, Qt::CaseSensitivity sensitivity)
+    : m_sensitivity(sensitivity)
+{
+    const auto trimmed = expression.trimmed();
+    if (trimmed.isEmpty()) return;
+    if (!regex) {
+        m_literal = trimmed;
+        return;
+    }
+    // 预编译一次，热路径只 match()。表达式无效则该条件不参与判定（isEmpty 为真，
+    // Matcher 会把它丢掉），由条件条标红提示——退化的方向必须是"不过滤"：
+    // 宁可多显示，也绝不因为写错一个括号把整屏数据静默吞掉。
+    QRegularExpression pattern(trimmed);
+    pattern.setPatternOptions(sensitivity == Qt::CaseSensitive ? QRegularExpression::NoPatternOption
+                                                              : QRegularExpression::CaseInsensitiveOption);
+    if (!pattern.isValid()) return;
+    m_pattern = pattern;
+    m_regex = true;
+}
+
+bool TrafficFilter::TextCondition::isEmpty() const
+{
+    return !m_regex && m_literal.isEmpty();
+}
+
+bool TrafficFilter::TextCondition::matches(const QString &text) const
+{
+    if (m_regex) return m_pattern.match(text).hasMatch();
+    return !m_literal.isEmpty() && text.contains(m_literal, m_sensitivity);
+}
+
+TrafficFilter::Matcher::Matcher(const Options &options, PayloadCodec::Format format)
+    : m_options(options), m_format(format)
+{
+    // 条件的解释只在这里发生一次：词表 → 预编译条件，热路径不再碰字符串表。
+    const auto sensitivity = options.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    for (const auto &keyword : options.keywords) {
+        TextCondition condition(keyword, options.regex, sensitivity);
+        if (!condition.isEmpty()) m_keywords.append(condition);
+    }
+    for (const auto &exclude : options.excludes) {
+        TextCondition condition(exclude, options.regex, sensitivity);
+        if (!condition.isEmpty()) m_excludes.append(condition);
+    }
+}
+
+bool TrafficFilter::Matcher::accepts(const Traffic::Message &r) const
 {
     // 端点与方向是消息自带的事实字段，直接按结构判等，不解析显示文本。
-    if (options.endpoints.isEmpty() || !options.endpoints.contains(r.source.endpointId)) return false;
+    if (m_options.endpoints.isEmpty() || !m_options.endpoints.contains(r.source.endpointId)) return false;
     switch (r.direction) {
     case Traffic::Direction::Receive:
-        if (!options.rx) return false;
+        if (!m_options.rx) return false;
         break;
     case Traffic::Direction::Transmit:
-        if (!options.tx) return false;
+        if (!m_options.tx) return false;
         break;
     case Traffic::Direction::State:
-        // 状态迁移不属于任何一个方向开关，跟随 RX 一起显示。
-        if (!options.rx && !options.tx) return false;
+        if (!m_options.states) return false;
         break;
-    default:
-        // 错误/警告日志有独立开关：排障时才打开，平时不让异常事件刷屏。
-        if (!options.events) return false;
+    case Traffic::Direction::Warning:
+        if (!m_options.warnings) return false;
+        break;
+    case Traffic::Direction::Error:
+        if (!m_options.errors) return false;
         break;
     }
-    if (options.search.isEmpty()) return true;
+    if (m_keywords.isEmpty() && m_excludes.isEmpty()) return true;
 
-    // 搜索匹配当前显示格式的渲染文本、UTF-8 文本与两种 HEX 写法，所见即可搜；
-    // 也匹配来源的对端地址和自由说明文本。逐项短路，命中即返回，
-    // 避免对每行做无谓的渲染与 HEX 展开。
-    const auto needle = options.search;
-    if (r.source.peerAddress.contains(needle, Qt::CaseInsensitive)) return true;
-    if (r.source.endpointName.contains(needle, Qt::CaseInsensitive)) return true;
-    if (r.statusText.contains(needle, Qt::CaseInsensitive)) return true;
-    if (r.detail.contains(needle, Qt::CaseInsensitive)) return true;
-    if (PayloadCodec::render(r.raw, format).contains(needle, Qt::CaseInsensitive)) return true;
-    if (PayloadCodec::render(r.raw, PayloadCodec::Format::Utf8).contains(needle, Qt::CaseInsensitive)) return true;
-    if (QString(r.raw.toHex()).contains(needle, Qt::CaseInsensitive)) return true;
-    return QString::fromLatin1(r.raw.toHex(' ')).contains(needle, Qt::CaseInsensitive);
+    enum Verdict { KeepLooking, Decided, Rejected };
+    bool keywordHit = m_keywords.isEmpty(); // 没写关键词 = 这一维不限
+    bool rejected = false;
+    const auto scan = [this, &keywordHit](const QString &text) {
+        // 排除词优先于关键词：命中任一即否决，不再往下找。
+        for (const auto &exclude : m_excludes)
+            if (exclude.matches(text)) return Rejected;
+        if (!keywordHit) {
+            for (const auto &keyword : m_keywords) {
+                if (keyword.matches(text)) {
+                    keywordHit = true;
+                    break;
+                }
+            }
+        }
+        // 关键词已满足、且没有排除词要继续查：后面更贵的视图（含两条 HEX 串）不必再构造。
+        return keywordHit && m_excludes.isEmpty() ? Decided : KeepLooking;
+    };
+    // 返回 true 表示"已有结论"，调用方立即返回；scan 内部已经短路，
+    // 这里不重算任何一遍匹配。
+    const auto settled = [&scan, &rejected](const QString &text) {
+        switch (scan(text)) {
+        case KeepLooking:
+            return false;
+        case Decided:
+            return true;
+        default:
+            rejected = true;
+            return true;
+        }
+    };
+
+    // 候选文本按"便宜 → 昂贵"排序，逐项短路。结构化字段与渲染文本先上，
+    // 只有它们全都没给结论时才构造 HEX 串——常见关键词（"心跳"、对端地址）
+    // 在到达时就命中，最贵的两条 HEX 根本不构造。
+    if (settled(r.source.peerAddress)) return !rejected;
+    if (settled(r.source.endpointName)) return !rejected;
+    if (settled(r.statusText)) return !rejected;
+    if (settled(r.detail)) return !rejected;
+    const QString rendered = PayloadCodec::render(r.raw, m_format);
+    if (settled(rendered)) return !rejected;
+    if (m_format != PayloadCodec::Format::Utf8
+        && settled(PayloadCodec::render(r.raw, PayloadCodec::Format::Utf8)))
+        return !rejected;
+    // 两种 HEX 写法都算所见即可搜：紧凑写法与带空格写法。
+    if (settled(QString::fromLatin1(r.raw.toHex()))) return !rejected;
+    if (settled(QString::fromLatin1(r.raw.toHex(' ')))) return !rejected;
+    // 全部视图扫完仍没命中关键词：淘汰。
+    return !rejected && keywordHit;
+}
+
+bool TrafficFilter::accepts(const Traffic::Message &r, const Options &options, PayloadCodec::Format format)
+{
+    // 一次性判定：等价于构造一次 Matcher 再判一条。热路径（消息到达）必须自己
+    // 持有 Matcher，否则每条消息都要重新预编译一遍正则。
+    return Matcher(options, format).accepts(r);
 }
 
 TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
@@ -200,8 +261,14 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     layout->setContentsMargins(16, 14, 16, 12);
     layout->setSpacing(12);
 
-    // 单行顶栏：A/B 端点开关、编码切换、过滤关键词、显示设置、导出、
-    // 滚动到底、清空。
+    // 两行头：第一行是原顶栏（A/B、编码、过滤折叠按钮、显示设置、导出、滚动到底、清空），
+    // 第二行是过滤条件条。两行同属一个头块，行距压到 6px——它们是"一次头"，
+    // 不是两块独立面板。数据区高度只被这一条头带走两行控件的高度。
+    auto *head = new QWidget(this);
+    auto *headLayout = new QVBoxLayout(head);
+    headLayout->setContentsMargins(0, 0, 0, 0);
+    headLayout->setSpacing(6);
+
     auto *top = new QHBoxLayout;
     top->setSpacing(6);
 
@@ -228,35 +295,26 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     fitComboToItems(m_format);
     top->addWidget(m_format);
 
-    m_search = new QLineEdit;
-    m_search->setObjectName("trafficSearch");
-    m_search->setPlaceholderText(tr("搜索文本 / HEX / 对端地址"));
-    m_search->setClearButtonEnabled(true);
-    top->addWidget(m_search, 1);
+    // 过滤入口：顶栏只留这一个折叠按钮，位置就是原搜索框的位置——
+    // 关键词输入已并入过滤条第 1 格，同一个"高频快捷位"不重复放两个输入框。
+    m_filterToggle = new QPushButton(tr("过滤"), this);
+    m_filterToggle->setObjectName("filterToggle");
+    m_filterToggle->setCheckable(true);
+    m_filterToggle->setChecked(true);
+    m_filterToggle->setIcon(mutedIcon(QStringLiteral(":/icons/filter-variant.svg"), BarIconSize));
+    m_filterToggle->setToolTip(tr("展开 / 收起过滤条件条（Ctrl+Shift+F）；Ctrl+F 直接聚焦关键词"));
+    connect(m_filterToggle, &QPushButton::toggled, this, &TrafficPanel::setFilterExpanded);
+    top->addWidget(m_filterToggle);
+    // 顶栏剩下的按钮仍留在原来的视觉位置（右端）：中间的空档留给过滤条上的条件。
+    top->addStretch(1);
 
-    // 日志显示设置：方向开关与行内容开关收进菜单，顶栏只留一个入口。
+    // 日志显示设置：行内容开关收进菜单，顶栏只留一个入口。
+    // 方向与事件开关不在这里——它们管的是"哪些行进来"，已迁到过滤条（设计稿 §7.4）。
     auto *settings = new QPushButton(tr("显示设置"));
     settings->setObjectName("displaySettings");
     settings->setIcon(mutedIcon(QStringLiteral(":/icons/cog.svg"), BarIconSize));
-    settings->setToolTip(tr("日志显示选项：RX/TX、行前缀、自动换行"));
+    settings->setToolTip(tr("日志显示选项：行前缀、自动换行、记录"));
     auto *displayMenu = new StayOpenMenu(settings);
-    m_rxAction = displayMenu->addAction(tr("显示 RX"));
-    m_rxAction->setObjectName("showRx");
-    m_rxAction->setCheckable(true);
-    m_rxAction->setChecked(true);
-    connect(m_rxAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
-    m_txAction = displayMenu->addAction(tr("显示 TX"));
-    m_txAction->setObjectName("showTx");
-    m_txAction->setCheckable(true);
-    m_txAction->setChecked(true);
-    connect(m_txAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
-    m_errorAction = displayMenu->addAction(tr("显示错误日志"));
-    m_errorAction->setObjectName("showErrorLog");
-    m_errorAction->setCheckable(true);
-    m_errorAction->setChecked(true);
-    m_errorAction->setToolTip(tr("错误与警告事件（端口错误、写入失败等）的显示开关"));
-    connect(m_errorAction, &QAction::toggled, this, &TrafficPanel::updateFilter);
-    displayMenu->addSeparator();
     // 行内容开关：控制台语义，全部在消息到达时生效，已固化的行不重排。
     const auto rowToggle = [this, &displayMenu](const char *name, const QString &text, bool checked) {
         auto *action = displayMenu->addAction(text);
@@ -314,7 +372,14 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     auto *clear = new QPushButton(tr("清空"));
     clear->setObjectName("clearTraffic");
     top->addWidget(clear);
-    layout->addLayout(top);
+
+    headLayout->addLayout(top);
+
+    // 过滤条：恒为一行，宽度铺满。它是"哪些行进来"的唯一出口，
+    // 判定本身不在这里（TrafficFilter::Matcher 一处实现）。
+    m_filterBar = new FilterBar(head);
+    headLayout->addWidget(m_filterBar);
+    layout->addWidget(head);
 
     m_model = new TrafficModel(this);
     // 攒批入模：16ms 一拍把同批消息合成一次插入通知，事件开销与消息速率解耦。
@@ -335,17 +400,28 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_stack->addWidget(empty);
     layout->addWidget(m_stack, 1);
 
-    // RX/TX 的过滤连接在创建菜单动作时已完成，这里不再重复 connect。
-    connect(m_search, &QLineEdit::textChanged, this, &TrafficPanel::updateFilter);
+    connect(m_filterBar, &FilterBar::changed, this, &TrafficPanel::updateFilter);
     connect(m_format, &QComboBox::currentIndexChanged, this, [this](int) {
-        // 控制台语义：格式切换只影响新到达的行，已固化的文本不重渲染。
-        savePreferences();
+        // 控制台语义：格式切换只影响新到达的行，已固化的文本不重渲染；
+        // 但判定器持有格式快照（渲染文本与 HEX 视图都按它构造），必须一并重建。
+        updateFilter();
     });
+    // Ctrl+F 聚焦关键词（必要时先展开）；Ctrl+Shift+F 展开/收起整条。
+    auto *focusFilter = new QShortcut(QKeySequence::Find, this);
+    connect(focusFilter, &QShortcut::activated, this, [this] {
+        setFilterExpanded(true);
+        m_filterToggle->setChecked(true);
+        m_filterBar->focusKeywords();
+    });
+    auto *toggleFilter = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")), this);
+    connect(toggleFilter, &QShortcut::activated, this,
+        [this] { m_filterToggle->setChecked(!m_filterToggle->isChecked()); });
     connect(clear, &QPushButton::clicked, this, [this] {
         m_pending.clear();
         m_model->replaceRecords({});
         m_text->clearAll();
         m_totalAccepted = 0;
+        m_filteredOut = 0;
         updateSummary();
     });
     connect(exportButton, &QPushButton::clicked, this, &TrafficPanel::exportVisible);
@@ -437,14 +513,19 @@ void TrafficPanel::flushPending()
     m_pending.clear();
     m_model->appendRecords(batch);
     writeLog(batch); // 记录与显示同流：进模型的批次才落日志
-    // 文本视图按到达时的过滤条件逐条判定（TrafficFilter::accepts 的唯一显示出口），
+    // 文本视图按到达时的过滤条件逐条判定（TrafficFilter::Matcher 的唯一显示出口），
     // 行按当前显示格式与开关组合固化后不再重渲染——控制台语义。
+    // 判定器是 updateFilter 里预编译好的：这里只做 match/contains，
+    // 每条消息都不重新解释条件、也不重新编译正则。
     const auto format = currentDisplayFormat();
     QList<Traffic::Message> accepted;
     accepted.reserve(batch.size());
     for (const auto &message : batch)
-        if (TrafficFilter::accepts(message, m_textOptions, format)) accepted.append(message);
+        if (m_matcher.accepts(message)) accepted.append(message);
     m_totalAccepted += accepted.size();
+    // 挡住多少条必须单独计数：屏幕上"什么都没有"和"被条件挡掉了"是两个完全
+    // 不同的事实，只有这个数字能把它们分开。
+    m_filteredOut += static_cast<quint64>(batch.size() - accepted.size());
     m_text->appendMessages(accepted, format, m_displayOptions);
     if (m_follow->isChecked()) m_text->scrollToBottom();
     updateSummary();
@@ -536,9 +617,21 @@ void TrafficPanel::loadPreferences()
     const auto format = m_preferences->value("traffic/format").toString();
     if (m_format->findText(format) >= 0)
         m_format->setCurrentText(format);
-    m_rxAction->setChecked(m_preferences->value("traffic/rx", true).toBool());
-    m_txAction->setChecked(m_preferences->value("traffic/tx", true).toBool());
-    m_errorAction->setChecked(m_preferences->value("traffic/errors", true).toBool());
+    // 过滤条件：filter/* 是现在的键，旧版 traffic/rx|tx|errors 作为兜底——
+    // 上一版把方向开关放在显示设置里，升级后不该让用户的开关状态凭空复位。
+    FilterBarState filter;
+    filter.rx = m_preferences->value("filter/rx", m_preferences->value("traffic/rx", true)).toBool();
+    filter.tx = m_preferences->value("filter/tx", m_preferences->value("traffic/tx", true)).toBool();
+    filter.states = m_preferences->value("filter/states", true).toBool();
+    const auto legacyEvents = m_preferences->value("traffic/errors", true);
+    filter.warnings = m_preferences->value("filter/warnings", legacyEvents).toBool();
+    filter.errors = m_preferences->value("filter/errors", legacyEvents).toBool();
+    filter.caseSensitive = m_preferences->value("filter/caseSensitive", false).toBool();
+    filter.regex = m_preferences->value("filter/regex", false).toBool();
+    filter.keywords = m_preferences->value("filter/keywords").toStringList();
+    filter.excludes = m_preferences->value("filter/excludes").toStringList();
+    m_filterBar->restore(filter);
+
     m_numberAction->setChecked(m_preferences->value("traffic/number", true).toBool());
     m_timestampAction->setChecked(m_preferences->value("traffic/timestamp", true).toBool());
     m_directionAction->setChecked(m_preferences->value("traffic/direction", true).toBool());
@@ -550,12 +643,15 @@ void TrafficPanel::loadPreferences()
     m_portAButton->setChecked(m_preferences->value("traffic/portA", true).toBool());
     m_portBButton->setChecked(m_preferences->value("traffic/portB", true).toBool());
     m_logPath = m_preferences->value("traffic/recordPath").toString();
+    // 折叠状态先落位（此时仍在抑制保存），再统一应用一次。
+    m_filterToggle->setChecked(m_preferences->value("filter/expanded", true).toBool());
     const bool recordOn = m_preferences->value("traffic/record", false).toBool();
     if (recordOn) {
         // 上次开着记录：沿用原文件继续追加；文件不可用则复位勾选（含提示）。
         m_recordAction->setChecked(true);
     }
     m_loading = false;
+    setFilterExpanded(m_filterToggle->isChecked());
     updatePortVisibility();
     updateFilter(); // 恢复完成后统一刷新一次过滤
 }
@@ -563,10 +659,19 @@ void TrafficPanel::loadPreferences()
 void TrafficPanel::savePreferences()
 {
     if (!m_preferences || m_loading) return;
+    // 过滤条件整组落盘：条件条是唯一写入点，这里只做搬运。
+    const auto filter = m_filterBar->state();
+    m_preferences->setValue("filter/expanded", m_filterExpanded);
+    m_preferences->setValue("filter/rx", filter.rx);
+    m_preferences->setValue("filter/tx", filter.tx);
+    m_preferences->setValue("filter/states", filter.states);
+    m_preferences->setValue("filter/warnings", filter.warnings);
+    m_preferences->setValue("filter/errors", filter.errors);
+    m_preferences->setValue("filter/caseSensitive", filter.caseSensitive);
+    m_preferences->setValue("filter/regex", filter.regex);
+    m_preferences->setValue("filter/keywords", filter.keywords);
+    m_preferences->setValue("filter/excludes", filter.excludes);
     m_preferences->setValue("traffic/format", m_format->currentText());
-    m_preferences->setValue("traffic/rx", m_rxAction->isChecked());
-    m_preferences->setValue("traffic/tx", m_txAction->isChecked());
-    m_preferences->setValue("traffic/errors", m_errorAction->isChecked());
     m_preferences->setValue("traffic/number", m_numberAction->isChecked());
     m_preferences->setValue("traffic/timestamp", m_timestampAction->isChecked());
     m_preferences->setValue("traffic/direction", m_directionAction->isChecked());
@@ -598,14 +703,25 @@ void TrafficPanel::updatePortVisibility()
 
 void TrafficPanel::updateFilter()
 {
+    // 条件只有两个来源：顶栏的端点范围，和过滤条。两者都只是"收集条件"，
+    // 判定在 Matcher 一处。端点不重复设条件——A/B 按钮就是端点维度本身（设计稿 §3.1）。
+    const auto filter = m_filterBar->state();
     TrafficFilter::Options options;
     options.endpoints = m_visibleEndpoints;
-    options.rx = m_rxAction->isChecked();
-    options.tx = m_txAction->isChecked();
-    options.events = m_errorAction->isChecked();
-    options.search = m_search->text();
+    options.rx = filter.rx;
+    options.tx = filter.tx;
+    options.states = filter.states;
+    options.warnings = filter.warnings;
+    options.errors = filter.errors;
+    options.keywords = filter.keywords;
+    options.excludes = filter.excludes;
+    options.caseSensitive = filter.caseSensitive;
+    options.regex = filter.regex;
     // 文本视图的到达时过滤用这一份条件的快照；写入点只有这里。
-    m_textOptions = options;
+    m_filterOptions = options;
+    // 条件的可执行形态在这里构造一次：正则预编译、格式快照一并定下。
+    // 消息到达时只做 match/contains，不重新解释条件、也不重新编译正则。
+    m_matcher = TrafficFilter::Matcher(options, currentDisplayFormat());
     // 行内容的开关组合同样在到达时生效：这里重建快照，flushPending 直读。
     m_displayOptions.number = m_numberAction->isChecked();
     m_displayOptions.timestamp = m_timestampAction->isChecked();
@@ -613,17 +729,48 @@ void TrafficPanel::updateFilter()
     m_displayOptions.length = m_lengthAction->isChecked();
     m_displayOptions.hex = m_hexAction->isChecked();
     m_displayOptions.pure = m_pureAction->isChecked();
+    refreshFilterToggle();
     updateSummary();
-    savePreferences(); // 过滤开关的汇聚点：任一开关变化即落盘
+    savePreferences(); // 过滤条件的汇聚点：任一条件变化即落盘
+}
+
+void TrafficPanel::setFilterExpanded(bool expanded)
+{
+    m_filterExpanded = expanded;
+    // 收起只隐藏第二行：条件、判定器、记忆状态一律不动——
+    // "折叠"是显示行为，不是"关闭过滤"。
+    m_filterBar->setVisible(expanded);
+    refreshFilterToggle();
+    savePreferences();
+}
+
+void TrafficPanel::refreshFilterToggle()
+{
+    const int active = m_filterBar->activeConditionCount();
+    const QString caret = m_filterExpanded ? QStringLiteral("▾") : QStringLiteral("▸");
+    // 生效条件数写在按钮上：条子收起时，这个数字是"当前在过滤"的唯一出口。
+    m_filterToggle->setText(active > 0 ? tr("过滤 · %1 %2").arg(active).arg(caret)
+                                      : tr("过滤 %1").arg(caret));
 }
 
 void TrafficPanel::updateSummary()
 {
     // 模型是导出用的结构化存储（有上限），屏幕上的历史在文本视图里（上限高得多），
     // 摘要按"会话累计接收条数"播报，不随任何一方的淘汰缩水。
+    const bool filtering = m_filterBar->activeConditionCount() > 0;
+    if (m_totalAccepted == 0) {
+        // 空屏有两种截然不同的成因：没收到，和被条件挡住了。
+        // 不说清楚，用户会以为端口没通。
+        m_empty->setText(filtering && m_filteredOut > 0
+                ? tr("当前过滤条件下没有匹配记录\n\n已挡住 %1 条，调整或清除上方过滤条即可看到它们。")
+                      .arg(m_filteredOut)
+                : tr("等待接收数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。"));
+    }
     m_stack->setCurrentWidget(m_totalAccepted == 0 ? static_cast<QWidget *>(m_empty)
                                                    : static_cast<QWidget *>(m_text));
-    reportSummary(tr("共 %1 条").arg(m_totalAccepted));
+    reportSummary(m_filteredOut > 0
+            ? tr("共 %1 条 · 过滤掉 %2 条").arg(m_totalAccepted).arg(m_filteredOut)
+            : tr("共 %1 条").arg(m_totalAccepted));
 }
 
 void TrafficPanel::reportSummary(const QString &text)

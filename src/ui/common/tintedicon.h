@@ -53,4 +53,14 @@ inline QIcon mutedIcon(const QString &path, int size)
     return icon;
 }
 
+// 单色字形（自定颜色）：用于需要随状态换色的勾选型按钮。QPushButton 的图标状态位跟的是
+// 按下而不是勾选，所以"灰→琥珀"这类切换必须由调用方按 toggled 显式换图标。
+inline QIcon tintedIcon(const QString &path, const QColor &color, int size)
+{
+    QIcon icon;
+    for (const int scale : {1, 2})
+        icon.addPixmap(tintedPixmap(path, color, size * scale));
+    return icon;
+}
+
 #endif

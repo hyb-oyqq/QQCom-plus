@@ -12,5 +12,14 @@
         <file>icons/cog.svg</file>
         <file>icons/arrow-down.svg</file>
         <file>icons/app-logo.svg</file>
+        <file>icons/filter-variant.svg</file>
+        <file>icons/filter-off.svg</file>
+        <file>icons/arrow-down-bold.svg</file>
+        <file>icons/arrow-up-bold.svg</file>
+        <file>icons/information-outline.svg</file>
+        <file>icons/alert-outline.svg</file>
+        <file>icons/alert-circle-outline.svg</file>
+        <file>icons/magnify.svg</file>
+        <file>icons/minus-circle-outline.svg</file>
     </qresource>
 </RCC>

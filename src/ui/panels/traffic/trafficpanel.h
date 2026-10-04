@@ -7,9 +7,12 @@
 #include "traffictextview.h"
 #include <QDateTime>
 #include <QObject>
+#include <QRegularExpression>
 #include <QSet>
+#include <QStringList>
 #include <QWidget>
 
+class FilterBar;
 class QAction;
 class QComboBox;
 class QFile;
@@ -38,21 +41,66 @@ private:
     qint64 m_rawBytes = 0; // m_records 的原始字节总数，避免每次追加都全量重算
 };
 
-// 过滤判定的唯一实现：文本显示在消息到达时调用它，Options 与格式都由调用方持有。
+// 过滤判定的唯一实现：文本显示在消息到达时调用它，条件由调用方持有。
 // 全部条件都作用在结构化字段上：端点/方向来自消息本身，
-// 关键词则对同一份原始字节做多种视图的匹配，所见即可搜。
+// 内容条件则对同一份原始字节做多种视图的匹配，所见即可搜。
 class TrafficFilter
 {
 public:
+    // 一条内容条件（关键词或排除词）。正则模式下构造时预编译一次，热路径只 match()。
+    // 非法正则**不进判定**（该条件被丢弃，由条件条标红提示）：退化的方向必须是"不过滤"，
+    // 宁可多显示，也绝不因为写错一个括号把整屏数据静默吞掉。
+    class TextCondition
+    {
+    public:
+        TextCondition() = default;
+        TextCondition(const QString &expression, bool regex, Qt::CaseSensitivity sensitivity);
+        bool matches(const QString &text) const;
+        bool isEmpty() const;
+    private:
+        QString m_literal;
+        QRegularExpression m_pattern;
+        Qt::CaseSensitivity m_sensitivity = Qt::CaseInsensitive;
+        // 必须显式记"这条是正则"：默认构造的 QRegularExpression 是**有效且匹配一切**的，
+        // 用它当"是否正则"的判据，字面条件会全部退化成匹配所有文本。
+        bool m_regex = false;
+    };
+
     struct Options
     {
         QSet<QUuid> endpoints; // 集合为空表示不显示任何端点的记录
         bool rx = true;
         bool tx = true;
-        bool events = true; // 错误/警告日志（Warning/Error 方向的离散事件）有独立开关
-        QString search;
+        bool states = true;   // 状态迁移（端口打开/关闭/重连等）
+        bool warnings = true; // 警告日志
+        bool errors = true;   // 错误日志
+        // 内容条件：关键词任一命中即通过（组内 OR），排除词命中任一即隐藏（黑名单）。
+        // 两者共用同一套候选文本视图，见 Matcher。
+        QStringList keywords;
+        QStringList excludes;
+        bool caseSensitive = false;
+        bool regex = false;
     };
 
+    // 预编译后的判定器：正则只编译一次；候选文本按"便宜 → 昂贵"排序并逐项短路，
+    // 最贵的两条 HEX 串在多数消息上根本不会被构造（热路径性能红线，见设计稿 §6）。
+    class Matcher
+    {
+    public:
+        Matcher() = default;
+        Matcher(const Options &options, PayloadCodec::Format format);
+        bool accepts(const Traffic::Message &record) const;
+        // 供摘要与持久化复用；Matcher 持有的是构造时的条件快照。
+        const Options &options() const { return m_options; }
+    private:
+        Options m_options;
+        PayloadCodec::Format m_format = PayloadCodec::Format::Hex;
+        QList<TextCondition> m_keywords;
+        QList<TextCondition> m_excludes;
+    };
+
+    // 一次性判定，等价于 Matcher(options, format).accepts(record)：供测试与低频场景使用。
+    // 热路径必须自己构造一次 Matcher 反复调用，不要每条消息都走这里。
     static bool accepts(const Traffic::Message &record, const Options &options, PayloadCodec::Format format);
 };
 
@@ -77,6 +125,10 @@ signals:
     void summaryChanged(const QString &text);
 private:
     void updateFilter();
+    // 过滤条的折叠：收起时只隐藏第二行，条件与记忆状态都不动。
+    void setFilterExpanded(bool expanded);
+    // 折叠按钮的文字：状态 + 生效条件数，收起时也能一眼看出"当前在过滤"。
+    void refreshFilterToggle();
     void updatePortVisibility();
     void updateSummary();
     void exportVisible();
@@ -98,19 +150,22 @@ private:
     TrafficTextView *m_text = nullptr; // 唯一显示视图：JCom 式文本框逐行追加
     QLabel *m_empty = nullptr;
     QComboBox *m_format;
-    QLineEdit *m_search;
+    // 过滤入口：顶栏只留一个折叠按钮（原搜索框的位置），条件本身在第二行的过滤条上。
+    QPushButton *m_filterToggle;
+    FilterBar *m_filterBar;
+    // 折叠状态用显式标志而不是 isVisible()：窗口整体隐藏时 isVisible() 恒为假，
+    // 记忆状态会跟着被读错。
+    bool m_filterExpanded = true;
     // A/B 端点开关直接放在顶栏选项栏里，快捷切换显示范围；其余显示选项在"显示设置"菜单。
     QPushButton *m_portAButton;
     QPushButton *m_portBButton;
-    QAction *m_rxAction;
-    QAction *m_txAction;
     // 行内容开关：全部在到达时生效（控制台语义），纯数据模式下被忽略。
+    // 方向与事件开关不在其中——它们管的是"哪些行进来"，已迁到过滤条（见 §7.4）。
     QAction *m_numberAction;    // 行号（会话内绝对计数）
     QAction *m_timestampAction;
     QAction *m_directionAction;
     QAction *m_lengthAction;  // 数据长度 [N B]
     QAction *m_hexAction;     // 同时显示 HEX 对照
-    QAction *m_errorAction;   // 错误/警告日志（过滤开关）
     QAction *m_pureAction;    // 纯数据视图：无一切前缀
     QAction *m_wrapAction;    // 自动换行
     QAction *m_recordAction;  // 记录到文件：按当前显示格式持续写日志
@@ -118,13 +173,17 @@ private:
     QPushButton *m_follow;
     QStackedWidget *m_stack;
     quint64 m_totalAccepted = 0; // 会话累计接收条数（含示例），文本历史随淘汰可超过模型上限
+    // 被过滤条件挡下的条数：只有它能把"看到的不多"和"根本没收到"区分开。
+    quint64 m_filteredOut = 0;
     QString m_lastSummary;       // 上次上报的摘要文本，去重用
     // 攒批缓冲：appendMessages 先入缓冲，16ms 一拍整批入模。
     QList<Traffic::Message> m_pending;
     QTimer *m_flushTimer = nullptr;
     // 文本视图按到达时的过滤条件收流：updateFilter 是唯一写入点。
     // 文本行按到达时格式与开关组合固化，没有"重算全部行"这回事。
-    TrafficFilter::Options m_textOptions;
+    TrafficFilter::Options m_filterOptions;
+    // 条件的可执行形态：正则预编译、候选视图按需构造，都发生在 updateFilter 里一次。
+    TrafficFilter::Matcher m_matcher;
     TrafficTextView::DisplayOptions m_displayOptions;
     PreferencesStore *m_preferences = nullptr;
     bool m_loading = false; // 加载偏好期间联动触发的保存要抑制，否则半成品状态会覆盖已存值
