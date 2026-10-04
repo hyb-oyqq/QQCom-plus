@@ -445,8 +445,6 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         // 里命中的条件会随格式移动命中行。也不播报"已按当前条件重投影"那句（会撒谎）。
         if (appearanceChanged())
             reprojectView(/*announce=*/false, /*applyCurrentConditions=*/false);
-        else
-            m_reprojectPending = false; // 外观已恢复，无需重投影，清除保护标志
     });
     // 文本视图是唯一显示视图：每条消息按行号、时间、方向起头，载荷按文本本来的
     // 样子展开。模型只做结构化存储（导出/记录/搜索），不再驱动任何逐帧绘制。
@@ -533,14 +531,12 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         if (follow) m_text->scrollToBottom();
         savePreferences();
     });
-    // 任何形式的向上翻阅（拖动、滚轮、翻页）都解除”滚动到底”。
-    // 视图自己改滚动范围时不算翻阅，否则每次追加都会把跟随关掉；
-    // 追加后立刻钉回底部，不会误触发。
-    // 重投影防抖期间（m_reprojectPending 为真）也不取消：切换编码后的 50ms 内
-    // 数据继续到达、appendMessages 触发 valueChanged，但此时用户并未主动翻阅，
-    // 不应清除跟随状态——否则重投影完成后不会自动滚动到底部。
-    connect(m_text->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int position) {
-        if (!m_reprojectPending && position < m_text->verticalScrollBar()->maximum())
+    // 用户向上翻阅（拖动滑块、滚轮、翻页键）时自动取消跟随。
+    // 使用 sliderMoved 而不是 valueChanged：sliderMoved 只在用户拖动滑块时触发，
+    // appendMessages/clearAll 等程序内部修改不会触发，完全避免误判。
+    // 滚轮和键盘也会间接触发 sliderMoved（Qt 内部将它们转为滑块移动）。
+    connect(m_text->verticalScrollBar(), &QScrollBar::sliderMoved, this, [this](int position) {
+        if (position < m_text->verticalScrollBar()->maximum())
             m_follow->setChecked(false);
     });
     updateSummary();
@@ -643,18 +639,8 @@ void TrafficPanel::flushPending()
     // 挡住多少条必须单独计数：屏幕上"什么都没有"和"被条件挡掉了"是两个完全
     // 不同的事实，只有这个数字能把它们分开。
     m_filteredOut += static_cast<quint64>(batch.size() - accepted.size());
-    // 增量追加期间也需要临时断开滚动条信号：appendMessages 的 endEditBlock 会触发
-    // 滚动条重算，如果内容较多或渲染有延迟，position < maximum() 时会误触发自动取消
-    // 跟随。断开信号 → 追加 → 手动滚动（如果跟随），避免中间状态干扰用户的跟随设置。
-    auto *scroll = m_text->verticalScrollBar();
-    const bool follow = m_follow->isChecked();
-    disconnect(scroll, &QScrollBar::valueChanged, this, nullptr);
     m_text->appendMessages(accepted, format, m_displayOptions);
-    connect(scroll, &QScrollBar::valueChanged, this, [this](int position) {
-        if (!m_reprojectPending && position < m_text->verticalScrollBar()->maximum())
-            m_follow->setChecked(false);
-    });
-    if (follow) m_text->scrollToBottom();
+    if (m_follow->isChecked()) m_text->scrollToBottom();
     m_lastBatchWorkMs = qMax(m_lastBatchWorkMs, work.elapsed());
     updateSummary();
 }
@@ -1033,21 +1019,10 @@ void TrafficPanel::reprojectView(bool announce, bool applyCurrentConditions)
         const auto &message = m_model->record(row);
         if (matcher->accepts(message)) accepted.append(message);
     }
-    // 重投影期间临时断开滚动条信号：clearAll + appendMessages 会触发 valueChanged，
-    // 导致"位置不在底部时自动取消跟随"的逻辑误触发，把用户的跟随状态清掉。
-    // 投影完成后手动恢复滚动位置（跟随 → 底部；否则 → 按比例），不需要中间过程触发。
-    disconnect(scroll, &QScrollBar::valueChanged, this, nullptr);
     // 行号按投影结果从 1 重新排：清空与重放是同一个动作的两半，中间不能让旧行号
     // 留在文档里，否则"第 3 行"会指向两条不同的记录。
     m_text->clearAll();
     m_text->appendMessages(accepted, currentDisplayFormat(), m_displayOptions);
-    // 重新连接滚动条信号：向上翻阅时自动取消跟随。
-    // 必须保持与初始连接相同的逻辑（带 m_reprojectPending 检查），否则重投影后
-    // 数据继续到达时会误触发自动取消跟随。
-    connect(scroll, &QScrollBar::valueChanged, this, [this](int position) {
-        if (!m_reprojectPending && position < m_text->verticalScrollBar()->maximum())
-            m_follow->setChecked(false);
-    });
 
     if (showWait) QApplication::restoreOverrideCursor();
 
@@ -1058,7 +1033,6 @@ void TrafficPanel::reprojectView(bool announce, bool applyCurrentConditions)
     // conditionsApplied：这次到底有没有"让视图跟上当前条件"。外观路径走已应用条件 → false，
     // 未应用的条件必须仍被判为待应用；回退用当前条件的那次（还没投影过）算真，因为确实用上了。
     markReprojected(applyCurrentConditions || !useAppliedConditions);
-    m_reprojectPending = false; // 重投影完成，恢复正常的滚动交互（向上翻阅自动取消跟随）
     if (follow) m_text->scrollToBottom();
     else if (scrollFraction > 0.0)
         scroll->setValue(qRound(scrollFraction * scroll->maximum()));
@@ -1080,7 +1054,6 @@ void TrafficPanel::scheduleReproject()
         return;
     }
     if (!appearanceChanged()) return; // 外观没变，没什么要重排的
-    m_reprojectPending = true; // 标记进入重投影防抖期间，保护 follow 状态
     m_reprojectTimer->start();
 }
 

@@ -301,10 +301,6 @@ private:
     TrafficTextView::DisplayOptions m_projectedDisplay;
     bool m_everProjected = false; // 一次投影都没做过时视图是空的，没有"跟不上"这回事
     QTimer *m_reprojectTimer = nullptr;
-    // 重投影防抖期间（外观变化 → 50ms 定时器触发前）的跟随状态保护：
-    // 数据继续到达时 appendMessages 会触发滚动条 valueChanged，可能误清除跟随状态。
-    // 这个标志让滚动条信号知道"现在处于重投影准备阶段，不要自动取消跟随"。
-    bool m_reprojectPending = false;
     PreferencesStore *m_preferences = nullptr;
     bool m_loading = false; // 加载偏好期间联动触发的保存要抑制，否则半成品状态会覆盖已存值
     QFile *m_logFile = nullptr;   // 打开期间持续写入；关闭开关、重开或析构时收口
