@@ -14,6 +14,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QColor>
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
@@ -34,6 +35,7 @@
 #include <QStyleOptionSpinBox>
 #include <QTabWidget>
 #include <QTextBlock>
+#include <QTextFragment>
 #include <QToolButton>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -121,6 +123,16 @@ QString overlapInRow(QWidget *container)
                        .arg(item->x() + item->width())
                        .arg(container->width());
     return QString();
+}
+
+// 取一个块最后一个分片的前景色。数据行的末片是正文色（HEX 对照行整行一个分片），
+// 用来比对"哪一行更浅"。QColor::value() 是 HSV 明度，正好当"深浅"的判据。
+QColor lastFragmentColor(const QTextBlock &block)
+{
+    QColor color;
+    for (auto it = block.begin(); !it.atEnd(); ++it)
+        color = it.fragment().charFormat().foreground().color();
+    return color;
 }
 
 } // namespace
@@ -976,8 +988,10 @@ private slots:
     }
 
     // 历史上限必须同时限字节和条数。只限字节时，串口遥测那种几十字节的小帧
-    // 能把条数堆到六万以上，每条 Message 的元数据（时间、来源、三个 QUuid、
+    // 能把条数堆到十几万，每条 Message 的元数据（时间、来源、三个 QUuid、
     // 两个 QString）远大于它那点载荷——"限了字节"不等于"限了内存"。
+    // 断言用 TrafficModel::kRowBudget 而不是写死数字：预算本身就是被测对象，
+    // 写死的话改预算时这条用例会以"失败"而不是"过时"的面目出现。
     void historyBudgetAlsoLimitsRowCount()
     {
         TrafficModel model;
@@ -986,11 +1000,12 @@ private slots:
         tiny.source.endpointIndex = 0;
         tiny.source.endpointKind = PortDraft::Serial;
         tiny.source.endpointId = QUuid::createUuid();
-        tiny.raw = QByteArray::fromHex("0102"); // 2 字节：4 MiB 字节预算能装两百万条
+        tiny.raw = QByteArray::fromHex("0102"); // 2 字节：16 MiB 字节预算能装八百万条
         tiny.rawLength = tiny.raw.size();
 
+        const int rounds = TrafficModel::kRowBudget / 1000 + 10;
         quint64 id = 1;
-        for (int round = 0; round < 30; ++round) {
+        for (int round = 0; round < rounds; ++round) {
             QList<Traffic::Message> batch;
             batch.reserve(1000);
             for (int i = 0; i < 1000; ++i) {
@@ -1000,10 +1015,10 @@ private slots:
             }
             model.appendRecords(batch);
         }
-        QCOMPARE(model.rowCount(), 20000);
+        QCOMPARE(model.rowCount(), TrafficModel::kRowBudget);
         // 淘汰只从最旧一端发生：最新的一定在，最旧的恰好被挤掉。
         QCOMPARE(model.record(model.rowCount() - 1).id, id - 1);
-        QCOMPARE(model.record(0).id, id - 20000);
+        QCOMPARE(model.record(0).id, id - TrafficModel::kRowBudget);
     }
 
     void displayPreferencesPersistAcrossPanels()
@@ -1566,8 +1581,8 @@ private slots:
 
         const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
                                      ->property("endpoint").toUuid();
-        // 25000 条 8 字节小帧：越过模型 20000 条的条数上限，文本历史必须原样保留。
-        const int total = 25000;
+        // 25000 条 8 字节小帧：越过模型的条数上限，文本历史必须原样保留。
+        const int total = TrafficModel::kRowBudget + 5000;
         for (int batchStart = 0; batchStart < total; batchStart += 500) {
             QList<Traffic::Message> batch;
             batch.reserve(500);
@@ -1598,7 +1613,8 @@ private slots:
         QCOMPARE(text->verticalScrollBar()->value(), text->verticalScrollBar()->maximum());
 
         // 模型触顶淘汰，文本历史一行不少：这是"文本模式能看完整历史"的判据。
-        QVERIFY2(model->rowCount() <= 20000, qPrintable(QStringLiteral("模型应已淘汰：当前 %1 条").arg(model->rowCount())));
+        QVERIFY2(model->rowCount() <= TrafficModel::kRowBudget,
+            qPrintable(QStringLiteral("模型应已淘汰：当前 %1 条").arg(model->rowCount())));
         QCOMPARE(text->lineCount(), total);
         QCOMPARE(text->document()->blockCount(), total);
 
@@ -1788,10 +1804,84 @@ private slots:
         window.findChild<QAction *>(QStringLiteral("showLength"))->setChecked(false);
     }
 
+    // 显示设置是"每行长什么样"的视图属性，不是"只对新数据生效"的到达时快照。
+    // 切开关必须立刻作用到**已经收到**的那批行上（用户明确要求：包括已经接收到的数据）。
+    // 这条用例同时钉住两半：外观改了就重排已有行；而行号在重投影后仍从 1 连续，
+    // 以及 HEX 对照行比数据行浅——它是附注，不是主体。
+    void displaySettingsApplyToAlreadyReceivedRows()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr); // 开关变化不落盘，避免污染共享配置
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *clock = window.findChild<QAction *>(QStringLiteral("showTimestamp"));
+        auto *hexEcho = window.findChild<QAction *>(QStringLiteral("showHex"));
+        QVERIFY(text && model && clock && hexEcho);
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+        QVERIFY2(clock->isChecked(), "默认应带时间戳，否则本用例的前提不成立");
+        QVERIFY2(!hexEcho->isChecked(), "默认不应带 HEX 对照，否则本用例的前提不成立");
+
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        constexpr int Count = 5;
+        QList<Traffic::Message> batch;
+        for (int i = 0; i < Count; ++i) {
+            Traffic::Message message;
+            message.id = i + 1;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = Traffic::Direction::Receive;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray("OK");
+            message.rawLength = 2;
+            batch.append(message);
+        }
+        panel->appendMessages(batch);
+        QTRY_COMPARE(model->rowCount(), Count);
+        QTRY_COMPARE(text->document()->blockCount(), Count);
+        const QRegularExpression stamp(QStringLiteral(R"(\d{2}:\d{2}:\d{2}\.\d{3})"));
+        QVERIFY2(text->document()->firstBlock().text().contains(stamp),
+            qPrintable(text->document()->firstBlock().text()));
+
+        // ① 关掉时间戳：**已经在这儿的 5 行**必须一起失去时间戳。
+        //    这一条正是"显示设置只对新数据生效"那个缺陷的反面。
+        clock->setChecked(false);
+        QTRY_VERIFY2(!text->document()->toPlainText().contains(stamp),
+            qPrintable(QStringLiteral("已有行没有跟随显示设置重排：")
+                + text->document()->firstBlock().text()));
+        QCOMPARE(text->document()->blockCount(), Count); // 只改样子，行数不变
+        QVERIFY2(text->document()->firstBlock().text().startsWith(QStringLiteral("1 ")),
+            qPrintable(text->document()->firstBlock().text()));
+
+        // ② 打开 HEX 对照：已有行要长出对照行——它们不是"新数据"，是重新渲染出来的。
+        hexEcho->setChecked(true);
+        QTRY_COMPARE(text->document()->blockCount(), Count * 2);
+        // 行号在重投影后从 1 连续重排：第 5 条的数据行是倒数第 2 块。
+        QVERIFY2(text->document()->findBlockByNumber(Count * 2 - 2).text()
+                     .startsWith(QStringLiteral("5 ")),
+            qPrintable(text->document()->findBlockByNumber(Count * 2 - 2).text()));
+        // HEX 对照行是附注而不是数据本身，必须比数据行浅：上下两行一眼能分出主次。
+        const QColor dataLine = lastFragmentColor(text->document()->firstBlock());
+        const QColor hexLine = lastFragmentColor(text->document()->firstBlock().next());
+        QVERIFY2(hexLine.value() > dataLine.value(),
+            qPrintable(QStringLiteral("HEX 对照行应当比数据行浅：对照 %1 / 数据 %2")
+                           .arg(hexLine.value())
+                           .arg(dataLine.value())));
+
+        // 还原默认开关，不把本用例的状态带给后续用例。
+        hexEcho->setChecked(false);
+        clock->setChecked(true);
+    }
+
     // 显示格式为 HEX 时不重复显示 HEX 对照行：数据本身就是 HEX，再来一行一模一样。
     // 已固化的旧行不回溯（控制台语义），此断言锁定的是"新行"的行为。
-    void hexEchoSuppressedInHexFormat()
-    {
+    void hexEchoSuppressedInHexFormat()    {
         MainWindow window;
         window.setAttribute(Qt::WA_DontShowOnScreen);
         window.resize(1280, 720);

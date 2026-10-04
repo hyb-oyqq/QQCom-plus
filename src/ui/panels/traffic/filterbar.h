@@ -53,6 +53,10 @@ public:
     // 模型里有没有可回溯的记录：没有就没什么可"重新过滤"的，按钮置灰。
     void setRebuildAvailable(bool available);
 
+    // "条件已改、但还没补到已有记录上"：按钮上要留个记号。
+    // 不记的话，用户改完条件发现屏幕没动，只会以为过滤坏了。
+    void setApplyPending(bool pending);
+
     // 键盘入口：Ctrl+F 聚焦关键词输入并全选，替换掉原顶栏搜索框的快捷键位。
     void focusKeywords();
 
@@ -85,6 +89,7 @@ private:
     QPushButton *m_reset = nullptr;
     bool m_resetAvailable = false;   // 外部（顶栏方向/事件开关）是否还有生效条件
     bool m_rebuildAvailable = false; // 模型里还有记录可回溯
+    bool m_applyPending = false;     // 条件改了但还没补到已有记录上
     bool m_restoring = false;        // 恢复期间抑制 changed
 };
 

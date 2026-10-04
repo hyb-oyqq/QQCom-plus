@@ -4,8 +4,10 @@
 // 这件事只能测出货代码：卡顿来自面板与视图的协作方式（攒批怎么落、文本怎么追加、
 // 跟随怎么滚动），任何用假模型搭出来的复现都测不到同一个瓶颈。
 //
-// 用法：easyDebug_traffic_perf.exe [载荷字节数] [每批条数] [批数] [拖动窗口基准:0/1]
+// 用法：easyDebug_traffic_perf.exe [载荷字节数] [每批条数] [批数] [拖动窗口基准:0/1] [投影基准行数]
 // 判读：mean/p50 是流畅度，max 与 over100 是"卡顿"——用户感知到的正是长尾。
+// 第 5 个参数 >0 时追加"视图投影基准"：量把 K 行重新渲染进文本框要多久，
+// 显示设置/过滤条件"立即作用于已有内容"的代价就是它。
 #include "mainwindow.h"
 #include "ui/panels/traffic/trafficpanel.h"
 #include "ui/panels/traffic/traffictextview.h"
@@ -13,11 +15,16 @@
 #include <QAction>
 #include <QApplication>
 #include <QByteArray>
+#include <QColor>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QList>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QTextCharFormat>
+#include <QTextCursor>
+#include <QTextDocument>
 #include <QtTest>
 
 #include <algorithm>
@@ -85,6 +92,8 @@ int main(int argc, char **argv)
     const int batchSize = argc > 2 ? std::atoi(argv[2]) : 20;
     const int cycles = argc > 3 ? std::atoi(argv[3]) : 200;
     const bool resizeBench = argc > 4 ? std::atoi(argv[4]) != 0 : false;
+    // 第 5 个参数：视图投影基准的行数（0 = 跳过）。见文件末尾的"投影成本"段。
+    const int projectionRows = argc > 5 ? std::atoi(argv[5]) : 0;
 
     MainWindow window;
     window.resize(1400, 900);
@@ -186,6 +195,202 @@ int main(int argc, char **argv)
     std::printf("  帧率 净工作折合 %5.1f fps   最差一拍 %5.1f fps\n",
                 s.mean > 0 ? 1000 / (s.mean - pace.mean) : 0, s.max > 0 ? 1000 / s.max : 0);
     std::printf("  模型 %d 行  文本 %d 行  工作集 %.0f MiB\n", model->rowCount(), text->lineCount(), wsMiB());
+
+    // ── 视图投影成本 ──────────────────────────────────────────────────────────
+    // 显示设置与过滤条件要能立刻作用于"已经收到的内容"，代价就是一次重投影：
+    // 把 K 行从存储里重新渲染进文本框。这一段专门量这个代价——它决定了
+    // "屏幕可重画的历史"能开多大，以及重投影要不要切片。
+    //
+    // 按行数梯度量（不是单点）：只有梯度能回答"成本与文档规模是线性还是超线性"，
+    // 而这一点直接决定预算能开多大。打印折合每条 µs，趋势比绝对值更重要。
+    // 载荷在这里遮成可打印 ASCII：随机字节里的 \r\n 会一条膨胀成好几行，
+    // 把"每条成本"和"每行成本"混在一起，梯度就看不干净了。
+    if (projectionRows > 0) {
+        auto *view = new TrafficTextView;
+        view->resize(1400, 900);
+        view->show();
+        QTest::qWait(120);
+
+        const auto format = PayloadCodec::Format::Utf8;
+        constexpr int Slice = 2000; // 与实现里的切片粒度一致
+        const QString sample = QStringLiteral("12:34:56.789 RX: 温度 25.0 C  设备就绪");
+        const char *const VariantNames[4] = {"setCharFormat + insertText（现状）",
+            "整段包一层 editBlock", "insertText(text, format) 重载", "editBlock + 重载"};
+        TrafficTextView::DisplayOptions opt;
+        opt.number = true;
+        opt.timestamp = true;
+        opt.direction = true;
+        opt.length = true;
+        opt.hex = false;
+        opt.pure = false;
+
+        std::printf("\n========================================================\n");
+        std::printf("视图投影基准  载荷 %d B/条（遮成可打印 ASCII，一条一行）\n", payloadBytes);
+        std::printf("========================================================\n");
+        std::printf("%10s %12s %12s %12s %10s\n",
+            "行数", "整批 ms", "折合 µs/条", "文档行数", "MiB 字符");
+
+        for (int k = qMax(1, projectionRows / 8); k <= projectionRows; k *= 2) {
+            QList<Traffic::Message> rows;
+            rows.reserve(k);
+            for (int i = 0; i < k; ++i) {
+                Traffic::Message m;
+                m.id = quint64(i) + 1;
+                m.timestamp = QDateTime::currentDateTime();
+                m.direction = i % 3 == 0 ? Traffic::Direction::Transmit : Traffic::Direction::Receive;
+                m.origin = Traffic::Origin::Automatic;
+                m.framing = Traffic::Framing::Stream;
+                m.source.endpointId = endpointId;
+                m.source.endpointIndex = 0;
+                m.source.endpointKind = PortDraft::Serial;
+                m.source.endpointName = QStringLiteral("串口 A");
+                QByteArray raw = pool.at(i % pool.size());
+                for (auto &byte : raw) // 遮掉控制字符：\(\r\n\t\) 会让一条膨胀成多行
+                    byte = char(0x20 + (quint8(byte) % 0x5F));
+                m.raw = raw;
+                m.rawLength = raw.size();
+                rows.append(m);
+            }
+
+            view->clearAll();
+            t.restart();
+            view->appendMessages(rows, format, opt);
+            const double ms = t.nsecsElapsed() / 1e6;
+            std::printf("%10d %12.1f %12.1f %12d %10.2f\n", k, ms, ms * 1000.0 / k,
+                view->lineCount(), view->document()->characterCount() / 1024.0 / 1024.0);
+        }
+        std::fflush(stdout);
+
+        // 分片重投影：分片实现实际走的路径（切片粒度与实现一致）。
+        std::printf("\n分片重投影（每片 %d 条，按 1/8 → 全量 梯度）\n", Slice);
+        for (int k = qMax(1, projectionRows / 8); k <= projectionRows; k *= 2) {
+            QList<Traffic::Message> rows;
+            rows.reserve(k);
+            for (int i = 0; i < k; ++i) {
+                Traffic::Message m;
+                m.id = quint64(i) + 1;
+                m.timestamp = QDateTime::currentDateTime();
+                m.direction = Traffic::Direction::Receive;
+                m.origin = Traffic::Origin::Automatic;
+                m.framing = Traffic::Framing::Stream;
+                m.source.endpointId = endpointId;
+                m.source.endpointKind = PortDraft::Serial;
+                m.source.endpointName = QStringLiteral("串口 A");
+                QByteArray raw = pool.at(i % pool.size());
+                for (auto &byte : raw) byte = char(0x20 + (quint8(byte) % 0x5F));
+                m.raw = raw;
+                m.rawLength = raw.size();
+                rows.append(m);
+            }
+            view->clearAll();
+            t.restart();
+            for (int from = 0; from < rows.size(); from += Slice)
+                view->appendMessages(rows.mid(from, Slice), format, opt);
+            const double ms = t.nsecsElapsed() / 1e6;
+            std::printf("%10d %12.1f %12.1f\n", k, ms, ms * 1000.0 / k);
+        }
+        std::fflush(stdout);
+
+        // ── 成本分解 ─────────────────────────────────────────────────────────
+        // 360 µs/条 是不可接受的量级，必须知道它花在哪：解码、文档插入、
+        // 还是"控件在屏幕上"带来的排版/滚动条开销。三个数一比就清楚。
+        std::printf("\n成本分解（%d 条，载荷 %d B）\n", projectionRows, payloadBytes);
+        {
+            QList<Traffic::Message> rows;
+            rows.reserve(projectionRows);
+            for (int i = 0; i < projectionRows; ++i) {
+                Traffic::Message m;
+                m.id = quint64(i) + 1;
+                m.timestamp = QDateTime::currentDateTime();
+                m.direction = Traffic::Direction::Receive;
+                m.origin = Traffic::Origin::Automatic;
+                m.framing = Traffic::Framing::Stream;
+                m.source.endpointId = endpointId;
+                m.source.endpointKind = PortDraft::Serial;
+                m.source.endpointName = QStringLiteral("串口 A");
+                QByteArray raw = pool.at(i % pool.size());
+                for (auto &byte : raw) byte = char(0x20 + (quint8(byte) % 0x5F));
+                m.raw = raw;
+                m.rawLength = raw.size();
+                rows.append(m);
+            }
+
+            // ① 只解码 + 切行，完全不碰文档
+            qsizetype chars = 0;
+            t.restart();
+            for (const auto &m : rows) chars += PayloadCodec::renderMultiline(m.raw, format).size();
+            const double decodeMs = t.nsecsElapsed() / 1e6;
+            std::printf("  ① 只解码切行            %8.1f ms  (%.1f µs/条, %lld 字符)\n",
+                decodeMs, decodeMs * 1000.0 / projectionRows, static_cast<long long>(chars));
+
+            // ② 写进"没上屏"的文本框：文档 + 排版都在，只是没有窗口/滚动条/重绘
+            auto *off = new TrafficTextView;
+            t.restart();
+            off->appendMessages(rows, format, opt);
+            const double hiddenMs = t.nsecsElapsed() / 1e6;
+            std::printf("  ② 写进未上屏文本框      %8.1f ms  (%.1f µs/条)\n",
+                hiddenMs, hiddenMs * 1000.0 / projectionRows);
+            delete off;
+
+            // ③ 写进屏幕上的文本框（= 前一段梯度测量的口径）
+            view->clearAll();
+            t.restart();
+            view->appendMessages(rows, format, opt);
+            const double shownMs = t.nsecsElapsed() / 1e6;
+            std::printf("  ③ 写进已上屏文本框      %8.1f ms  (%.1f µs/条)\n",
+                shownMs, shownMs * 1000.0 / projectionRows);
+            std::printf("  ②-① = 文档写入 %.1f µs/条   ③-② = 上屏 %.1f µs/条\n",
+                (hiddenMs - decodeMs) * 1000.0 / projectionRows,
+                (shownMs - hiddenMs) * 1000.0 / projectionRows);
+        }
+        std::fflush(stdout);
+
+        // ── 微实验：文档写入的固定开销 ────────────────────────────────────────
+        // ②-① 是 220~250 µs/条，而每条消息只做 5~7 次 insertText → 摊到每次插入
+        // 约 40 µs。这个**固定开销**（与插入内容多少无关）才是真正的敌人：
+        // 降它只有两条路——减少插入次数，或让一次插入不再触发完整的文档编辑。
+        // 四种用法各测一遍，先确认能压到多少，再决定实现怎么改。
+        //
+        // 探针必须**逐行插入块分隔符**：不插换行的话 N 次插入全落在同一个块里，
+        // 变成一条几十万字符的长行，量到的是"超长单块"的布局成本，与实际渲染路径
+        // （一条消息一个块）完全不是一回事——这个陷阱本身也值得记一笔。
+        constexpr int Trials = 5000;
+        const int SampleRows = 3; // 每轮插几行，摊薄固定开销后再折合到每次插入
+        std::printf("\n微实验：文档写入的固定开销（%d 行 × %d 次插入/行，行内 %d 字符）\n",
+            Trials, SampleRows, sample.length());
+        for (int variant = 0; variant < 4; ++variant) {
+            auto *probe = new TrafficTextView;
+            QTextCursor cursor(probe->document());
+            cursor.movePosition(QTextCursor::End);
+            QTextCharFormat body;
+            body.setForeground(QColor(0x1C, 0x24, 0x30));
+            const bool editBlock = variant == 1 || variant == 3;
+            const bool overload = variant == 2 || variant == 3;
+            const int inserts = Trials * SampleRows;
+            if (editBlock) cursor.beginEditBlock();
+            t.restart();
+            for (int i = 0; i < Trials; ++i) {
+                for (int k = 0; k < SampleRows; ++k) {
+                    if (!probe->document()->isEmpty())
+                        cursor.insertText(QString(QChar::ParagraphSeparator));
+                    if (overload) cursor.insertText(sample, body);
+                    else {
+                        cursor.setCharFormat(body);
+                        cursor.insertText(sample);
+                    }
+                }
+            }
+            if (editBlock) cursor.endEditBlock();
+            const double ms = t.nsecsElapsed() / 1e6;
+            std::printf("  %-30s %8.1f ms  %7.2f µs/次插入   %8.2f µs/行\n",
+                VariantNames[variant], ms, ms * 1000.0 / inserts, ms * 1000.0 / Trials);
+            delete probe;
+        }
+        std::fflush(stdout);
+        view->hide();
+        delete view;
+        QCoreApplication::processEvents();
+    }
 
     // 拖动窗口基准：跟随开启 + 已有大量历史的情况下连续改窗口尺寸。
     // resize 事件与整窗重绘都是同步的，直接计时；攒批落在自己的定时器里不混入。

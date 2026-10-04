@@ -36,13 +36,20 @@ constexpr int BarIconSize = 16;
 // 而不是"我们留下了多少"——两者不等即说明发生了截断。
 constexpr int PreviewLimit = 4096;
 
-// 模型的历史预算：4 MiB 或 20000 条，先到者为准。
-constexpr qint64 HistoryByteBudget = 4 * 1024 * 1024;
+// 模型的历史预算见 TrafficModel::kByteBudget / kRowBudget——那份预算同时就是
+// "屏幕上能重画的历史"预算：监视区是模型的投影，能回溯多远与一次重投影要多久
+// 都由它决定。实测（tests/perf，128 B/条）投影成本约 6.9 µs/条：
+//   2 万条 ≈ 140 ms，5 万条 ≈ 350 ms，12.8 万条 ≈ 880 ms。
+// 取 5 万条 / 16 MiB：重投影仍在"点一下就有"的量级内，同时是原先
+// 2 万条 / 4 MiB 的四倍纵深。要更远必须先降 traffic_perf 里的投影成本。
 
-// 只限字节是不够的：串口遥测常见几十字节的小帧，光靠 4 MiB 预算能堆到六万条以上，
-// 而每条 Message（时间、来源、三个 QUuid、两个 QString）的元数据开销远大于它那
-// 64 字节的载荷——"限了字节"不等于"限了内存"。
-constexpr int HistoryRowBudget = 20000;
+// 重投影的防抖窗口。连点开关、连续切换只做一次重投影；50 ms 短于人能察觉的
+// "卡一下"，又足够把同一轮操作里的多次变化合成一次。
+constexpr int ReprojectDebounceMs = 50;
+
+// 超过这个条数才值得亮等待光标：更少的量重投影只要几十毫秒，
+// 闪一下光标反而比等待更烦人。
+constexpr int ReprojectWaitCursorRows = 8000;
 
 // 真实消息到达的攒批窗口：一帧左右的时间足够把同一次 readyRead 的多条消息
 // 合成一个插入通知；再长会让人感觉记录"迟一拍"。
@@ -54,7 +61,7 @@ int trimToBudget(QList<Traffic::Message> &records, qint64 &bytes)
 {
     int dropped = 0;
     while (!records.isEmpty()
-           && (bytes > HistoryByteBudget || records.size() > HistoryRowBudget)) {
+           && (bytes > TrafficModel::kByteBudget || records.size() > TrafficModel::kRowBudget)) {
         bytes -= records.first().raw.size();
         records.removeFirst();
         ++dropped;
@@ -117,8 +124,8 @@ void TrafficModel::appendRecords(QList<Traffic::Message> records)
     int drop = 0;
     qint64 keptBytes = m_rawBytes;
     while (drop < m_records.size()
-           && (keptBytes + incomingBytes > HistoryByteBudget
-               || (m_records.size() - drop) + added > HistoryRowBudget)) {
+           && (keptBytes + incomingBytes > TrafficModel::kByteBudget
+               || (m_records.size() - drop) + added > TrafficModel::kRowBudget)) {
         keptBytes -= m_records.at(drop).raw.size();
         ++drop;
     }
@@ -396,6 +403,15 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_flushTimer->setSingleShot(true);
     m_flushTimer->setInterval(FlushIntervalMs);
     connect(m_flushTimer, &QTimer::timeout, this, &TrafficPanel::flushPending);
+    // 重投影的防抖定时器：外观变化后排队一次，连续切换只落一次重投影。
+    m_reprojectTimer = new QTimer(this);
+    m_reprojectTimer->setSingleShot(true);
+    m_reprojectTimer->setInterval(ReprojectDebounceMs);
+    // 排上队之后外观又被改回去的情况很常见（连点两下开关），落定时再确认一次，
+    // 避免做一次结果与当前外观无关的白工。
+    connect(m_reprojectTimer, &QTimer::timeout, this, [this] {
+        if (appearanceChanged()) reprojectView();
+    });
     // 文本视图是唯一显示视图：每条消息按行号、时间、方向起头，载荷按文本本来的
     // 样子展开。模型只做结构化存储（导出/记录/搜索），不再驱动任何逐帧绘制。
     m_text = new TrafficTextView;
@@ -417,10 +433,13 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         m_flags->restore(FilterFlagsState());
         updateFilter();
     });
-    connect(m_filterBar, &FilterBar::rebuildRequested, this, &TrafficPanel::rebuildView);
+    // 按钮是"立即把条件补到已有记录上"的显式入口：直接调用，不走防抖——
+    // 用户点了就要这一下改变屏幕，没道理再等 50ms。
+    // 槽带默认参数（announce），所以必须包一层 lambda：信号没有参数可传。
+    connect(m_filterBar, &FilterBar::rebuildRequested, this, [this] { reprojectView(); });
     connect(m_format, &QComboBox::currentIndexChanged, this, [this](int) {
-        // 控制台语义：格式切换只影响新到达的行，已固化的文本不重渲染；
-        // 但判定器持有格式快照（渲染文本与 HEX 视图都按它构造），必须一并重建。
+        // 编码格式是"渲染规则"，和显示开关一样属于视图外观：切换会重建判定器
+        // （渲染文本与 HEX 视图都按它构造），并排队一次重投影把已有内容一起换过来。
         updateFilter();
     });
     // Ctrl+F 聚焦关键词（必要时先展开）；Ctrl+Shift+F 展开/收起整条。
@@ -439,6 +458,8 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         m_text->clearAll();
         m_totalAccepted = 0;
         m_filteredOut = 0;
+        // 缓冲清空了：视图与条件之间不再有"未追平"的关系，签名也一起复位。
+        m_everProjected = false;
         updateSummary();
     });
     connect(exportButton, &QPushButton::clicked, this, &TrafficPanel::exportVisible);
@@ -499,12 +520,10 @@ void TrafficPanel::loadExample(const QList<PortDraft> &ports)
         records.append(message);
     }
     m_model->replaceRecords(records);
-    m_text->clearAll();
-    // 示例数据与 replaceRecords 同语义：整批直达模型，不经显示过滤。
-    // 文本行按当前显示格式固化。
-    m_totalAccepted = records.size();
-    m_text->appendMessages(records, currentDisplayFormat(), m_displayOptions);
-    updateSummary();
+    // 示例也走同一条投影路径。视图是模型的投影，示例不该是例外：
+    // 否则"切了显示设置有一批行不跟着变"、过滤条件对示例失效，两处都会让人以为坏了。
+    // 不播报摘要——用户点的是"载入示例"，不需要再被告知"视图被重投影过"。
+    reprojectView(false);
     if (m_follow->isChecked()) m_text->scrollToBottom();
 }
 
@@ -530,10 +549,11 @@ void TrafficPanel::flushPending()
     m_pending.clear();
     m_model->appendRecords(batch);
     writeLog(batch); // 记录与显示同流：进模型的批次才落日志
-    // 文本视图按到达时的过滤条件逐条判定（TrafficFilter::Matcher 的唯一显示出口），
-    // 行按当前显示格式与开关组合固化后不再重渲染——控制台语义。
-    // 判定器是 updateFilter 里预编译好的：这里只做 match/contains，
+    // 文本视图按当前过滤条件逐条判定（TrafficFilter::Matcher 的唯一显示出口）。
+    // 这是**增量路径**：只处理这一批新行，判定器是 updateFilter 里预编译好的，
     // 每条消息都不重新解释条件、也不重新编译正则。
+    // 增量路径让到达速率与文档规模完全解耦（实测每条 ~6 µs 渲染 + 一次 match）；
+    // 想改条件/外观后再看过去收到的内容，走的是 reprojectView 那条全量路径。
     const auto format = currentDisplayFormat();
     QList<Traffic::Message> accepted;
     accepted.reserve(batch.size());
@@ -745,13 +765,18 @@ void TrafficPanel::updateFilter()
     // 条件的可执行形态在这里构造一次：正则预编译、格式快照一并定下。
     // 消息到达时只做 match/contains，不重新解释条件、也不重新编译正则。
     m_matcher = TrafficFilter::Matcher(options, currentDisplayFormat());
-    // 行内容的开关组合同样在到达时生效：这里重建快照，flushPending 直读。
+    // 行内容的开关组合同样在这里重建快照，flushPending 直读。
+    // 它既决定新行长什么样，也是"已有内容要不要重排"的判据之一。
     m_displayOptions.number = m_numberAction->isChecked();
     m_displayOptions.timestamp = m_timestampAction->isChecked();
     m_displayOptions.direction = m_directionAction->isChecked();
     m_displayOptions.length = m_lengthAction->isChecked();
     m_displayOptions.hex = m_hexAction->isChecked();
     m_displayOptions.pure = m_pureAction->isChecked();
+    // 外观（显示设置/编码格式）一变，已经收到的内容必须立刻跟着变——这是视图的
+    // 语义，不是可选项。过滤条件的变化则只作用于新行，等「应用过滤」把它们补到
+    // 已有记录上（用户钦定的交互），这里不做任何重放。
+    scheduleReproject();
     refreshFilterToggle();
     updateSummary();
     savePreferences(); // 过滤条件的汇聚点：任一条件变化即落盘
@@ -780,32 +805,89 @@ void TrafficPanel::refreshFilterToggle()
     m_filterBar->setResetAvailable(m_flags->activeCount() > 0);
 }
 
-void TrafficPanel::rebuildView()
+void TrafficPanel::reprojectView(bool announce)
 {
-    // 显式回溯（设计稿 §5 方案 B）：把已经收到的记录按当前条件重放一遍。
-    // 只做这一件事——不新增存储、不改变判定路径，重放的每条消息走的还是
-    // flushPending 用的同一个 Matcher。
+    // 视图与条件取得一致的唯一入口。它同时承担两件事：
+    //   ① 显示设置 / 编码格式变化 —— 每行长什么样（用户要求：必须立刻作用于已收到的内容）
+    //   ② 过滤条件变化 —— 哪些行进来（追溯过去要靠它，增量路径只管新行）
+    // 数据源是模型的完整缓冲，所以它覆盖的是**全部已到达的数据**，而不是"此后的新行"。
+    //
+    // 投影成本实测约 6.9 µs/条（见 tests/perf/traffic_perf.cpp）：
+    // 关掉那个编辑块优化会让它退回 360 µs/条，5 万条就是 18 秒——这里的每一次调用
+    // 都建立在 TrafficTextView::appendMessages 那个 beginEditBlock 之上。
     const int rows = m_model->rowCount();
-    QApplication::setOverrideCursor(Qt::WaitCursor);
+    // 翻阅历史时切开关不该被弹回顶部：记下滚动位置的比例，重投影后按比例放回去。
+    // 跟随模式下无所谓（反正要钉到底部），所以只在没跟随时记。
+    auto *scroll = m_text->verticalScrollBar();
+    const bool follow = m_follow->isChecked();
+    const double scrollFraction = (!follow && scroll->maximum() > 0)
+        ? double(scroll->value()) / double(scroll->maximum())
+        : 0.0;
+
+    const bool showWait = rows >= ReprojectWaitCursorRows;
+    if (showWait) QApplication::setOverrideCursor(Qt::WaitCursor);
+
     QList<Traffic::Message> accepted;
     accepted.reserve(rows);
     for (int row = 0; row < rows; ++row) {
         const auto &message = m_model->record(row);
         if (m_matcher.accepts(message)) accepted.append(message);
     }
-    // 行号按重建结果从 1 重新排：清空与重放是同一个动作的两半，中间不能让
-    // 旧行号留在文档里，否则"第 3 行"会指向两条不同的记录。
+    // 行号按投影结果从 1 重新排：清空与重放是同一个动作的两半，中间不能让旧行号
+    // 留在文档里，否则"第 3 行"会指向两条不同的记录。
     m_text->clearAll();
     m_text->appendMessages(accepted, currentDisplayFormat(), m_displayOptions);
-    QApplication::restoreOverrideCursor();
-    // 重建之后屏幕上的条数就是摘要该说的条数：会话累计口径在这里失效了，
-    // 因为更早的行已经被这一次重建丢掉（模型之外的历史无法回溯）。
+
+    if (showWait) QApplication::restoreOverrideCursor();
+
+    // 投影之后屏幕上的条数就是摘要该说的条数：会话累计口径在这里失效了，
+    // 因为更早的行已经被这一次投影丢掉（缓冲之外的历史无法追溯）。
     m_totalAccepted = static_cast<quint64>(accepted.size());
     m_filteredOut = static_cast<quint64>(rows - accepted.size());
-    if (m_follow->isChecked()) m_text->scrollToBottom();
+    markReprojected();
+    if (follow) m_text->scrollToBottom();
+    else if (scrollFraction > 0.0)
+        scroll->setValue(qRound(scrollFraction * scroll->maximum()));
     updateSummary();
-    // 摘要要说明"这是重建结果"，否则用户会以为视图一直是这个样子。
-    reportSummary(tr("重建视图：显示 %1 条（最近 %2 条内匹配）").arg(accepted.size()).arg(rows));
+    // 摘要要说明"这是重投影结果"，否则用户会以为视图一直是这个样子。
+    if (announce && rows > 0)
+        reportSummary(tr("已按当前条件重投影：显示 %1 条（缓冲 %2 条内匹配）")
+                          .arg(accepted.size())
+                          .arg(rows));
+}
+
+void TrafficPanel::scheduleReproject()
+{
+    if (m_model->rowCount() == 0) {
+        // 缓冲是空的：没有已收到的内容需要追平，当前外观就已经是"视图的样子"。
+        // 顺手记下签名，免得第一行数据刚进来就做一次没有意义的空重投影。
+        markReprojected();
+        return;
+    }
+    if (!appearanceChanged()) return; // 外观没变，没什么要重排的
+    m_reprojectTimer->start();
+}
+
+bool TrafficPanel::appearanceChanged() const
+{
+    return m_projectedFormat != currentDisplayFormat() || m_projectedDisplay != m_displayOptions;
+}
+
+void TrafficPanel::markReprojected()
+{
+    m_projectedOptions = m_filterOptions;
+    m_projectedFormat = currentDisplayFormat();
+    m_projectedDisplay = m_displayOptions;
+    m_everProjected = true;
+}
+
+void TrafficPanel::refreshApplyHint()
+{
+    // "条件改了但还没补到已有记录上"是一个必须显式说出来的状态：
+    // 不说，用户只会看到"我改了条件，屏幕没变"，然后判断成坏了。
+    const bool pending = m_model->rowCount() > 0
+        && (!m_everProjected || m_projectedOptions != m_filterOptions || appearanceChanged());
+    m_filterBar->setApplyPending(pending);
 }
 
 void TrafficPanel::updateSummary()
@@ -813,8 +895,11 @@ void TrafficPanel::updateSummary()
     // 模型是导出用的结构化存储（有上限），屏幕上的历史在文本视图里（上限高得多），
     // 摘要按"会话累计接收条数"播报，不随任何一方的淘汰缩水。
     const bool filtering = m_flags->activeCount() + m_filterBar->activeConditionCount() > 0;
-    // 有记录才谈得上"重新过滤"：置灰而不是点了没反应。
+    // 有记录才谈得上"应用过滤"：置灰而不是点了没反应。
     m_filterBar->setRebuildAvailable(m_model->rowCount() > 0);
+    // 条件/外观是否已经作用到已有内容上——放在每次摘要刷新时核对，
+    // 这样"改完条件屏幕没动"永远有一个明确的出口文字，不用用户去猜。
+    refreshApplyHint();
     if (m_totalAccepted == 0) {
         // 空屏有两种截然不同的成因：没收到，和被条件挡住了。
         // 不说清楚，用户会以为端口没通。

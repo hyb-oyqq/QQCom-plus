@@ -24,6 +24,9 @@ constexpr int CharTrimReservePercent = 10; // 一次淘汰到预算的 90%，避
 // RX/TX/状态/警告/错误扫一眼即可分辨，不必去读文字。
 const QColor MetaColor(0x33, 0x3B, 0x47);
 const QColor BodyColor(0x1C, 0x24, 0x30);
+// HEX 对照行的颜色：它是数据行的**附注**而不是数据本身。用比正文和前缀都浅的
+// 次要中性色，上下两行一眼就能分出"哪行是主体、哪行是对照"，不必读内容。
+const QColor HexCompanionColor(0x6B, 0x76, 0x86);
 const QColor TxColor(0x1D, 0x4E, 0xD8);     // 发送：工作台主蓝
 const QColor RxColor(0x04, 0x78, 0x57);     // 接收：饱和绿
 const QColor StateColor(0x6D, 0x28, 0xD9);  // 状态迁移：紫
@@ -164,13 +167,21 @@ void TrafficTextView::appendMessages(
 {
     if (messages.isEmpty()) return;
 
-    // 一次游标推进写完整批：movePosition(End) 只做一次，之后逐行顺序插入，
-    // 中间不回读文档、不碰视口，插入成本与批内行数线性、与文档总行数无关。
+    // 一次渲染 = 一个编辑块。**这是整个追加路径最重要的一条**：
+    // 不在编辑块里的每一次 insertText 都会单独走一整轮"文档变更 → 排版标脏 →
+    // 滚动条重算 → 尺寸信号"，实测固定开销约 100 µs/次，而插入本身只要 1~2 µs。
+    // 一条消息要做 4~7 次插入，于是 5~7 × 100 µs 全花在这笔固定开销上。
+    // 包进编辑块后，整批只在 endEditBlock 时结算一次：实测 103 µs/次 → 1.7 µs/次，
+    // 约 62 倍。这条对"重投影全部历史"是决定性的——没有它，重投影只能覆盖几千行。
     QTextCursor cursor(document());
     cursor.movePosition(QTextCursor::End);
+    cursor.beginEditBlock();
 
     QTextCharFormat metaFormat;
     metaFormat.setForeground(MetaColor);
+    // HEX 对照行：更浅的次要色，与数据行分层。
+    QTextCharFormat hexFormat;
+    hexFormat.setForeground(HexCompanionColor);
 
     // 空文档只有一个空块：首行直接写进它；之后每行先补一个块分隔符。
     // QChar::ParagraphSeparator 是 QTextDocument 的块分隔符（appendPlainText 内部同款），
@@ -262,7 +273,7 @@ void TrafficTextView::appendMessages(
             const auto hex = QString::fromLatin1(r.raw.toHex(' ')).toUpper();
             if (needSeparator) needSeparator = false; // 载荷以换行收尾：续块此时是空的
             else cursor.insertText(QString(QChar::ParagraphSeparator));
-            cursor.setCharFormat(metaFormat);
+            cursor.setCharFormat(hexFormat);
             cursor.insertText(hex);
         }
         // 行号按消息计，一条多行报文共用一个行号；空载荷也保留前缀行。
@@ -270,6 +281,8 @@ void TrafficTextView::appendMessages(
         // 消息之间必然换行：下一条消息从新块开始（旧行为同款）。
         needSeparator = true;
     }
+    // 结算这一批的全部文档变更（也是上面那笔固定开销唯一被付掉的地方）。
+    cursor.endEditBlock();
     enforceCharBudget();
     // 不在这里滚动：跟随与否是面板的状态，由面板在追加后统一处理滚动条。
 }

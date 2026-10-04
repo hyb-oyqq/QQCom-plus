@@ -25,13 +25,24 @@ class QPushButton;
 class QStackedWidget;
 class QTimer;
 
-// 消息是 domain 的值类型（Traffic::Message）：原始字节、时间戳、来源、长度都是事实，
-// 面板不再自带一份精简副本。TrafficModel 是结构化存储：导出、记录与搜索的事实来源，
-// 不驱动任何绘制（显示由 TrafficTextView 承担）。
+// 消息是 domain 的值类型（Traffic::Message）：原始字节、时间戳、来源、长度都是事实。
+//
+// TrafficModel 是**屏幕上能重画的完整事实来源**：监视区里看到的每一行都由它投影而来。
+// 显示设置与过滤条件要能立刻作用于"已经收到的内容"，前提就是原始记录还在——
+// 只留渲染后的字符串是做不到的（这也正是它早先只能"影响新行"的原因）。
+// 导出、记录与关键词搜索同样以它为唯一数据源。
 class TrafficModel : public QObject
 {
     Q_OBJECT
 public:
+    // 历史预算（条数 + 原始字节，先到者为准）。它同时就是"屏幕上能重画的历史"上限
+    // ——监视区是模型的投影，所以这个数直接决定一次重投影要多久：
+    // 实测投影成本约 6.9 µs/条（tests/perf），5 万条 ≈ 350 ms。
+    // UI 文案与测试都以它为准，不要各写一份：改了预算却漏改文案，
+    // 是这种"能力边界"最容易出的错。
+    static constexpr qint64 kByteBudget = 16 * 1024 * 1024;
+    static constexpr int kRowBudget = 50000;
+
     explicit TrafficModel(QObject *parent = nullptr);
     int rowCount() const;
     void replaceRecords(QList<Traffic::Message> records);
@@ -81,6 +92,16 @@ public:
         QStringList excludes;
         bool caseSensitive = false;
         bool regex = false;
+
+        // 面板用它判断"条件是否变了、视图是否还和条件一致"。
+        bool operator==(const Options &other) const
+        {
+            return endpoints == other.endpoints && rx == other.rx && tx == other.tx
+                && states == other.states && warnings == other.warnings && errors == other.errors
+                && keywords == other.keywords && excludes == other.excludes
+                && caseSensitive == other.caseSensitive && regex == other.regex;
+        }
+        bool operator!=(const Options &other) const { return !(*this == other); }
     };
 
     // 预编译后的判定器：正则只编译一次；候选文本按"便宜 → 昂贵"排序并逐项短路，
@@ -126,9 +147,19 @@ signals:
     void summaryChanged(const QString &text);
 private:
     void updateFilter();
-    // 显式回溯：把已收到的记录按当前条件重放一遍（清空 → 从模型重放命中项）。
-    // 只覆盖模型预算内的记录，行号按重建结果从 1 重排。
-    void rebuildView();
+    // 重投影：把当前的过滤条件与显示设置重新作用到**模型缓冲里的全部记录**上。
+    //   clearAll → 从模型重放命中项 → 行号从 1 连续重排。
+    // 这是视图与条件取得一致的唯一入口：增量到达只处理新行，追溯过去必须走这里。
+    void reprojectView(bool announce = true);
+    // 重投影的防抖入口。只由**外观**变化调用（显示设置、编码格式）：一次点击一个
+    // 状态，用户期待切了就变，没道理再让他多点一次。过滤条件不走这里——它由条件条上
+    // 的「应用过滤」按钮显式触发（用户钦定），连续敲字期间不该反复重画几万行。
+    void scheduleReproject();
+    // 「每行长什么样」（编码格式 + 显示设置）是否与上次投影时不同。
+    bool appearanceChanged() const;
+    void markReprojected();
+    // 条件条上「应用过滤」的待办提示：条件改了但还没补到已有记录上，必须说出来。
+    void refreshApplyHint();
     // 过滤条的折叠：收起时只隐藏第二行，条件与记忆状态都不动。
     void setFilterExpanded(bool expanded);
     // 折叠按钮的文字：状态 + 生效条件数，收起时也能一眼看出"当前在过滤"。
@@ -185,12 +216,20 @@ private:
     // 攒批缓冲：appendMessages 先入缓冲，16ms 一拍整批入模。
     QList<Traffic::Message> m_pending;
     QTimer *m_flushTimer = nullptr;
-    // 文本视图按到达时的过滤条件收流：updateFilter 是唯一写入点。
-    // 文本行按到达时格式与开关组合固化，没有"重算全部行"这回事。
+    // 过滤条件的当前值：新到达的行用它判定（增量路径，热路径只做 match）。
     TrafficFilter::Options m_filterOptions;
     // 条件的可执行形态：正则预编译、候选视图按需构造，都发生在 updateFilter 里一次。
     TrafficFilter::Matcher m_matcher;
     TrafficTextView::DisplayOptions m_displayOptions;
+    // 视图一致性签名：最后一次重投影时用的条件、编码格式与显示设置。
+    // 视图是投影，"条件变了"不等于"视图已经跟上"——两者的差就是"待重投影"。
+    // 显示设置与格式一变就必须重投影（用户明确要求：改开关要立刻作用于已有内容），
+    // 过滤条件只决定新行，追溯过去同样靠这一次重投影。
+    TrafficFilter::Options m_projectedOptions;
+    PayloadCodec::Format m_projectedFormat = PayloadCodec::Format::Hex;
+    TrafficTextView::DisplayOptions m_projectedDisplay;
+    bool m_everProjected = false; // 一次投影都没做过时视图是空的，没有"跟不上"这回事
+    QTimer *m_reprojectTimer = nullptr;
     PreferencesStore *m_preferences = nullptr;
     bool m_loading = false; // 加载偏好期间联动触发的保存要抑制，否则半成品状态会覆盖已存值
     QFile *m_logFile = nullptr;   // 打开期间持续追加；关闭开关或析构时收口

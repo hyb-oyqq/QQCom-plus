@@ -63,13 +63,14 @@ FilterBar::FilterBar(QWidget *parent) : QWidget(parent)
 
     row->addWidget(makeDivider(this));
 
-    // 重新过滤：把当前条件应用到**已经收到**的记录上（显式回溯）。
-    // 回溯只覆盖模型预算内的记录，范围写进 tooltip——不做无声的"半回溯"。
-    m_rebuild = new QPushButton(tr("重新过滤"), this);
+    // 应用过滤：把当前条件应用到**已经收到**的全部记录上。增量路径只管新行，
+    // 追溯过去必须走这里——所以它是"改完条件马上看到结果"的唯一显式入口。
+    // 加上「应用」这两个字就是用户对它的描述：为当前所有已到达的数据应用一次。
+    m_rebuild = new QPushButton(tr("应用过滤"), this);
     m_rebuild->setObjectName("filterRebuild");
     m_rebuild->setIcon(mutedIcon(QStringLiteral(":/icons/filter-check-outline.svg"), BarIconSize));
-    m_rebuild->setToolTip(tr("按当前条件重新过滤已收到的记录（只回溯最近保留的 2 万条 / 4 MiB）"));
-    m_rebuild->setEnabled(false); // 还没收到任何记录时没什么可回溯的
+    m_rebuild->setToolTip(tr("把当前过滤条件应用到已经收到的全部记录（缓冲范围内全部，最多 5 万条 / 16 MiB）"));
+    m_rebuild->setEnabled(false); // 还没收到任何记录时没什么可应用的
     connect(m_rebuild, &QPushButton::clicked, this, &FilterBar::rebuildRequested);
     row->addWidget(m_rebuild);
 
@@ -177,6 +178,19 @@ void FilterBar::setRebuildAvailable(bool available)
     if (m_rebuildAvailable == available) return;
     m_rebuildAvailable = available;
     m_rebuild->setEnabled(available);
+}
+
+void FilterBar::setApplyPending(bool pending)
+{
+    // 同 setRebuildAvailable：这是每次入模都会被问到的路径，值没变就直接返回。
+    if (m_applyPending == pending) return;
+    m_applyPending = pending;
+    // 只在按钮文字末尾加一个记号，不改文字本身：按钮的位置与宽度基本不动，
+    // 而"有件事还没做"这件事一眼就能看见。文字长度变化由关键词输入的弹性吸收。
+    m_rebuild->setText(pending ? tr("应用过滤 •") : tr("应用过滤"));
+    m_rebuild->setToolTip(pending
+            ? tr("过滤条件已改，还没作用于已收到的记录。点这里把条件应用到全部已到达的数据")
+            : tr("把当前过滤条件应用到已经收到的全部记录（缓冲范围内全部，最多 5 万条 / 16 MiB）"));
 }
 
 FilterBarState FilterBar::state() const
