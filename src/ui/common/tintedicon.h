@@ -4,8 +4,10 @@
 #include <QColor>
 #include <QHash>
 #include <QIcon>
+#include <QObject>
 #include <QPainter>
 #include <QPixmap>
+#include <QPushButton>
 #include <QSize>
 #include <QString>
 
@@ -61,6 +63,20 @@ inline QIcon tintedIcon(const QString &path, const QColor &color, int size)
     for (const int scale : {1, 2})
         icon.addPixmap(tintedPixmap(path, color, size * scale));
     return icon;
+}
+
+// 勾选型按钮的图标随勾选态换色：未勾选用静音灰，勾选用 QSS 选中态文字色（深琥珀）。
+// 每个勾选按钮都要这三行，抽出来只有一份——"琥珀底上出现灰字"这个错只需要防一次。
+inline void bindToggleIcon(QPushButton *button, const QString &path, int size,
+    const QColor &off = QColor(0x64, 0x75, 0x90), const QColor &on = QColor(0x70, 0x51, 0x1c))
+{
+    const QIcon offIcon = tintedIcon(path, off, size);
+    const QIcon onIcon = tintedIcon(path, on, size);
+    const auto refresh = [button, offIcon, onIcon](bool checked) {
+        button->setIcon(checked ? onIcon : offIcon);
+    };
+    QObject::connect(button, &QPushButton::toggled, button, refresh);
+    refresh(button->isChecked());
 }
 
 #endif

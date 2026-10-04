@@ -8,6 +8,7 @@
 #include "ui/common/tintedicon.h"
 #include "persistence/preferencesstore.h"
 
+#include <QApplication>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFile>
@@ -416,6 +417,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         m_flags->restore(FilterFlagsState());
         updateFilter();
     });
+    connect(m_filterBar, &FilterBar::rebuildRequested, this, &TrafficPanel::rebuildView);
     connect(m_format, &QComboBox::currentIndexChanged, this, [this](int) {
         // 控制台语义：格式切换只影响新到达的行，已固化的文本不重渲染；
         // 但判定器持有格式快照（渲染文本与 HEX 视图都按它构造），必须一并重建。
@@ -778,11 +780,41 @@ void TrafficPanel::refreshFilterToggle()
     m_filterBar->setResetAvailable(m_flags->activeCount() > 0);
 }
 
+void TrafficPanel::rebuildView()
+{
+    // 显式回溯（设计稿 §5 方案 B）：把已经收到的记录按当前条件重放一遍。
+    // 只做这一件事——不新增存储、不改变判定路径，重放的每条消息走的还是
+    // flushPending 用的同一个 Matcher。
+    const int rows = m_model->rowCount();
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QList<Traffic::Message> accepted;
+    accepted.reserve(rows);
+    for (int row = 0; row < rows; ++row) {
+        const auto &message = m_model->record(row);
+        if (m_matcher.accepts(message)) accepted.append(message);
+    }
+    // 行号按重建结果从 1 重新排：清空与重放是同一个动作的两半，中间不能让
+    // 旧行号留在文档里，否则"第 3 行"会指向两条不同的记录。
+    m_text->clearAll();
+    m_text->appendMessages(accepted, currentDisplayFormat(), m_displayOptions);
+    QApplication::restoreOverrideCursor();
+    // 重建之后屏幕上的条数就是摘要该说的条数：会话累计口径在这里失效了，
+    // 因为更早的行已经被这一次重建丢掉（模型之外的历史无法回溯）。
+    m_totalAccepted = static_cast<quint64>(accepted.size());
+    m_filteredOut = static_cast<quint64>(rows - accepted.size());
+    if (m_follow->isChecked()) m_text->scrollToBottom();
+    updateSummary();
+    // 摘要要说明"这是重建结果"，否则用户会以为视图一直是这个样子。
+    reportSummary(tr("重建视图：显示 %1 条（最近 %2 条内匹配）").arg(accepted.size()).arg(rows));
+}
+
 void TrafficPanel::updateSummary()
 {
     // 模型是导出用的结构化存储（有上限），屏幕上的历史在文本视图里（上限高得多），
     // 摘要按"会话累计接收条数"播报，不随任何一方的淘汰缩水。
     const bool filtering = m_flags->activeCount() + m_filterBar->activeConditionCount() > 0;
+    // 有记录才谈得上"重新过滤"：置灰而不是点了没反应。
+    m_filterBar->setRebuildAvailable(m_model->rowCount() > 0);
     if (m_totalAccepted == 0) {
         // 空屏有两种截然不同的成因：没收到，和被条件挡住了。
         // 不说清楚，用户会以为端口没通。

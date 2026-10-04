@@ -126,6 +126,9 @@ signals:
     void summaryChanged(const QString &text);
 private:
     void updateFilter();
+    // 显式回溯：把已收到的记录按当前条件重放一遍（清空 → 从模型重放命中项）。
+    // 只覆盖模型预算内的记录，行号按重建结果从 1 重排。
+    void rebuildView();
     // 过滤条的折叠：收起时只隐藏第二行，条件与记忆状态都不动。
     void setFilterExpanded(bool expanded);
     // 折叠按钮的文字：状态 + 生效条件数，收起时也能一眼看出"当前在过滤"。

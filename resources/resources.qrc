@@ -21,5 +21,8 @@
         <file>icons/alert-circle-outline.svg</file>
         <file>icons/magnify.svg</file>
         <file>icons/minus-circle-outline.svg</file>
+        <file>icons/format-letter-case.svg</file>
+        <file>icons/regex.svg</file>
+        <file>icons/filter-check-outline.svg</file>
     </qresource>
 </RCC>

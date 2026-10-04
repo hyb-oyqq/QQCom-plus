@@ -4,7 +4,6 @@
 #include <QStringList>
 #include <QWidget>
 
-class QAction;
 class QLineEdit;
 class QPushButton;
 
@@ -20,11 +19,11 @@ struct FilterBarState
     QStringList excludes;
 };
 
-// 监视区第二行：过滤条件条（关键词 / 排除词 / 匹配选项 / 重置）。
+// 监视区第二行：过滤条件条（关键词 / 排除词 / 匹配选项 / 重新过滤 / 重置）。
 //
 // 形态约束（用户钦定）：**恒为一行**、宽度铺满、永不换行、不出现横向滚动条；
 // 纵向成本就是一行控件高度，数据区不会被它挤动。因此承载形式是"可直接点选的小按钮"
-// 而不是"标签 + 下拉框"——一条条件加起来的宽度比一个下拉框还窄。
+// 而不是"标签 + 下拉框"——一个布尔条件用一个按钮，比下拉框省一半宽度。
 //
 // 职责边界：这里只做**收集与呈现**条件，一行匹配逻辑都不写；
 // 判定唯一实现在 TrafficFilter::Matcher。
@@ -51,36 +50,42 @@ public:
     // 面板通过这个入口说明"外面还有条件在用"，否则只关掉 RX 时重置按钮会是灰的。
     void setResetAvailable(bool available);
 
+    // 模型里有没有可回溯的记录：没有就没什么可"重新过滤"的，按钮置灰。
+    void setRebuildAvailable(bool available);
+
     // 键盘入口：Ctrl+F 聚焦关键词输入并全选，替换掉原顶栏搜索框的快捷键位。
     void focusKeywords();
 
-    // 空格分隔的词表：去掉空项与重复项，chip 与判定共用同一份解析。
-    static QStringList splitWords(const QString &text);
+    // 逗号分隔的条件表：去空项、去重、逐项 trim。**不用空格分隔**——
+    // HEX 条件本身常含空格（"AA 55"），拿空格当分隔符会把一条条件拆成两条更宽的条件。
+    static QStringList splitConditions(const QString &text);
 
 signals:
     // 任一条件变化即发：调用方据此重建 Matcher 并落盘。
     void changed();
     // 点了重置：本行已自行清空，调用方负责把常驻顶栏的开关一并复位。
     void resetRequested();
+    // 点了重新过滤：把当前条件应用到已经收到的记录上（显式回溯，见设计稿 §5）。
+    void rebuildRequested();
 
 private:
     void notifyChanged();
-    void rebuildKeywordChips();
-    void removeKeyword(const QString &keyword);
     void refreshValidation();
-    void refreshResetState();
+    void refreshReset();
     QLineEdit *makeInput(const QString &iconPath, const QString &placeholder, const QString &tip,
         const QString &objectName);
+    QPushButton *makeOption(const QString &objectName, const QString &iconPath, const QString &text,
+        const QString &tip);
 
     QLineEdit *m_keywords = nullptr;
     QLineEdit *m_excludes = nullptr;
-    QWidget *m_chipHost = nullptr; // 关键词 chip 的容器：紧跟在输入框之后
-    QPushButton *m_more = nullptr;
+    QPushButton *m_case = nullptr;
+    QPushButton *m_regex = nullptr;
+    QPushButton *m_rebuild = nullptr;
     QPushButton *m_reset = nullptr;
-    QAction *m_caseAction = nullptr;
-    QAction *m_regexAction = nullptr;
-    bool m_resetAvailable = false; // 外部（顶栏方向/事件开关）是否还有生效条件
-    bool m_restoring = false;      // 恢复期间抑制 changed
+    bool m_resetAvailable = false;   // 外部（顶栏方向/事件开关）是否还有生效条件
+    bool m_rebuildAvailable = false; // 模型里还有记录可回溯
+    bool m_restoring = false;        // 恢复期间抑制 changed
 };
 
 #endif

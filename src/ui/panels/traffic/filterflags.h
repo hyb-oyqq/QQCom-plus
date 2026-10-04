@@ -41,7 +41,6 @@ signals:
 private:
     QPushButton *makeFlag(const QString &objectName, const QString &iconPath, const QString &text,
         const QString &tip);
-    void applyToggleIcon(QPushButton *button, const QString &iconPath);
 
     QPushButton *m_rx = nullptr;
     QPushButton *m_tx = nullptr;

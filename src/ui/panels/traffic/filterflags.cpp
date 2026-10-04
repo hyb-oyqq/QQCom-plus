@@ -9,10 +9,6 @@ namespace {
 // 与顶栏其余按钮同一套字形尺寸：同一行并排出现，尺寸不一致会一眼看出来。
 constexpr int GlyphSize = 16;
 
-// 浅色表面上未勾选字形的静音灰、勾选后跟随 QSS 选中态文字色的琥珀深色。
-const QColor MutedGlyph(0x64, 0x75, 0x90);
-const QColor ActiveGlyph(0x70, 0x51, 0x1c);
-
 } // namespace
 
 FilterFlags::FilterFlags(QWidget *parent) : QWidget(parent)
@@ -44,24 +40,13 @@ QPushButton *FilterFlags::makeFlag(const QString &objectName, const QString &ico
     button->setCheckable(true);
     button->setChecked(true); // 默认全开：不过滤是这排开关的初始语义
     button->setToolTip(tip);
-    applyToggleIcon(button, iconPath);
+    bindToggleIcon(button, iconPath, GlyphSize);
     // 最后才接 changed：勾选状态在构造期就要定下来，而监听方在控件尚未建完时
     // 读到的是半成品（图标都还没换色）。
     connect(button, &QPushButton::toggled, this, [this] {
         if (!m_restoring) emit changed();
     });
     return button;
-}
-
-void FilterFlags::applyToggleIcon(QPushButton *button, const QString &iconPath)
-{
-    // QPushButton 的图标状态位跟的是"按下"而不是"勾选"，所以勾选换色必须显式做：
-    // 未勾选用静音灰，勾选用 QSS 选中态文字色——琥珀底上不再出现灰字。
-    const QIcon off = tintedIcon(iconPath, MutedGlyph, GlyphSize);
-    const QIcon on = tintedIcon(iconPath, ActiveGlyph, GlyphSize);
-    const auto refresh = [button, off, on](bool checked) { button->setIcon(checked ? on : off); };
-    connect(button, &QPushButton::toggled, this, refresh);
-    refresh(button->isChecked());
 }
 
 FilterFlagsState FilterFlags::state() const

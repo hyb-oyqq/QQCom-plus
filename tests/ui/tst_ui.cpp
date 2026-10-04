@@ -3,6 +3,7 @@
 #include "ui/common/endpointformat.h"
 #include "ui/common/payloadcodec.h"
 #include "ui/panels/sending/sendpanel.h"
+#include "ui/panels/traffic/filterbar.h"
 #include "ui/panels/traffic/trafficpanel.h"
 #include "ui/panels/traffic/traffictextview.h"
 #include "discovery/portdiscoveryservice.h"
@@ -92,6 +93,34 @@ QStringList controlsThatClipContent(QWidget *area)
         }
     }
     return problems;
+}
+
+// A horizontal strip must stay one row at any window width: no wrapping, no scrollbar.
+// Qt never wraps a QHBoxLayout, so the failure mode is overlap or a control pushed past the
+// right edge. Anything in the same vertical band that overlaps horizontally is a failure;
+// controls in different bands (the second row under the toolbar) are compared separately.
+QString overlapInRow(QWidget *container)
+{
+    QList<QWidget *> items;
+    for (auto *child : container->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly))
+        if (child->isVisibleTo(container) && child->width() > 1) items.append(child);
+    std::sort(items.begin(), items.end(),
+        [](QWidget *left, QWidget *right) { return left->x() < right->x(); });
+    for (int i = 1; i < items.size(); ++i) {
+        const auto *previous = items.at(i - 1);
+        const auto *current = items.at(i);
+        const bool sameBand = current->y() < previous->y() + previous->height()
+            && previous->y() < current->y() + current->height();
+        if (sameBand && current->x() < previous->x() + previous->width())
+            return QStringLiteral("%1 压住 %2").arg(previous->objectName(), current->objectName());
+    }
+    for (auto *item : items)
+        if (item->x() + item->width() > container->width())
+            return QStringLiteral("%1 越过右缘（%2 > %3）")
+                       .arg(item->objectName())
+                       .arg(item->x() + item->width())
+                       .arg(container->width());
+    return QString();
 }
 
 } // namespace
@@ -318,8 +347,8 @@ private slots:
         QCOMPARE(hits(options), 3);
     }
 
-    // 形态铁律：过滤条恒为一行（不因条件增多或窗口变窄而换行）、按钮全带字形、
-    // chip 与输入框是同一份数据的两种视图、折叠只隐藏第二行而不清条件。
+    // 形态铁律：条件条恒为一行（不因条件增多或窗口变窄而换行）、每个按钮都带字形、
+    // 匹配选项就摆在条上而不是收进下拉、折叠只隐藏第二行而不清条件。
     void filterBarKeepsToASingleRow()
     {
         clearEndpointDrafts();
@@ -338,45 +367,115 @@ private slots:
             qPrintable(QStringLiteral("过滤条高 %1 超过一行 %2").arg(bar->height()).arg(rowHeight)));
 
         // 条子上的每个按钮都必须带 Material 字形：只有文字说明的按钮在窄宽度下会先被牺牲。
-        const QStringList named{QStringLiteral("filterMore"), QStringLiteral("filterReset")};
+        const QStringList named{QStringLiteral("filterCaseSensitive"), QStringLiteral("filterRegex"),
+            QStringLiteral("filterRebuild"), QStringLiteral("filterReset")};
         for (const auto &name : named) {
             auto *button = bar->findChild<QPushButton *>(name);
             QVERIFY2(button, qPrintable(QStringLiteral("缺按钮：") + name));
             QVERIFY2(!button->icon().isNull(), qPrintable(QStringLiteral("缺字形：") + name));
         }
+        // 匹配选项是条上的按钮，不是下拉列表：既没有菜单，也没有失去"一眼可见"的入口。
+        auto *caseButton = bar->findChild<QPushButton *>(QStringLiteral("filterCaseSensitive"));
+        auto *regexButton = bar->findChild<QPushButton *>(QStringLiteral("filterRegex"));
+        QVERIFY(caseButton->isCheckable() && regexButton->isCheckable());
+        QVERIFY(!caseButton->menu() && !regexButton->menu());
+        QVERIFY(!bar->findChild<QPushButton *>(QStringLiteral("filterMore")));
+        QVERIFY(!window.findChild<QAction *>(QStringLiteral("filterRegex")));
 
-        // chip 只是关键词的可视化：点它等于从输入框文本里删掉那个词，不引入第二份状态。
+        // 关键词不做 chip：输入框本身就是条件唯一的样子，不产生第二份视图；
+        // 输入框也不带清除按钮（✕），"全选重输"比瞄准小叉更快。
         auto *keywords = bar->findChild<QLineEdit *>(QStringLiteral("filterKeywords"));
-        QVERIFY(keywords);
-        keywords->setText(QStringLiteral("心跳 0D0A error"));
-        const auto chips = bar->findChildren<QPushButton *>(QStringLiteral("filterChip"));
-        QCOMPARE(chips.size(), 3);
-        QVERIFY(chips.first()->text().startsWith(QStringLiteral("心跳")));
-        chips.first()->click();
-        QCOMPARE(keywords->text(), QStringLiteral("0D0A error"));
-        QCOMPARE(bar->findChildren<QPushButton *>(QStringLiteral("filterChip")).size(), 2);
+        auto *excludes = bar->findChild<QLineEdit *>(QStringLiteral("filterExcludes"));
+        QVERIFY(keywords && excludes);
+        QVERIFY(!keywords->isClearButtonEnabled() && !excludes->isClearButtonEnabled());
+        keywords->setText(QStringLiteral("心跳, 0D0A ,,心跳"));
+        QVERIFY(bar->findChildren<QPushButton *>(QStringLiteral("filterChip")).isEmpty());
 
-        // 更多条件浮层：勾选型条目只切换勾选、不关闭菜单——与"显示设置"共用同一套交互。
-        auto *more = bar->findChild<QPushButton *>(QStringLiteral("filterMore"));
-        auto *regexAction = window.findChild<QAction *>(QStringLiteral("filterRegex"));
-        QVERIFY(more && regexAction && more->menu());
-        more->menu()->popup(QPoint(0, 0));
-        QVERIFY(QTest::qWaitForWindowExposed(more->menu(), 2000));
-        more->menu()->setActiveAction(regexAction);
-        QTest::keyClick(more->menu(), Qt::Key_Space);
-        QVERIFY(regexAction->isChecked());
-        QVERIFY2(more->menu()->isVisible(), "勾选后浮层不应关闭");
-        QVERIFY(more->text().contains(QStringLiteral("1"))); // 浮层里的条件数写在按钮上
-        more->menu()->close();
-        regexAction->setChecked(false);
+        // 条件是逗号分隔的，且 trim / 去空 / 去重：HEX 条件里的空格因此能原样保留。
+        const auto conditions = FilterBar::splitConditions(QStringLiteral("心跳, AA 55 ,,心跳,error"));
+        QCOMPARE(conditions, QStringList({QStringLiteral("心跳"), QStringLiteral("AA 55"),
+                                   QStringLiteral("error")}));
+        QVERIFY(FilterBar::splitConditions(QString()).isEmpty());
 
         // 折叠只隐藏第二行：条件、判定器与记忆状态一律不动。
         toggle->setChecked(false);
         QVERIFY(!bar->isVisibleTo(&window));
         QVERIFY2(toggle->text().contains(QStringLiteral("▸")), qPrintable(toggle->text()));
-        QCOMPARE(keywords->text(), QStringLiteral("0D0A error"));
+        QCOMPARE(keywords->text(), QStringLiteral("心跳, 0D0A ,,心跳"));
         toggle->setChecked(true);
         QVERIFY(bar->isVisibleTo(&window));
+
+        // 条上加过好几个控件了：最小窗口宽下第二行仍必须一行排得下（不重叠、不越右缘）。
+        window.resize(1120, 660);
+        QTest::qWait(30);
+        const auto problem = overlapInRow(bar);
+        QVERIFY2(problem.isEmpty(), qPrintable(problem));
+    }
+
+    // "重新过滤"：把当前条件应用到**已经收到**的记录上（显式回溯）。
+    // 到达时判定是控制台语义，改条件不会动旧行；这个按钮是唯一的显式回溯入口，
+    // 因此它必须真的重放、必须重排行号、必须自己说清"只回溯模型保留范围"。
+    void rebuildAppliesConditionsToExistingRecords()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr); // 条件不落盘，避免污染共享配置
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *bar = window.findChild<QWidget *>(QStringLiteral("filterBar"));
+        auto *rebuild = window.findChild<QPushButton *>(QStringLiteral("filterRebuild"));
+        QVERIFY(text && model && bar && rebuild);
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+        // 还没收到任何记录时无从回溯，按钮应该是灰的。
+        QVERIFY(!rebuild->isEnabled());
+
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        QList<Traffic::Message> batch;
+        for (int i = 0; i < 6; ++i) {
+            Traffic::Message message;
+            message.id = i + 1;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = Traffic::Direction::Receive;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = (i % 2 == 0) ? QByteArray("心跳 ok") : QByteArray("temp 25");
+            message.rawLength = message.raw.size();
+            batch.append(message);
+        }
+        // 先按"只收心跳"到达：半数被挡在屏幕之外。
+        auto *keywords = bar->findChild<QLineEdit *>(QStringLiteral("filterKeywords"));
+        keywords->setText(QStringLiteral("心跳"));
+        panel->appendMessages(batch);
+        QTRY_COMPARE(model->rowCount(), 6);
+        QTRY_COMPARE(text->document()->blockCount(), 3); // 三条心跳
+        QVERIFY(rebuild->isEnabled());
+
+        // 放宽条件后旧行不会自己回来（控制台语义），屏幕上仍是 3 条。
+        keywords->setText(QStringLiteral("心跳,temp"));
+        QCOMPARE(text->document()->blockCount(), 3);
+
+        // 点"重新过滤"才把新条件应用到已有记录：六条全中，行号从 1 连续重排。
+        rebuild->click();
+        QTRY_COMPARE(text->document()->blockCount(), 6);
+        QVERIFY2(text->document()->firstBlock().text().startsWith(QStringLiteral("1 ")),
+            qPrintable(text->document()->firstBlock().text()));
+        QVERIFY2(text->document()->lastBlock().text().startsWith(QStringLiteral("6 ")),
+            qPrintable(text->document()->lastBlock().text()));
+
+        // 反向也成立：条件收窄后旧行同样要等这个按钮才消失。
+        keywords->setText(QStringLiteral("temp"));
+        QCOMPARE(text->document()->blockCount(), 6);
+        rebuild->click();
+        QTRY_COMPARE(text->document()->blockCount(), 3);
+        for (const auto &block : text->document()->toPlainText().split(QLatin1Char('\n')))
+            QVERIFY(!block.isEmpty());
     }
 
     // 方向与事件开关常驻顶栏（用户钦定）：它们**不在**可折叠的条件条里——
@@ -439,32 +538,14 @@ private slots:
         QTest::qWait(30);
         QWidget *row = flags->parentWidget();
         QVERIFY(row);
-        // 顶栏一行从左到右的全部元素（顺序由下面的排序得出，不写死）。
-        // 变量名别用 slots：Qt 把它定义成了宏，声明会被吃掉。
-        QList<QWidget *> rowWidgets;
         for (const auto &name : {QStringLiteral("showPortA"), QStringLiteral("showPortB"),
                  QStringLiteral("trafficFormat"), QStringLiteral("filterToggle"),
                  QStringLiteral("filterFlags"), QStringLiteral("displaySettings"),
                  QStringLiteral("exportTraffic"), QStringLiteral("followTraffic"),
-                 QStringLiteral("clearTraffic")}) {
-            auto *widget = row->findChild<QWidget *>(name);
-            QVERIFY2(widget, qPrintable(QStringLiteral("缺顶栏元素：") + name));
-            rowWidgets.append(widget);
-        }
-        std::sort(rowWidgets.begin(), rowWidgets.end(),
-            [](QWidget *left, QWidget *right) { return left->x() < right->x(); });
-        for (int i = 1; i < rowWidgets.size(); ++i) {
-            const auto *previous = rowWidgets.at(i - 1);
-            const auto *current = rowWidgets.at(i);
-            QVERIFY2(current->x() >= previous->x() + previous->width(),
-                qPrintable(QStringLiteral("顶栏重叠：%1 压住 %2")
-                               .arg(previous->objectName(), current->objectName())));
-        }
-        QVERIFY2(rowWidgets.last()->x() + rowWidgets.last()->width() <= row->width(),
-            qPrintable(QStringLiteral("顶栏右端被切掉：%1 + %2 > %3")
-                           .arg(rowWidgets.last()->x())
-                           .arg(rowWidgets.last()->width())
-                           .arg(row->width())));
+                 QStringLiteral("clearTraffic")})
+            QVERIFY2(row->findChild<QWidget *>(name), qPrintable(QStringLiteral("缺顶栏元素：") + name));
+        const auto crowded = overlapInRow(row);
+        QVERIFY2(crowded.isEmpty(), qPrintable(crowded));
     }
 
     void messagesCarryStructuredFacts()
