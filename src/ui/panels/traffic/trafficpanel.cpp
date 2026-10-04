@@ -1,5 +1,6 @@
 #include "trafficpanel.h"
 #include "filterbar.h"
+#include "filterflags.h"
 #include "traffictextview.h"
 #include "ui/common/combometrics.h"
 #include "ui/common/endpointformat.h"
@@ -295,7 +296,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     fitComboToItems(m_format);
     top->addWidget(m_format);
 
-    // 过滤入口：顶栏只留这一个折叠按钮，位置就是原搜索框的位置——
+    // 过滤入口：顶栏的折叠按钮，位置就是原搜索框的位置——
     // 关键词输入已并入过滤条第 1 格，同一个"高频快捷位"不重复放两个输入框。
     m_filterToggle = new QPushButton(tr("过滤"), this);
     m_filterToggle->setObjectName("filterToggle");
@@ -305,6 +306,12 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_filterToggle->setToolTip(tr("展开 / 收起过滤条件条（Ctrl+Shift+F）；Ctrl+F 直接聚焦关键词"));
     connect(m_filterToggle, &QPushButton::toggled, this, &TrafficPanel::setFilterExpanded);
     top->addWidget(m_filterToggle);
+
+    // 方向与事件开关就住在折叠按钮旁边（用户钦定）：它们**不进可折叠的第二行**，
+    // 这样条件条收起来时这排开关仍在原位。图标 + 两字文案，不需要悬停就能读懂。
+    m_flags = new FilterFlags(this);
+    top->addWidget(m_flags);
+
     // 顶栏剩下的按钮仍留在原来的视觉位置（右端）：中间的空档留给过滤条上的条件。
     top->addStretch(1);
 
@@ -359,6 +366,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     top->addWidget(settings);
 
     auto *exportButton = new QPushButton(tr("导出"));
+    exportButton->setObjectName("exportTraffic");
     top->addWidget(exportButton);
 
     m_follow = new QPushButton(tr("滚动到底"));
@@ -401,6 +409,13 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     layout->addWidget(m_stack, 1);
 
     connect(m_filterBar, &FilterBar::changed, this, &TrafficPanel::updateFilter);
+    connect(m_flags, &FilterFlags::changed, this, &TrafficPanel::updateFilter);
+    // 重置要把常驻顶栏的方向/事件开关一并复位：条件分散在两个控件里，
+    // "回到不过滤"必须是整套动作，否则会留下半套条件。
+    connect(m_filterBar, &FilterBar::resetRequested, this, [this] {
+        m_flags->restore(FilterFlagsState());
+        updateFilter();
+    });
     connect(m_format, &QComboBox::currentIndexChanged, this, [this](int) {
         // 控制台语义：格式切换只影响新到达的行，已固化的文本不重渲染；
         // 但判定器持有格式快照（渲染文本与 HEX 视图都按它构造），必须一并重建。
@@ -619,13 +634,15 @@ void TrafficPanel::loadPreferences()
         m_format->setCurrentText(format);
     // 过滤条件：filter/* 是现在的键，旧版 traffic/rx|tx|errors 作为兜底——
     // 上一版把方向开关放在显示设置里，升级后不该让用户的开关状态凭空复位。
-    FilterBarState filter;
-    filter.rx = m_preferences->value("filter/rx", m_preferences->value("traffic/rx", true)).toBool();
-    filter.tx = m_preferences->value("filter/tx", m_preferences->value("traffic/tx", true)).toBool();
-    filter.states = m_preferences->value("filter/states", true).toBool();
+    FilterFlagsState flags;
+    flags.rx = m_preferences->value("filter/rx", m_preferences->value("traffic/rx", true)).toBool();
+    flags.tx = m_preferences->value("filter/tx", m_preferences->value("traffic/tx", true)).toBool();
+    flags.states = m_preferences->value("filter/states", true).toBool();
     const auto legacyEvents = m_preferences->value("traffic/errors", true);
-    filter.warnings = m_preferences->value("filter/warnings", legacyEvents).toBool();
-    filter.errors = m_preferences->value("filter/errors", legacyEvents).toBool();
+    flags.warnings = m_preferences->value("filter/warnings", legacyEvents).toBool();
+    flags.errors = m_preferences->value("filter/errors", legacyEvents).toBool();
+    m_flags->restore(flags);
+    FilterBarState filter;
     filter.caseSensitive = m_preferences->value("filter/caseSensitive", false).toBool();
     filter.regex = m_preferences->value("filter/regex", false).toBool();
     filter.keywords = m_preferences->value("filter/keywords").toStringList();
@@ -659,14 +676,16 @@ void TrafficPanel::loadPreferences()
 void TrafficPanel::savePreferences()
 {
     if (!m_preferences || m_loading) return;
-    // 过滤条件整组落盘：条件条是唯一写入点，这里只做搬运。
+    // 过滤条件分散在两个控件里：顶栏的常驻开关 + 条件条的内容条件。
+    // 两者都只是"收集条件"，落盘时一并搬运。
+    const auto flags = m_flags->state();
     const auto filter = m_filterBar->state();
     m_preferences->setValue("filter/expanded", m_filterExpanded);
-    m_preferences->setValue("filter/rx", filter.rx);
-    m_preferences->setValue("filter/tx", filter.tx);
-    m_preferences->setValue("filter/states", filter.states);
-    m_preferences->setValue("filter/warnings", filter.warnings);
-    m_preferences->setValue("filter/errors", filter.errors);
+    m_preferences->setValue("filter/rx", flags.rx);
+    m_preferences->setValue("filter/tx", flags.tx);
+    m_preferences->setValue("filter/states", flags.states);
+    m_preferences->setValue("filter/warnings", flags.warnings);
+    m_preferences->setValue("filter/errors", flags.errors);
     m_preferences->setValue("filter/caseSensitive", filter.caseSensitive);
     m_preferences->setValue("filter/regex", filter.regex);
     m_preferences->setValue("filter/keywords", filter.keywords);
@@ -703,16 +722,18 @@ void TrafficPanel::updatePortVisibility()
 
 void TrafficPanel::updateFilter()
 {
-    // 条件只有两个来源：顶栏的端点范围，和过滤条。两者都只是"收集条件"，
-    // 判定在 Matcher 一处。端点不重复设条件——A/B 按钮就是端点维度本身（设计稿 §3.1）。
+    // 条件只有三个来源：顶栏的端点范围、顶栏的方向/事件开关、第二行的条件条。
+    // 三者都只是"收集条件"，判定在 Matcher 一处。端点不重复设条件——
+    // A/B 按钮就是端点维度本身（设计稿 §3.1）。
+    const auto flags = m_flags->state();
     const auto filter = m_filterBar->state();
     TrafficFilter::Options options;
     options.endpoints = m_visibleEndpoints;
-    options.rx = filter.rx;
-    options.tx = filter.tx;
-    options.states = filter.states;
-    options.warnings = filter.warnings;
-    options.errors = filter.errors;
+    options.rx = flags.rx;
+    options.tx = flags.tx;
+    options.states = flags.states;
+    options.warnings = flags.warnings;
+    options.errors = flags.errors;
     options.keywords = filter.keywords;
     options.excludes = filter.excludes;
     options.caseSensitive = filter.caseSensitive;
@@ -737,8 +758,8 @@ void TrafficPanel::updateFilter()
 void TrafficPanel::setFilterExpanded(bool expanded)
 {
     m_filterExpanded = expanded;
-    // 收起只隐藏第二行：条件、判定器、记忆状态一律不动——
-    // "折叠"是显示行为，不是"关闭过滤"。
+    // 收起只隐藏第二行（内容条件）：判定器、记忆状态一律不动——
+    // "折叠"是显示行为，不是"关闭过滤"；顶栏的方向/事件开关也不受影响。
     m_filterBar->setVisible(expanded);
     refreshFilterToggle();
     savePreferences();
@@ -746,23 +767,27 @@ void TrafficPanel::setFilterExpanded(bool expanded)
 
 void TrafficPanel::refreshFilterToggle()
 {
-    const int active = m_filterBar->activeConditionCount();
+    // 生效条件数是两处的合计：常驻顶栏的开关 + 条件条的内容条件。
+    // 只统计条件条会漏掉"只关掉 RX"这种最常见的情形。
+    const int active = m_flags->activeCount() + m_filterBar->activeConditionCount();
     const QString caret = m_filterExpanded ? QStringLiteral("▾") : QStringLiteral("▸");
-    // 生效条件数写在按钮上：条子收起时，这个数字是"当前在过滤"的唯一出口。
+    // 生效条件数写在按钮上：条子收起时，这个数字是"内容条件里还有几条在用"的唯一出口。
     m_filterToggle->setText(active > 0 ? tr("过滤 · %1 %2").arg(active).arg(caret)
                                       : tr("过滤 %1").arg(caret));
+    // 重置必须能清掉整组条件，因此它关心的也是这个合计数。
+    m_filterBar->setResetAvailable(m_flags->activeCount() > 0);
 }
 
 void TrafficPanel::updateSummary()
 {
     // 模型是导出用的结构化存储（有上限），屏幕上的历史在文本视图里（上限高得多），
     // 摘要按"会话累计接收条数"播报，不随任何一方的淘汰缩水。
-    const bool filtering = m_filterBar->activeConditionCount() > 0;
+    const bool filtering = m_flags->activeCount() + m_filterBar->activeConditionCount() > 0;
     if (m_totalAccepted == 0) {
         // 空屏有两种截然不同的成因：没收到，和被条件挡住了。
         // 不说清楚，用户会以为端口没通。
         m_empty->setText(filtering && m_filteredOut > 0
-                ? tr("当前过滤条件下没有匹配记录\n\n已挡住 %1 条，调整或清除上方过滤条即可看到它们。")
+                ? tr("当前过滤条件下没有匹配记录\n\n已挡住 %1 条，调整上方的过滤条件即可看到它们。")
                       .arg(m_filteredOut)
                 : tr("等待接收数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。"));
     }

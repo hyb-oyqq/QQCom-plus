@@ -10,6 +10,7 @@ SOURCES += \
     $$PWD/panels/traffic/trafficpanel.cpp \
     $$PWD/panels/traffic/traffictextview.cpp \
     $$PWD/panels/traffic/filterbar.cpp \
+    $$PWD/panels/traffic/filterflags.cpp \
     $$PWD/panels/sending/sendpanel.cpp \
     $$PWD/panels/routing/routeeditorwidget.cpp \
     $$PWD/common/endpointformat.cpp
@@ -23,5 +24,6 @@ HEADERS += \
     $$PWD/panels/traffic/trafficpanel.h \
     $$PWD/panels/traffic/traffictextview.h \
     $$PWD/panels/traffic/filterbar.h \
+    $$PWD/panels/traffic/filterflags.h \
     $$PWD/panels/sending/sendpanel.h \
     $$PWD/panels/routing/routeeditorwidget.h

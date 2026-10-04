@@ -13,6 +13,7 @@
 #include <QWidget>
 
 class FilterBar;
+class FilterFlags;
 class QAction;
 class QComboBox;
 class QFile;
@@ -150,8 +151,10 @@ private:
     TrafficTextView *m_text = nullptr; // 唯一显示视图：JCom 式文本框逐行追加
     QLabel *m_empty = nullptr;
     QComboBox *m_format;
-    // 过滤入口：顶栏只留一个折叠按钮（原搜索框的位置），条件本身在第二行的过滤条上。
+    // 过滤入口：顶栏的折叠按钮（原搜索框的位置）+ 紧挨着它的方向/事件开关。
+    // 开关常驻顶栏（不进可折叠的第二行）：调频次高于关键词，收起条件条时也要能点。
     QPushButton *m_filterToggle;
+    FilterFlags *m_flags;
     FilterBar *m_filterBar;
     // 折叠状态用显式标志而不是 isVisible()：窗口整体隐藏时 isVisible() 恒为假，
     // 记忆状态会跟着被读错。
@@ -160,7 +163,7 @@ private:
     QPushButton *m_portAButton;
     QPushButton *m_portBButton;
     // 行内容开关：全部在到达时生效（控制台语义），纯数据模式下被忽略。
-    // 方向与事件开关不在其中——它们管的是"哪些行进来"，已迁到过滤条（见 §7.4）。
+    // 方向与事件开关不在其中——它们管的是"哪些行进来"，已迁到顶栏（见 §7.4）。
     QAction *m_numberAction;    // 行号（会话内绝对计数）
     QAction *m_timestampAction;
     QAction *m_directionAction;

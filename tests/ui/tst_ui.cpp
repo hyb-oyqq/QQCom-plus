@@ -37,6 +37,8 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <algorithm>
+
 namespace {
 
 // Every control in the port settings area must be able to paint its own content. The advanced
@@ -335,10 +337,8 @@ private slots:
         QVERIFY2(bar->height() <= rowHeight + 12,
             qPrintable(QStringLiteral("过滤条高 %1 超过一行 %2").arg(bar->height()).arg(rowHeight)));
 
-        // 每个按钮都必须带 Material 字形：只有文字说明的按钮在窄宽度下会先被牺牲。
-        const QStringList named{QStringLiteral("filterRx"), QStringLiteral("filterTx"),
-            QStringLiteral("filterState"), QStringLiteral("filterWarning"), QStringLiteral("filterError"),
-            QStringLiteral("filterMore"), QStringLiteral("filterReset")};
+        // 条子上的每个按钮都必须带 Material 字形：只有文字说明的按钮在窄宽度下会先被牺牲。
+        const QStringList named{QStringLiteral("filterMore"), QStringLiteral("filterReset")};
         for (const auto &name : named) {
             auto *button = bar->findChild<QPushButton *>(name);
             QVERIFY2(button, qPrintable(QStringLiteral("缺按钮：") + name));
@@ -377,6 +377,94 @@ private slots:
         QCOMPARE(keywords->text(), QStringLiteral("0D0A error"));
         toggle->setChecked(true);
         QVERIFY(bar->isVisibleTo(&window));
+    }
+
+    // 方向与事件开关常驻顶栏（用户钦定）：它们**不在**可折叠的条件条里——
+    // 条件条收起来时这排开关仍在原位，而且每个都是"图标 + 文案"，
+    // 不必悬停才知道这排按钮在做什么。代价压在顶栏这一行的宽度上，所以末尾还要量尺寸。
+    void filterFlagsStayOnTopRow()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        auto *flags = window.findChild<QWidget *>(QStringLiteral("filterFlags"));
+        auto *bar = window.findChild<QWidget *>(QStringLiteral("filterBar"));
+        auto *toggle = window.findChild<QPushButton *>(QStringLiteral("filterToggle"));
+        QVERIFY(flags && bar && toggle);
+
+        const QStringList named{QStringLiteral("filterRx"), QStringLiteral("filterTx"),
+            QStringLiteral("filterState"), QStringLiteral("filterWarning"), QStringLiteral("filterError")};
+        for (const auto &name : named) {
+            auto *button = flags->findChild<QPushButton *>(name);
+            QVERIFY2(button, qPrintable(QStringLiteral("缺开关：") + name));
+            QVERIFY2(!button->icon().isNull(), qPrintable(QStringLiteral("缺字形：") + name));
+            QVERIFY2(!button->text().isEmpty(), qPrintable(QStringLiteral("缺文案：") + name));
+            // 同一个开关不能既在顶栏又在条件条里：条件分散在两个控件之间，
+            // "重置一次清干净"全靠这条边界清楚。
+            QVERIFY2(!bar->findChild<QPushButton *>(name),
+                qPrintable(QStringLiteral("开关不应出现在条件条里：") + name));
+        }
+
+        // 收起条件条后这排开关照旧可见——它们只管"哪些行进来"，不属于被折叠的内容条件。
+        toggle->setChecked(false);
+        QVERIFY(!bar->isVisibleTo(&window));
+        for (const auto &name : named)
+            QVERIFY2(flags->findChild<QPushButton *>(name)->isVisibleTo(&window),
+                qPrintable(QStringLiteral("折叠后开关应仍可见：") + name));
+        toggle->setChecked(true);
+
+        // "过滤 · N" 是两处的合计：只关掉 RX（条件条里一条内容条件都没有）也必须算进去。
+        auto *rx = flags->findChild<QPushButton *>(QStringLiteral("filterRx"));
+        // 只关掉 RX 时重置按钮必须是亮的，否则那半套条件没有回到默认的入口。
+        auto *reset = bar->findChild<QPushButton *>(QStringLiteral("filterReset"));
+        QVERIFY(reset && !reset->isEnabled());
+        rx->setChecked(false);
+        QVERIFY2(toggle->text().contains(QStringLiteral("· 1")), qPrintable(toggle->text()));
+        QVERIFY(reset->isEnabled());
+        // 重置一次清干净：顶栏开关与条件条内容条件一起回到不过滤。
+        bar->findChild<QLineEdit *>(QStringLiteral("filterKeywords"))->setText(QStringLiteral("心跳"));
+        QVERIFY(toggle->text().contains(QStringLiteral("· 2")));
+        reset->click();
+        QVERIFY(rx->isChecked());
+        QVERIFY(bar->findChild<QLineEdit *>(QStringLiteral("filterKeywords"))->text().isEmpty());
+        QVERIFY2(toggle->text().contains(QStringLiteral("过滤 ")), qPrintable(toggle->text()));
+
+        // 顶栏必须排得下：开关常驻的代价就是这一行的宽度。窗口最小宽 1120，
+        // 一行放不下的表现是控件重叠或右端控件被切掉，两种都要挡住。
+        window.resize(1120, 660);
+        QTest::qWait(30);
+        QWidget *row = flags->parentWidget();
+        QVERIFY(row);
+        // 顶栏一行从左到右的全部元素（顺序由下面的排序得出，不写死）。
+        // 变量名别用 slots：Qt 把它定义成了宏，声明会被吃掉。
+        QList<QWidget *> rowWidgets;
+        for (const auto &name : {QStringLiteral("showPortA"), QStringLiteral("showPortB"),
+                 QStringLiteral("trafficFormat"), QStringLiteral("filterToggle"),
+                 QStringLiteral("filterFlags"), QStringLiteral("displaySettings"),
+                 QStringLiteral("exportTraffic"), QStringLiteral("followTraffic"),
+                 QStringLiteral("clearTraffic")}) {
+            auto *widget = row->findChild<QWidget *>(name);
+            QVERIFY2(widget, qPrintable(QStringLiteral("缺顶栏元素：") + name));
+            rowWidgets.append(widget);
+        }
+        std::sort(rowWidgets.begin(), rowWidgets.end(),
+            [](QWidget *left, QWidget *right) { return left->x() < right->x(); });
+        for (int i = 1; i < rowWidgets.size(); ++i) {
+            const auto *previous = rowWidgets.at(i - 1);
+            const auto *current = rowWidgets.at(i);
+            QVERIFY2(current->x() >= previous->x() + previous->width(),
+                qPrintable(QStringLiteral("顶栏重叠：%1 压住 %2")
+                               .arg(previous->objectName(), current->objectName())));
+        }
+        QVERIFY2(rowWidgets.last()->x() + rowWidgets.last()->width() <= row->width(),
+            qPrintable(QStringLiteral("顶栏右端被切掉：%1 + %2 > %3")
+                           .arg(rowWidgets.last()->x())
+                           .arg(rowWidgets.last()->width())
+                           .arg(row->width())));
     }
 
     void messagesCarryStructuredFacts()

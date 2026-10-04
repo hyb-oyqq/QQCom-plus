@@ -86,3 +86,7 @@ QFrame#FilterDivider { color: #d9e0ea; max-width: 1px; }
 QPushButton#filterChip { background: #e8eefb; border-color: #b6c7e8; color: #1c3d8f; padding: 3px 9px; }
 QPushButton#filterChip:hover { background: #dbe5f9; border-color: #6d87b8; color: #14326f; }
 QLabel#filterChipOverflow { color: #5c6880; }
+/* 常驻顶栏的方向 / 事件开关：图标 + 两字文案。左右内边距比通用按钮收紧 3px，
+   五个按钮合计省下约 30px——它们是这一行里唯一"可以再挤一点"的元素。 */
+QPushButton#filterRx, QPushButton#filterTx, QPushButton#filterState,
+QPushButton#filterWarning, QPushButton#filterError { padding: 4px 8px; }
