@@ -158,34 +158,18 @@ int TrafficModel::appendRecords(QList<Traffic::Message> records)
     return drop;
 }
 
-TrafficFilter::TextCondition::TextCondition(const QString &expression, bool regex, Qt::CaseSensitivity sensitivity)
-    : m_sensitivity(sensitivity)
+TrafficFilter::TextCondition::TextCondition(const QString &literal, Qt::CaseSensitivity sensitivity)
+    : m_literal(literal.trimmed()), m_sensitivity(sensitivity)
 {
-    const auto trimmed = expression.trimmed();
-    if (trimmed.isEmpty()) return;
-    if (!regex) {
-        m_literal = trimmed;
-        return;
-    }
-    // 预编译一次，热路径只 match()。表达式无效则该条件不参与判定（isEmpty 为真，
-    // Matcher 会把它丢掉），由条件条标红提示——退化的方向必须是"不过滤"：
-    // 宁可多显示，也绝不因为写错一个括号把整屏数据静默吞掉。
-    QRegularExpression pattern(trimmed);
-    pattern.setPatternOptions(sensitivity == Qt::CaseSensitive ? QRegularExpression::NoPatternOption
-                                                              : QRegularExpression::CaseInsensitiveOption);
-    if (!pattern.isValid()) return;
-    m_pattern = pattern;
-    m_regex = true;
 }
 
 bool TrafficFilter::TextCondition::isEmpty() const
 {
-    return !m_regex && m_literal.isEmpty();
+    return m_literal.isEmpty();
 }
 
 bool TrafficFilter::TextCondition::matches(const QString &text) const
 {
-    if (m_regex) return m_pattern.match(text).hasMatch();
     return !m_literal.isEmpty() && text.contains(m_literal, m_sensitivity);
 }
 
@@ -195,11 +179,11 @@ TrafficFilter::Matcher::Matcher(const Options &options, PayloadCodec::Format for
     // 条件的解释只在这里发生一次：词表 → 预编译条件，热路径不再碰字符串表。
     const auto sensitivity = options.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
     for (const auto &keyword : options.keywords) {
-        TextCondition condition(keyword, options.regex, sensitivity);
+        TextCondition condition(keyword, sensitivity);
         if (!condition.isEmpty()) m_keywords.append(condition);
     }
     for (const auto &exclude : options.excludes) {
-        TextCondition condition(exclude, options.regex, sensitivity);
+        TextCondition condition(exclude, sensitivity);
         if (!condition.isEmpty()) m_excludes.append(condition);
     }
 }
@@ -823,7 +807,6 @@ void TrafficPanel::loadPreferences()
     m_flags->restore(flags);
     FilterBarState filter;
     filter.caseSensitive = m_preferences->value("filter/caseSensitive", false).toBool();
-    filter.regex = m_preferences->value("filter/regex", false).toBool();
     filter.keywords = m_preferences->value("filter/keywords").toStringList();
     filter.excludes = m_preferences->value("filter/excludes").toStringList();
     m_filterBar->restore(filter);
@@ -872,7 +855,6 @@ void TrafficPanel::savePreferences()
     m_preferences->setValue("filter/warnings", flags.warnings);
     m_preferences->setValue("filter/errors", flags.errors);
     m_preferences->setValue("filter/caseSensitive", filter.caseSensitive);
-    m_preferences->setValue("filter/regex", filter.regex);
     m_preferences->setValue("filter/keywords", filter.keywords);
     m_preferences->setValue("filter/excludes", filter.excludes);
     m_preferences->setValue("traffic/format", m_format->currentText());
@@ -922,7 +904,6 @@ void TrafficPanel::updateFilter()
     options.keywords = filter.keywords;
     options.excludes = filter.excludes;
     options.caseSensitive = filter.caseSensitive;
-    options.regex = filter.regex;
     // 文本视图的到达时过滤用这一份条件的快照；写入点只有这里。
     m_filterOptions = options;
     // 条件的可执行形态在这里构造一次：正则预编译、格式快照一并定下。

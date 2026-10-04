@@ -5,7 +5,6 @@
 #include <QHBoxLayout>
 #include <QLineEdit>
 #include <QPushButton>
-#include <QRegularExpression>
 #include <QStyle>
 
 namespace {
@@ -50,16 +49,11 @@ FilterBar::FilterBar(QWidget *parent) : QWidget(parent)
 
     row->addWidget(makeDivider(this));
 
-    // 匹配选项就摆在条上（用户钦定：不做下拉列表）。两个布尔条件 = 两个按钮，
-    // 比"更多 ▾ + 浮层"少一次点击，也让"当前是不是在按正则匹配"一眼可见。
+    // 匹配选项：区分大小写。
     m_case = makeOption(QStringLiteral("filterCaseSensitive"),
         QStringLiteral(":/icons/format-letter-case.svg"), tr("区分大小写"),
         tr("关键词与排除词区分大小写"));
-    m_regex = makeOption(QStringLiteral("filterRegex"), QStringLiteral(":/icons/regex.svg"),
-        tr("正则表达式"),
-        tr("关键词与排除词按正则解释；表达式无效时该条件不参与过滤"));
     row->addWidget(m_case);
-    row->addWidget(m_regex);
 
     row->addWidget(makeDivider(this));
 
@@ -138,25 +132,7 @@ QStringList FilterBar::splitConditions(const QString &text)
 
 void FilterBar::refreshValidation()
 {
-    // 非法正则不静默失败：输入框标红并给出原因；判定侧同时把这条条件丢掉，
-    // 退化的方向是"不过滤"——宁可多显示，绝不因为写错一个括号吞掉整屏数据。
-    QString problem;
-    if (m_regex->isChecked()) {
-        for (const auto &condition : splitConditions(m_keywords->text())) {
-            const QRegularExpression pattern(condition);
-            if (!pattern.isValid()) {
-                problem = pattern.errorString();
-                break;
-            }
-        }
-    }
-    m_keywords->setProperty("invalid", !problem.isEmpty());
-    m_keywords->setToolTip(problem.isEmpty()
-            ? tr("关键词：逗号分隔多个条件，命中任一即显示。例：心跳,AA 55,error")
-            : tr("正则无效（该条件不参与过滤）：%1").arg(problem));
-    // 动态属性变化必须重新求值 QSS，否则红框不会出现。
-    m_keywords->style()->unpolish(m_keywords);
-    m_keywords->style()->polish(m_keywords);
+    // 验证逻辑已移除：不再支持正则表达式
 }
 
 void FilterBar::refreshReset()
@@ -197,7 +173,6 @@ FilterBarState FilterBar::state() const
 {
     FilterBarState state;
     state.caseSensitive = m_case->isChecked();
-    state.regex = m_regex->isChecked();
     state.keywords = splitConditions(m_keywords->text());
     state.excludes = splitConditions(m_excludes->text());
     return state;
@@ -210,7 +185,6 @@ int FilterBar::activeConditionCount() const
     if (!current.keywords.isEmpty()) ++count;
     if (!current.excludes.isEmpty()) ++count;
     if (current.caseSensitive) ++count;
-    if (current.regex) ++count;
     return count;
 }
 
@@ -219,7 +193,6 @@ void FilterBar::restore(const FilterBarState &state)
     // 恢复期间抑制 changed：半成品状态会触发落盘，把已存的值覆盖掉。
     m_restoring = true;
     m_case->setChecked(state.caseSensitive);
-    m_regex->setChecked(state.regex);
     m_keywords->setText(state.keywords.join(QStringLiteral(", ")));
     m_excludes->setText(state.excludes.join(QStringLiteral(", ")));
     m_restoring = false;

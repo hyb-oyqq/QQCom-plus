@@ -14,7 +14,6 @@ class QPushButton;
 struct FilterBarState
 {
     bool caseSensitive = false;
-    bool regex = false;
     QStringList keywords;
     QStringList excludes;
 };
@@ -36,7 +35,7 @@ public:
     // 条件快照：与 TrafficFilter::Options 的同名内容条件一一对应。
     FilterBarState state() const;
 
-    // 本行生效的内容条件个数（关键词 / 排除词 / 大小写 / 正则）。
+    // 本行生效的内容条件个数（关键词 / 排除词 / 大小写）。
     // 方向与事件开关常驻顶栏，由面板把它们的计数并进来（见 setResetAvailable）。
     int activeConditionCount() const;
 
@@ -84,7 +83,6 @@ private:
     QLineEdit *m_keywords = nullptr;
     QLineEdit *m_excludes = nullptr;
     QPushButton *m_case = nullptr;
-    QPushButton *m_regex = nullptr;
     QPushButton *m_rebuild = nullptr;
     QPushButton *m_reset = nullptr;
     bool m_resetAvailable = false;   // 外部（顶栏方向/事件开关）是否还有生效条件

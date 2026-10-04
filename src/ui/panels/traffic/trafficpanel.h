@@ -8,7 +8,6 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QObject>
-#include <QRegularExpression>
 #include <QSet>
 #include <QStringList>
 #include <QWidget>
@@ -77,21 +76,17 @@ class TrafficFilter
 public:
     // 一条内容条件（关键词或排除词）。正则模式下构造时预编译一次，热路径只 match()。
     // 非法正则**不进判定**（该条件被丢弃，由条件条标红提示）：退化的方向必须是"不过滤"，
-    // 宁可多显示，也绝不因为写错一个括号把整屏数据静默吞掉。
+    // 文本条件：只支持字面匹配（大小写敏感/不敏感）。
     class TextCondition
     {
     public:
         TextCondition() = default;
-        TextCondition(const QString &expression, bool regex, Qt::CaseSensitivity sensitivity);
+        TextCondition(const QString &literal, Qt::CaseSensitivity sensitivity);
         bool matches(const QString &text) const;
         bool isEmpty() const;
     private:
         QString m_literal;
-        QRegularExpression m_pattern;
         Qt::CaseSensitivity m_sensitivity = Qt::CaseInsensitive;
-        // 必须显式记"这条是正则"：默认构造的 QRegularExpression 是**有效且匹配一切**的，
-        // 用它当"是否正则"的判据，字面条件会全部退化成匹配所有文本。
-        bool m_regex = false;
     };
 
     struct Options
@@ -107,7 +102,6 @@ public:
         QStringList keywords;
         QStringList excludes;
         bool caseSensitive = false;
-        bool regex = false;
 
         // 面板用它判断"条件是否变了、视图是否还和条件一致"。
         bool operator==(const Options &other) const
@@ -115,7 +109,7 @@ public:
             return endpoints == other.endpoints && rx == other.rx && tx == other.tx
                 && states == other.states && warnings == other.warnings && errors == other.errors
                 && keywords == other.keywords && excludes == other.excludes
-                && caseSensitive == other.caseSensitive && regex == other.regex;
+                && caseSensitive == other.caseSensitive;
         }
         bool operator!=(const Options &other) const { return !(*this == other); }
     };
