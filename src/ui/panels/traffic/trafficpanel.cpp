@@ -643,8 +643,18 @@ void TrafficPanel::flushPending()
     // 挡住多少条必须单独计数：屏幕上"什么都没有"和"被条件挡掉了"是两个完全
     // 不同的事实，只有这个数字能把它们分开。
     m_filteredOut += static_cast<quint64>(batch.size() - accepted.size());
+    // 增量追加期间也需要临时断开滚动条信号：appendMessages 的 endEditBlock 会触发
+    // 滚动条重算，如果内容较多或渲染有延迟，position < maximum() 时会误触发自动取消
+    // 跟随。断开信号 → 追加 → 手动滚动（如果跟随），避免中间状态干扰用户的跟随设置。
+    auto *scroll = m_text->verticalScrollBar();
+    const bool follow = m_follow->isChecked();
+    disconnect(scroll, &QScrollBar::valueChanged, this, nullptr);
     m_text->appendMessages(accepted, format, m_displayOptions);
-    if (m_follow->isChecked()) m_text->scrollToBottom();
+    connect(scroll, &QScrollBar::valueChanged, this, [this](int position) {
+        if (!m_reprojectPending && position < m_text->verticalScrollBar()->maximum())
+            m_follow->setChecked(false);
+    });
+    if (follow) m_text->scrollToBottom();
     m_lastBatchWorkMs = qMax(m_lastBatchWorkMs, work.elapsed());
     updateSummary();
 }
@@ -1032,8 +1042,11 @@ void TrafficPanel::reprojectView(bool announce, bool applyCurrentConditions)
     m_text->clearAll();
     m_text->appendMessages(accepted, currentDisplayFormat(), m_displayOptions);
     // 重新连接滚动条信号：向上翻阅时自动取消跟随。
+    // 必须保持与初始连接相同的逻辑（带 m_reprojectPending 检查），否则重投影后
+    // 数据继续到达时会误触发自动取消跟随。
     connect(scroll, &QScrollBar::valueChanged, this, [this](int position) {
-        if (position < m_text->verticalScrollBar()->maximum()) m_follow->setChecked(false);
+        if (!m_reprojectPending && position < m_text->verticalScrollBar()->maximum())
+            m_follow->setChecked(false);
     });
 
     if (showWait) QApplication::restoreOverrideCursor();
