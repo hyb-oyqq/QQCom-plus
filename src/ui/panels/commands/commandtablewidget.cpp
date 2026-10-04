@@ -242,6 +242,8 @@ CommandItem CommandTableWidget::commandFromRow(int row) const
 
 void CommandTableWidget::addCommand()
 {
+    if (!m_table) return;
+
     CommandItem newCmd;
     newCmd.content = tr("+CR,TEST;");
     newCmd.description = tr("测试指令");

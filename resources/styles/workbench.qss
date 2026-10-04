@@ -89,3 +89,65 @@ QPushButton#filterRx, QPushButton#filterTx, QPushButton#filterState,
 QPushButton#filterWarning, QPushButton#filterError,
 QPushButton#filterCaseSensitive, QPushButton#filterRegex,
 QPushButton#filterRebuild { padding: 4px 8px; }
+
+/* 指令面板样式 */
+CommandPanel { background: #ffffff; border-left: 1px solid #c8d1e0; }
+CommandPanel QTableWidget {
+    background: #ffffff;
+    border: 1px solid #c8d1e0;
+    border-radius: 5px;
+    gridline-color: #e4eaf4;
+}
+CommandPanel QTableWidget::item {
+    padding: 4px;
+    color: #182334;
+}
+CommandPanel QTableWidget::item:selected {
+    background: #d3e0fa;
+    color: #14326f;
+}
+CommandPanel QHeaderView::section {
+    background: #f4f6fa;
+    border: none;
+    border-right: 1px solid #e4eaf4;
+    border-bottom: 1px solid #c8d1e0;
+    padding: 6px 4px;
+    font-weight: 600;
+    color: #5c6880;
+}
+CommandPanel QPushButton#primaryButton {
+    background: #1d4ed8;
+    border-color: #1a45c0;
+    color: #ffffff;
+    font-weight: 600;
+}
+CommandPanel QPushButton#primaryButton:hover {
+    background: #163fb3;
+    border-color: #163fb3;
+}
+CommandPanel QTabWidget::pane {
+    background: #ffffff;
+    border: 1px solid #c8d1e0;
+    border-radius: 5px;
+    top: -1px;
+}
+CommandPanel QTabBar::tab {
+    background: #f4f6fa;
+    border: 1px solid #c8d1e0;
+    border-bottom: none;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+    padding: 6px 12px;
+    margin-right: 2px;
+    color: #5c6880;
+}
+CommandPanel QTabBar::tab:selected {
+    background: #ffffff;
+    color: #1d4ed8;
+    font-weight: 600;
+    border-bottom: 2px solid #1d4ed8;
+}
+CommandPanel QTabBar::tab:hover:!selected {
+    background: #e8eefb;
+    color: #14326f;
+}
