@@ -445,6 +445,8 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         // 里命中的条件会随格式移动命中行。也不播报"已按当前条件重投影"那句（会撒谎）。
         if (appearanceChanged())
             reprojectView(/*announce=*/false, /*applyCurrentConditions=*/false);
+        else
+            m_reprojectPending = false; // 外观已恢复，无需重投影，清除保护标志
     });
     // 文本视图是唯一显示视图：每条消息按行号、时间、方向起头，载荷按文本本来的
     // 样子展开。模型只做结构化存储（导出/记录/搜索），不再驱动任何逐帧绘制。
@@ -531,11 +533,15 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         if (follow) m_text->scrollToBottom();
         savePreferences();
     });
-    // 任何形式的向上翻阅（拖动、滚轮、翻页）都解除“滚动到底”。
+    // 任何形式的向上翻阅（拖动、滚轮、翻页）都解除”滚动到底”。
     // 视图自己改滚动范围时不算翻阅，否则每次追加都会把跟随关掉；
     // 追加后立刻钉回底部，不会误触发。
+    // 重投影防抖期间（m_reprojectPending 为真）也不取消：切换编码后的 50ms 内
+    // 数据继续到达、appendMessages 触发 valueChanged，但此时用户并未主动翻阅，
+    // 不应清除跟随状态——否则重投影完成后不会自动滚动到底部。
     connect(m_text->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int position) {
-        if (position < m_text->verticalScrollBar()->maximum()) m_follow->setChecked(false);
+        if (!m_reprojectPending && position < m_text->verticalScrollBar()->maximum())
+            m_follow->setChecked(false);
     });
     updateSummary();
     // 文本视图按到达时的过滤条件收流，条件在这里做第一次汇聚；
@@ -1039,6 +1045,7 @@ void TrafficPanel::reprojectView(bool announce, bool applyCurrentConditions)
     // conditionsApplied：这次到底有没有"让视图跟上当前条件"。外观路径走已应用条件 → false，
     // 未应用的条件必须仍被判为待应用；回退用当前条件的那次（还没投影过）算真，因为确实用上了。
     markReprojected(applyCurrentConditions || !useAppliedConditions);
+    m_reprojectPending = false; // 重投影完成，恢复正常的滚动交互（向上翻阅自动取消跟随）
     if (follow) m_text->scrollToBottom();
     else if (scrollFraction > 0.0)
         scroll->setValue(qRound(scrollFraction * scroll->maximum()));
@@ -1060,6 +1067,7 @@ void TrafficPanel::scheduleReproject()
         return;
     }
     if (!appearanceChanged()) return; // 外观没变，没什么要重排的
+    m_reprojectPending = true; // 标记进入重投影防抖期间，保护 follow 状态
     m_reprojectTimer->start();
 }
 
