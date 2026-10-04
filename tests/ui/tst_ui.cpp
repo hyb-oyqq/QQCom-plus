@@ -18,11 +18,13 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QLineEdit>
 #include <QLabel>
 #include <QMenu>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
@@ -30,10 +32,13 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
+#include <QStatusBar>
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QStyleOptionSpinBox>
 #include <QTabWidget>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTextBlock>
 #include <QTextFragment>
 #include <QToolButton>
@@ -134,6 +139,12 @@ QColor lastFragmentColor(const QTextBlock &block)
         color = it.fragment().charFormat().foreground().color();
     return color;
 }
+
+// 外观（编码格式 / 显示设置）改动会经防抖（trafficpanel.cpp 的 ReprojectDebounceMs = 50ms）
+// 排队一次**设计上必然发生**的重投影：断言前必须显式等掉它，不能把用例建立在
+// "它恰好还没触发"这种时序运气上（那正是这两条用例此前 flaky 的根因）。
+// 90 = 50ms 防抖窗口 + 40ms 余量。
+constexpr int AppearanceReprojectWaitMs = 90;
 
 } // namespace
 
@@ -990,20 +1001,22 @@ private slots:
     // 历史上限必须同时限字节和条数。只限字节时，串口遥测那种几十字节的小帧
     // 能把条数堆到十几万，每条 Message 的元数据（时间、来源、三个 QUuid、
     // 两个 QString）远大于它那点载荷——"限了字节"不等于"限了内存"。
-    // 断言用 TrafficModel::kRowBudget 而不是写死数字：预算本身就是被测对象，
-    // 写死的话改预算时这条用例会以"失败"而不是"过时"的面目出现。
+    // 默认预算是**安全阀**（512 MiB / 2000 万条，正常压测碰不到），用例要验的是
+    // 淘汰机制本身，所以显式把预算压小——被测对象从"那个数字"变成"这套语义"。
     void historyBudgetAlsoLimitsRowCount()
     {
         TrafficModel model;
+        const int rowBudget = 5000;
+        model.setBudget(64LL * 1024 * 1024, rowBudget);
         Traffic::Message tiny;
         tiny.direction = Traffic::Direction::Receive;
         tiny.source.endpointIndex = 0;
         tiny.source.endpointKind = PortDraft::Serial;
         tiny.source.endpointId = QUuid::createUuid();
-        tiny.raw = QByteArray::fromHex("0102"); // 2 字节：16 MiB 字节预算能装八百万条
+        tiny.raw = QByteArray::fromHex("0102"); // 2 字节：64 MiB 字节预算能装三千万条
         tiny.rawLength = tiny.raw.size();
 
-        const int rounds = TrafficModel::kRowBudget / 1000 + 10;
+        const int rounds = rowBudget / 1000 + 10;
         quint64 id = 1;
         for (int round = 0; round < rounds; ++round) {
             QList<Traffic::Message> batch;
@@ -1015,10 +1028,10 @@ private slots:
             }
             model.appendRecords(batch);
         }
-        QCOMPARE(model.rowCount(), TrafficModel::kRowBudget);
+        QCOMPARE(model.rowCount(), rowBudget);
         // 淘汰只从最旧一端发生：最新的一定在，最旧的恰好被挤掉。
         QCOMPARE(model.record(model.rowCount() - 1).id, id - 1);
-        QCOMPARE(model.record(0).id, id - TrafficModel::kRowBudget);
+        QCOMPARE(model.record(0).id, id - rowBudget);
     }
 
     void displayPreferencesPersistAcrossPanels()
@@ -1059,17 +1072,29 @@ private slots:
     {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
-        const auto logPath = directory.filePath(QStringLiteral("traffic.log"));
+        // 用户选定的是"模板路径"：实际文件名每次带时间戳另起，模板本身不写。
+        const auto templatePath = directory.filePath(QStringLiteral("traffic.log"));
         PreferencesStore store(nullptr, directory.filePath(QStringLiteral("preferences.ini")));
         // 预置路径：记录开关开启时若无路径会弹文件对话框，注入路径绕开交互。
-        store.setValue(QStringLiteral("traffic/recordPath"), logPath);
+        store.setValue(QStringLiteral("traffic/recordPath"), templatePath);
         TrafficPanel panel;
         panel.setPreferences(&store);
         auto *record = panel.findChild<QAction *>(QStringLiteral("recordTraffic"));
         auto *format = panel.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
         QVERIFY(record && format);
         QCOMPARE(format->currentText(), QStringLiteral("HEX"));
+
+        // 本次实际写入的文件 = 模板基名 + 时间戳 + 扩展名，落在同一目录。
+        const auto currentLogFile = [&directory]() -> QString {
+            const auto names = QDir(directory.path()).entryList(
+                {QStringLiteral("traffic-*.log")}, QDir::Files);
+            return names.isEmpty() ? QString() : QDir(directory.path()).filePath(names.first());
+        };
+
         record->setChecked(true);
+        const auto logPath = currentLogFile();
+        QVERIFY2(!logPath.isEmpty(), "开启记录后应生成本次带时间戳的日志文件");
+        QVERIFY(logPath != templatePath); // 绝不覆盖/复用模板路径本身
 
         Traffic::Message rx;
         rx.direction = Traffic::Direction::Receive;
@@ -1093,14 +1118,17 @@ private slots:
         QFile log(logPath);
         QVERIFY(log.open(QIODevice::ReadOnly | QIODevice::Text));
         const auto hexLines = QString::fromUtf8(log.readAll()).trimmed().split(QLatin1Char('\n'));
-        QCOMPARE(hexLines.size(), 2);
-        QVERIFY(hexLines.at(0).contains(QStringLiteral("A · 串口")));
-        QVERIFY(hexLines.at(0).contains(QStringLiteral("RX")));
-        QVERIFY(hexLines.at(0).endsWith(QStringLiteral("01 02"))); // HEX 模式记 HEX
-        QVERIFY(hexLines.at(1).endsWith(QStringLiteral("FF")));
+        // 首行是新建文件的元信息头：日期时间 + 当前显示格式；其次才是数据行。
+        QCOMPARE(hexLines.size(), 3);
+        QVERIFY2(hexLines.at(0).startsWith(QStringLiteral("# easyDebug")), qPrintable(hexLines.at(0)));
+        QVERIFY(hexLines.at(0).contains(QStringLiteral("格式=HEX")));
+        QVERIFY(hexLines.at(1).contains(QStringLiteral("A · 串口")));
+        QVERIFY(hexLines.at(1).contains(QStringLiteral("RX")));
+        QVERIFY(hexLines.at(1).endsWith(QStringLiteral("01 02"))); // HEX 模式记 HEX
+        QVERIFY(hexLines.at(2).endsWith(QStringLiteral("FF")));
         log.close();
 
-        // 切换显示格式后新行跟随新模式：所见即所记。
+        // 切换显示格式后新行跟随新模式：所见即所记；并追加一行"格式切换"元信息。
         format->setCurrentText(QStringLiteral("UTF-8"));
         Traffic::Message text;
         text.direction = Traffic::Direction::Receive;
@@ -1112,8 +1140,210 @@ private slots:
         QTRY_COMPARE(model->rowCount(), 3);
         QVERIFY(log.open(QIODevice::ReadOnly | QIODevice::Text));
         const auto all = QString::fromUtf8(log.readAll()).trimmed().split(QLatin1Char('\n'));
-        QCOMPARE(all.size(), 3);
-        QVERIFY(all.at(2).endsWith(QStringLiteral("ok")));
+        // 头 + 2 数据 + 格式切换行 + 1 数据 = 5 行
+        QCOMPARE(all.size(), 5);
+        QVERIFY(all.at(3).contains(QStringLiteral("格式切换")));
+        QVERIFY(all.at(3).contains(QStringLiteral("UTF-8")));
+        QVERIFY(all.at(4).endsWith(QStringLiteral("ok")));
+    }
+
+    // 三时刻重开：① 启动恢复记录、② 点「清空」、③ 手动勾选「记录到文件」——每次都
+    // 新起一个带时间戳的文件，**绝不覆盖、绝不追加到旧文件**。这条用例用 QTemporaryDir
+    // 预置偏好绕开文件对话框，独立验收整条语义（工程师改过的 logRecordingFollowsDisplayFormat
+    // 只覆盖了"开启记录后跟随显示格式"这一条路径）。
+    void logRecordingReopensOnSessionBoundaries()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        // 模板路径 = 用户选定的"目录 + 基名 + 扩展名"，它自身不是任何一次记录的目标。
+        // 事先写入垃圾内容：任何一次记录都不许改写或追加到这个文件。
+        const auto templatePath = directory.filePath(QStringLiteral("traffic.log"));
+        const QByteArray seed("SEED-MUST-NOT-BE-TOUCHED\n");
+        {
+            QFile file(templatePath);
+            QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
+            QCOMPARE(file.write(seed), qint64(seed.size()));
+        }
+
+        PreferencesStore store(nullptr, directory.filePath(QStringLiteral("preferences.ini")));
+        store.setValue(QStringLiteral("traffic/recordPath"), templatePath);
+        // record=true → 第一时刻：启动恢复记录，直接开新文件、不弹对话框。
+        store.setValue(QStringLiteral("traffic/record"), true);
+
+        TrafficPanel panel;
+        panel.setPreferences(&store);
+        auto *record = panel.findChild<QAction *>(QStringLiteral("recordTraffic"));
+        auto *format = panel.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
+        auto *clear = panel.findChild<QPushButton *>(QStringLiteral("clearTraffic"));
+        auto *model = panel.findChild<TrafficModel *>();
+        QVERIFY(record && format && clear && model);
+        QCOMPARE(record->isChecked(), true); // 启动恢复：记录开关勾上
+
+        // 目录里本次记录产生的全部文件（traffic-<stamp>[-n].log），按名字排序便于比对。
+        const auto logFiles = [&directory]() {
+            return QDir(directory.path()).entryList(
+                {QStringLiteral("traffic-*.log")}, QDir::Files, QDir::Name);
+        };
+        // 当前正在写的文件：从「记录到文件」的 tooltip 精确读出，比 glob 更不易误判。
+        const auto currentLogPath = [&directory, record]() -> QString {
+            const QString marker = QStringLiteral("正在写 ");
+            const int at = record->toolTip().indexOf(marker);
+            if (at < 0) return QString();
+            return QDir(directory.path()).filePath(record->toolTip().mid(at + marker.size()).trimmed());
+        };
+        const auto readLines = [](const QString &path) {
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return QStringList();
+            QStringList lines = QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'));
+            while (!lines.isEmpty() && lines.last().isEmpty()) lines.removeLast();
+            return lines;
+        };
+
+        // ---- C1：启动恢复记录 → 实际文件是 traffic-<stamp>.log；模板不被改写/追加 ----
+        const QString firstLog = currentLogPath();
+        QVERIFY2(!firstLog.isEmpty(), "启动恢复记录后应已有正在写入的日志文件");
+        QVERIFY(firstLog != templatePath);
+        QVERIFY(QFileInfo(firstLog).fileName().startsWith(QStringLiteral("traffic-")));
+        QVERIFY(QFileInfo(firstLog).fileName().endsWith(QStringLiteral(".log")));
+        {
+            QFile file(templatePath);
+            // 写时是 Text 模式（Windows 下 '\n'→"\r\n"），读回也要 Text 模式才能还原，
+            // 否则比的是行尾差异而不是"内容有没有被改写"。
+            QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+            QCOMPARE(file.readAll(), seed); // 模板内容原样：它只提供目录+基名+扩展名
+        }
+
+        // ---- C2：新文件首行是元信息头 # easyDebug ... 格式=... ----
+        QStringList lines = readLines(firstLog);
+        QVERIFY(!lines.isEmpty());
+        QVERIFY2(lines.at(0).startsWith(QStringLiteral("# easyDebug ")), qPrintable(lines.at(0)));
+        QVERIFY2(lines.at(0).contains(QStringLiteral("格式=")), qPrintable(lines.at(0)));
+
+        // ---- C3：记录若干条 → 数据行数正确、每行 4 个制表符、且没有额外的 # 行 ----
+        Traffic::Message rx;
+        rx.direction = Traffic::Direction::Receive;
+        rx.source.endpointIndex = 0;
+        rx.source.endpointKind = PortDraft::Serial;
+        rx.source.endpointId = QUuid::createUuid();
+        rx.raw = QByteArray::fromHex("0102");
+        rx.rawLength = rx.raw.size();
+        Traffic::Message tx = rx;
+        tx.direction = Traffic::Direction::Transmit;
+        tx.source.endpointIndex = 1;
+        tx.source.endpointKind = PortDraft::TcpServer;
+        tx.source.endpointId = QUuid::createUuid();
+        tx.raw = QByteArray::fromHex("FF");
+        tx.rawLength = tx.raw.size();
+        panel.appendMessages({rx, tx});
+        QTRY_COMPARE(model->rowCount(), 2); // 攒批落地即已写日志
+
+        lines = readLines(firstLog);
+        QCOMPARE(lines.size(), 3); // 头 + 2 数据
+        int dataLines = 0;
+        int metaLines = 0;
+        for (const auto &line : lines) {
+            if (line.startsWith(QLatin1Char('#'))) {
+                ++metaLines;
+                continue;
+            }
+            ++dataLines;
+            QCOMPARE(line.count(QLatin1Char('\t')), 4); // 时间\t端点\t对端\t方向\t载荷
+        }
+        QCOMPARE(dataLines, 2);
+        QCOMPARE(metaLines, 1); // 记录消息本身不产生 # 行
+
+        // ---- C4：点「清空视图」是会话边界 → 另起一个文件，从头写、开关保持勾选 ----
+        QCOMPARE(logFiles().size(), 1);
+        clear->click();
+        QCOMPARE(record->isChecked(), true); // 清的是屏幕，记录任务保持勾选
+        QCOMPARE(logFiles().size(), 2);      // 换新文件；旧文件原样留在磁盘上
+        const QString secondLog = currentLogPath();
+        QVERIFY(!secondLog.isEmpty());
+        QVERIFY(secondLog != firstLog);
+        // 同秒撞名按约定退到 -2。用时间戳是否相同决定断言哪一支，避免跨秒抖动。
+        const QString firstBase = QFileInfo(firstLog).completeBaseName();
+        const QString secondBase = QFileInfo(secondLog).completeBaseName();
+        if (secondBase == firstBase)
+            QVERIFY2(secondBase == firstBase + QStringLiteral("-2"), qPrintable(secondBase));
+        else
+            QVERIFY(secondBase.startsWith(QStringLiteral("traffic-"))); // 跨秒：新时间戳
+        const QStringList secondLines = readLines(secondLog);
+        QCOMPARE(secondLines.size(), 1); // 只有头行，清空前的 2 条数据不在其中
+        QVERIFY2(secondLines.at(0).startsWith(QStringLiteral("# easyDebug ")), qPrintable(secondLines.at(0)));
+
+        // ---- C5：切换显示格式 → 当前文件追加一行 # 格式切换 → ... ----
+        format->setCurrentText(QStringLiteral("UTF-8"));
+        const QStringList afterSwitch = readLines(secondLog);
+        QCOMPARE(afterSwitch.size(), 2); // 头 + 格式切换
+        QVERIFY2(afterSwitch.last().startsWith(QStringLiteral("# 格式切换 → ")), qPrintable(afterSwitch.last()));
+        QVERIFY(afterSwitch.last().contains(QStringLiteral("UTF-8")));
+
+        // ================= D：独立反证（不重跑工程师走过的路径） =================
+        // D②：同一秒内重开撞名 → 基名-stamp-2.后缀，而不是覆盖。系统时钟无法冻结，
+        // 于是把"未来若干秒的基础名"全部用占位文件预先占住：无论触发落在哪一秒，代码
+        // 都必须避开已存在的同名文件、退到 -2；且占位文件一个都不许被覆盖。
+        {
+            QTemporaryDir dir2;
+            QVERIFY(dir2.isValid());
+            const auto template2 = dir2.filePath(QStringLiteral("traffic.log"));
+            PreferencesStore store2(nullptr, dir2.filePath(QStringLiteral("preferences.ini")));
+            store2.setValue(QStringLiteral("traffic/recordPath"), template2);
+            TrafficPanel panel2;
+            panel2.setPreferences(&store2); // record 默认 false：此刻不应有文件
+            auto *record2 = panel2.findChild<QAction *>(QStringLiteral("recordTraffic"));
+            QVERIFY(record2);
+            QVERIFY2(record2->toolTip().indexOf(QStringLiteral("正在写 ")) < 0,
+                     "未开启记录时不应声称正在写文件");
+
+            const QDateTime now = QDateTime::currentDateTime();
+            QList<QString> decoys;
+            for (int s = 0; s < 12; ++s) {
+                const QString stamp = now.addSecs(s).toString(QStringLiteral("yyyyMMdd-HHmmss"));
+                const QString path = QDir(dir2.path()).filePath(QStringLiteral("traffic-%1.log").arg(stamp));
+                QFile decoy(path);
+                QVERIFY(decoy.open(QIODevice::WriteOnly | QIODevice::Text));
+                decoy.write("DECOY");
+                decoy.close();
+                decoys.append(path);
+            }
+            record2->setChecked(true); // 第三时刻：手动开启记录，m_logPath 非空 → 不弹对话框
+            const QString tip = record2->toolTip();
+            const int at = tip.indexOf(QStringLiteral("正在写 "));
+            QVERIFY2(at >= 0, "开启记录后 tooltip 应显示正在写的文件");
+            const QString produced = tip.mid(at + QStringLiteral("正在写 ").size()).trimmed();
+            QVERIFY2(produced.endsWith(QStringLiteral("-2.log")), qPrintable(produced));
+            QVERIFY(produced.startsWith(QStringLiteral("traffic-")));
+            // 每个占位文件都原封不动：撞名走"改名"，不是"覆盖"。
+            for (const auto &path : decoys) {
+                QFile decoy(path);
+                QVERIFY(decoy.open(QIODevice::ReadOnly | QIODevice::Text));
+                QCOMPARE(decoy.readAll(), QByteArray("DECOY"));
+            }
+        }
+
+        // D③：关闭记录开关后再清空视图 → 不产生新文件（记录任务已结束）。
+        {
+            QTemporaryDir dir3;
+            QVERIFY(dir3.isValid());
+            const auto template3 = dir3.filePath(QStringLiteral("traffic.log"));
+            PreferencesStore store3(nullptr, dir3.filePath(QStringLiteral("preferences.ini")));
+            store3.setValue(QStringLiteral("traffic/recordPath"), template3);
+            store3.setValue(QStringLiteral("traffic/record"), true);
+            TrafficPanel panel3;
+            panel3.setPreferences(&store3);
+            auto *record3 = panel3.findChild<QAction *>(QStringLiteral("recordTraffic"));
+            auto *clear3 = panel3.findChild<QPushButton *>(QStringLiteral("clearTraffic"));
+            QVERIFY(record3 && clear3);
+            QCOMPARE(record3->isChecked(), true);
+            const auto countFiles = [&dir3]() {
+                return QDir(dir3.path()).entryList({QStringLiteral("traffic-*.log")}, QDir::Files).size();
+            };
+            QCOMPARE(countFiles(), 1); // 启动恢复记录：已有一个文件
+            record3->setChecked(false); // 关闭记录 → 文件收口
+            clear3->click();            // 清空视图：记录已关，不应再开新文件
+            QCOMPARE(record3->isChecked(), false);
+            QCOMPARE(countFiles(), 1); // 文件数不变
+        }
     }
 
     void portControlsShowTheirOwnContent()
@@ -1148,9 +1378,178 @@ private slots:
         }
     }
 
-    // A（串口）与 B（TCP 服务器）的参数列必须落在同一条竖线上：主字段右缘一致，
-    // 尾部标签右缘一致、尾部字段左缘与宽度一致。原先各页的尾部组宽窄不同
-    // （波特率 vs 监听端口）且串口页多一个尾部 stretch，行间看着参差。
+    // 端口打开失败（用户点连接的同步失败）必须主动可见（用户报"无法打开/冲突没有弹窗、
+    // 也没有日志提示"）：① 监视区出现 Error 行，正文带端点标识 + 失败原因；② 非模态弹窗
+    // （模态会独占 GUI 线程，自动化测试也会被卡死），标题带端点名、正文带原因；③ 同一
+    // 端点同类错误 3 秒内只弹一次；④ 记录期间状态栏摘要出现当前日志大小，关掉后消失。
+    // 打开失败用 TCP 服务器监听一个已被占用的端口制造：listen() 同步失败、立即返回，
+    // 不依赖网络栈对"无人监听端口"的延迟（本机对被拒绝连接可能要有秒级 SYN 重试）。
+    void portOpenFailureSurfacesErrorRowAndNonModalPopup()
+    {
+        clearEndpointDrafts();
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        PreferencesStore store(nullptr, directory.filePath(QStringLiteral("preferences.ini")));
+        const auto templatePath = directory.filePath(QStringLiteral("traffic.log"));
+        store.setValue(QStringLiteral("traffic/recordPath"), templatePath);
+        store.setValue(QStringLiteral("traffic/record"), true);
+
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *status = window.findChild<QLabel *>(QStringLiteral("TrafficStatus"));
+        auto *record = window.findChild<QAction *>(QStringLiteral("recordTraffic"));
+        QVERIFY(panel && text && model && status && record);
+        panel->setPreferences(&store); // 把日志落到临时目录，验证"日志里查得到原因"
+        QVERIFY(record->isChecked());
+
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(b);
+        QTcpServer blocker; // 占住端口的"另一个进程"：保持监听，直到本用例结束
+        QVERIFY(blocker.listen(QHostAddress::LocalHost, 0));
+        const quint16 conflictPort = blocker.serverPort();
+        b->findChild<QSpinBox *>(QStringLiteral("server.port"))->setValue(conflictPort);
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(action);
+
+        const auto errorRows = [model] {
+            int count = 0;
+            for (int i = 0; i < model->rowCount(); ++i)
+                if (model->record(i).direction == Traffic::Direction::Error) ++count;
+            return count;
+        };
+
+        action->click(); // 监听一个已被占用的端口 → listen() 同步失败
+        QTRY_VERIFY2(text->toPlainText().contains(QStringLiteral("监听")),
+            qPrintable(text->toPlainText()));
+        QVERIFY2(text->toPlainText().contains(QStringLiteral("失败")),
+            qPrintable(text->toPlainText()));
+        QVERIFY2(text->toPlainText().contains(QStringLiteral("B · TCP 服务器")),
+            qPrintable(QStringLiteral("Error 行应带端点标识：") + text->toPlainText()));
+        QCOMPARE(errorRows(), 1);
+
+        // 非模态弹窗：标题带端点名、正文带原因；点掉自毁。
+        QMessageBox *notice = nullptr;
+        QTRY_VERIFY((notice = window.findChild<QMessageBox *>()) != nullptr);
+        QVERIFY(!notice->isModal());
+        QVERIFY(notice->windowModality() == Qt::NonModal);
+        QVERIFY2(notice->windowTitle().contains(QStringLiteral("B · TCP")),
+            qPrintable(notice->windowTitle()));
+        QVERIFY2(notice->text().contains(QStringLiteral("监听")), qPrintable(notice->text()));
+        notice->close();
+        delete notice; // 立刻收掉，别让去重窗口（3s）在等待 deleteLater 期间白白流逝
+        QTRY_VERIFY(window.findChildren<QMessageBox *>().isEmpty()); // WA_DeleteOnClose 生效
+
+        // 状态栏短消息同样带端点标识。
+        QVERIFY2(window.statusBar()->currentMessage().contains(QStringLiteral("B · TCP")),
+            qPrintable(window.statusBar()->currentMessage()));
+
+        // 防轰炸：3 秒内同端点同类错误再失败一次，不再弹新窗。
+        action->click();
+        QTRY_COMPARE(errorRows(), 2);
+        QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
+
+        // 日志大小：记录中出现在状态栏摘要里；关掉记录后不再出现。
+        QTRY_VERIFY2(status->text().contains(QStringLiteral("日志 ")), qPrintable(status->text()));
+        record->setChecked(false);
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        Traffic::Message rx;
+        rx.id = 9001;
+        rx.timestamp = QDateTime::currentDateTime();
+        rx.direction = Traffic::Direction::Receive;
+        rx.source.endpointId = endpointId;
+        rx.source.endpointIndex = 0;
+        rx.source.endpointKind = PortDraft::Serial;
+        rx.raw = QByteArray("OK");
+        rx.rawLength = 2;
+        panel->appendMessage(rx);
+        QTRY_VERIFY2(!status->text().contains(QStringLiteral("日志 ")), qPrintable(status->text()));
+    }
+
+    // 运行中异常断开（TCP 对端 abort）→ Error 行 + 状态栏播报一句，**不弹窗**
+    // （长压测中断开/重连风暴会把弹窗叠成轰炸）。用 localhost TCP Server：easyDebug
+    // 监听、脚本/QTcpSocket 连上、先发一字节确认已接受，再 abort 掉。
+    // 用户主动停止是正常迁移，走 State 行，同样不弹窗。
+    void runtimeDisconnectReportsErrorRowWithoutPopup()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        QVERIFY(text);
+        // 换行/正文断言依赖文本渲染：显式切 UTF-8，不依赖共享配置残留。
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(b); // 默认 TCP 服务器
+        QTcpServer probe;
+        QVERIFY(probe.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = probe.serverPort();
+        probe.close();
+        b->findChild<QSpinBox *>(QStringLiteral("server.port"))->setValue(port);
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QCOMPARE(action->text(), QStringLiteral("监听"));
+
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("停止"));
+
+        QTcpSocket client;
+        client.connectToHost(QHostAddress::LocalHost, port);
+        QTRY_COMPARE(client.state(), QAbstractSocket::ConnectedState);
+        client.write("ping");
+        QTRY_COMPARE(client.bytesToWrite(), qint64(0));
+        // 先确认 easyDebug 已接受并收到了这条数据，再 abort——否则连接还没从 backlog
+        // 接进来，断开事件无 peer 可挂。
+        QTRY_VERIFY2(text->toPlainText().contains(QStringLiteral("ping")),
+            qPrintable(text->toPlainText()));
+
+        client.abort(); // 模拟对端异常掉线
+        QTRY_VERIFY2(text->toPlainText().contains(QStringLiteral("已断开")),
+            qPrintable(text->toPlainText()));
+        QVERIFY2(text->toPlainText().contains(QStringLiteral("B · TCP 服务器")),
+            qPrintable(QStringLiteral("Error 行应带端点标识：") + text->toPlainText()));
+        QTRY_VERIFY2(window.statusBar()->currentMessage().contains(QStringLiteral("连接异常断开")),
+            qPrintable(window.statusBar()->currentMessage()));
+        QVERIFY2(window.statusBar()->currentMessage().contains(QStringLiteral("B · TCP")),
+            qPrintable(window.statusBar()->currentMessage()));
+        // 运行中异常断开不弹窗（与"打开失败"路径的分野）。
+        QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
+
+        // 用户主动停止是正常状态迁移：State 行「已关闭」，不弹窗。
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("监听"));
+        QVERIFY2(text->toPlainText().contains(QStringLiteral("已关闭")),
+            qPrintable(text->toPlainText()));
+        QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
+    }
+
+    // 性能状态必须"随手可得"而不是"卡了才出现"：状态栏那段文字的 tooltip 里
+    // 始终有最近 2 秒的量化值（界面迟滞 / 单批处理 / 缓冲 / 日志占用）。
+    // 用户要的是"能判断性能"，所以健康时也要能看到数字。
+    void performanceStatusIsAlwaysAvailable()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *status = window.findChild<QLabel *>(QStringLiteral("TrafficStatus"));
+        QVERIFY(status);
+        QTRY_VERIFY2(status->toolTip().contains(QStringLiteral("界面迟滞 ≤")),
+            qPrintable(status->toolTip()));
+        QVERIFY(status->toolTip().contains(QStringLiteral("单批处理 ≤")));
+        QVERIFY(status->toolTip().contains(QStringLiteral("缓冲 ")));
+        QVERIFY(status->toolTip().contains(QStringLiteral("日志 ")));
+    }
+
     // 语义配色：方向令牌按类型分色（RX 饱和绿 / TX 主蓝 / 状态紫 / 警告琥珀 / 错误红），
     // 错误与警告整行同色——这是"一眼分辨消息类型"的落点，改动必须被这里挡住。
     void directionTokensCarrySemanticColors()
@@ -1194,15 +1593,29 @@ private slots:
                     return it.fragment().charFormat().foreground().color();
             return QColor();
         };
-        QCOMPARE(fragmentColor(0, QStringLiteral("RX")), QColor(0x04, 0x78, 0x57));
+        QCOMPARE(fragmentColor(0, QStringLiteral("RX")), QColor(0x04, 0x6C, 0x4E));
         QCOMPARE(fragmentColor(1, QStringLiteral("TX")), QColor(0x1D, 0x4E, 0xD8));
         QCOMPARE(fragmentColor(2, QStringLiteral("状态")), QColor(0x6D, 0x28, 0xD9));
-        QCOMPARE(fragmentColor(3, QStringLiteral("警告")), QColor(0xB4, 0x53, 0x09));
+        QCOMPARE(fragmentColor(3, QStringLiteral("警告")), QColor(0x92, 0x40, 0x0E));
         QCOMPARE(fragmentColor(4, QStringLiteral("错误")), QColor(0xC6, 0x28, 0x28));
         // 数据行的正文保持近黑（数据是主体）；错误/警告整行随类型着色。
         QCOMPARE(fragmentColor(0, QStringLiteral("rx-body")), QColor(0x1C, 0x24, 0x30));
-        QCOMPARE(fragmentColor(3, QStringLiteral("warning-body")), QColor(0xB4, 0x53, 0x09));
+        QCOMPARE(fragmentColor(3, QStringLiteral("warning-body")), QColor(0x92, 0x40, 0x0E));
         QCOMPARE(fragmentColor(4, QStringLiteral("error-body")), QColor(0xC6, 0x28, 0x28));
+        // 前缀 DemiBold（用户钦定"前缀加粗 + 与正文同色，靠字重区分"）：行号/时间这类
+        // 元信息与方向令牌必须同为 DemiBold，且元信息用正文色 #1C2430。这里钉的是字重
+        // 与元色，防止以后有人把 Bold 当"够粗"、或把前缀退回更浅的灰。
+        const auto fragmentFormat = [text](int blockIndex, const QString &needle) {
+            const QTextBlock block = text->document()->findBlockByNumber(blockIndex);
+            for (auto it = block.begin(); !it.atEnd(); ++it)
+                if (it.fragment().text().contains(needle))
+                    return it.fragment().charFormat();
+            return QTextCharFormat();
+        };
+        const auto metaFormat = fragmentFormat(0, QStringLiteral("1 ")); // 行号在前缀最前
+        QCOMPARE(metaFormat.fontWeight(), int(QFont::DemiBold));
+        QCOMPARE(metaFormat.foreground().color(), QColor(0x1C, 0x24, 0x30));
+        QCOMPARE(fragmentFormat(0, QStringLiteral("RX")).fontWeight(), int(QFont::DemiBold));
     }
 
     void endpointParameterColumnsAlign()
@@ -1474,9 +1887,11 @@ private slots:
         QCOMPARE(window.findChild<QLabel *>(QStringLiteral("TrafficStatus"))->text(),
                  QStringLiteral("共 12 条"));
         QVERIFY(window.rect().contains(QRect(editor->mapTo(&window, QPoint()), editor->size())));
-        // 格式切换只影响新行（控制台语义）：切到 DEC 后，新到达的消息按 DEC 渲染固化进文本视图。
+        // 格式切换是"外观"：按契约立刻作用于**已收到/已显示**的行，新到达的消息也按新格式渲染
+        // （r5 起不再是"只影响新行"的控制台语义）。切完先等掉那一刻必然发生的防抖重投影。
         // 已知字节流片段（HEX 01 03 00 00 00 02 C4 0B）渲染为 DEC，并带 ⏎ 续接标记——边界是消息的事实。
         trafficFormat->setCurrentIndex(1); // DEC
+        QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次重投影，等掉它再断言
         const QUuid endpointId = window.findChild<QPushButton *>("showPortA")
                                      ->property("endpoint").toUuid();
         Traffic::Message dec;
@@ -1497,6 +1912,7 @@ private slots:
         QVERIFY2(decLine.endsWith(QStringLiteral("1 3 0 0 0 2 196 11 ⏎")),
                  qPrintable(QStringLiteral("DEC 渲染行不符：") + decLine));
         trafficFormat->setCurrentIndex(0); // 恢复 HEX，后续消息按 HEX 渲染与搜索
+        QTest::qWait(AppearanceReprojectWaitMs); // 切格式必然触发的重投影，先等掉
         // 搜索按到达时过滤：命中的记录进文本历史，未命中的只进模型不进显示。
         auto *search = window.findChild<QLineEdit *>("filterKeywords");
         Traffic::Message hit;
@@ -1565,6 +1981,38 @@ private slots:
         QCOMPARE(Traffic::directionName(warning.direction), QStringLiteral("警告"));
     }
 
+    // 文本视图的安全阀触发时同样必须播报：屏幕上看不到的几行，可能是用户唯一想
+    // 回看的东西。默认预算是 400 万块（用例填不满），所以显式注入小预算验机制。
+    void textViewBudgetReleaseIsReported()
+    {
+        TrafficTextView view;
+        view.setBudget(50, 1024 * 1024);
+        QList<Traffic::Message> batch;
+        batch.reserve(60);
+        for (int i = 0; i < 60; ++i) {
+            Traffic::Message message;
+            message.id = i + 1;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = Traffic::Direction::Receive;
+            message.source.endpointId = QUuid::createUuid();
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray("line one\r\nline two\r\n");
+            message.rawLength = message.raw.size();
+            batch.append(message);
+        }
+        view.appendMessages(batch, PayloadCodec::Format::Utf8, TrafficTextView::DisplayOptions());
+
+        QVERIFY2(view.lineCount() <= 50,
+            qPrintable(QStringLiteral("行数应被压回预算内：%1").arg(view.lineCount())));
+        QVERIFY2(view.releasedBlocks() > 0, "触顶释放必须记账——释放不许无声");
+        // 释放只从最旧一端发生：第 1 条已被挤掉，最新一条一定还在。
+        QVERIFY2(!view.document()->firstBlock().text().startsWith(QStringLiteral("1 ")),
+            qPrintable(QStringLiteral("首块应已不是第 1 条：") + view.document()->firstBlock().text()));
+        QVERIFY2(view.document()->toPlainText().contains(QStringLiteral("60 2")),
+                 "最新一条必须还在");
+    }
+
     // 文本显示模式的三条底线：高速追加后跟随钉底；模型触顶淘汰后文本历史原样保留；
     // 停止跟随滚回顶部，第 1 条仍可回滚显示——这正是 JCom 34 万行不卡的行为基线。
     void textViewFollowsRetainsAndRollsBack()
@@ -1581,8 +2029,11 @@ private slots:
 
         const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
                                      ->property("endpoint").toUuid();
-        // 25000 条 8 字节小帧：越过模型的条数上限，文本历史必须原样保留。
-        const int total = TrafficModel::kRowBudget + 5000;
+        // 模型的安全阀默认 2000 万条，本用例要验的是"模型淘汰、文本原样保留"，
+        // 所以显式压小模型预算。文本视图的安全阀比这大两个数量级，一行都不该少。
+        const int rowBudget = 5000;
+        model->setBudget(64LL * 1024 * 1024, rowBudget);
+        const int total = rowBudget + 5000;
         for (int batchStart = 0; batchStart < total; batchStart += 500) {
             QList<Traffic::Message> batch;
             batch.reserve(500);
@@ -1600,7 +2051,7 @@ private slots:
                 batch.append(message);
             }
             window.findChild<TrafficPanel *>()->appendMessages(batch);
-            // 等攒批逐批落地：同步连灌会让 50 批合成一个 25000 条巨批，
+            // 等攒批逐批落地：同步连灌会让所有批合成一个巨批落地，
             // 而"先裁后插"裁不到单批自身——单批不超预算是调用方的既有约定。
             QTest::qWait(20);
         }
@@ -1613,10 +2064,16 @@ private slots:
         QCOMPARE(text->verticalScrollBar()->value(), text->verticalScrollBar()->maximum());
 
         // 模型触顶淘汰，文本历史一行不少：这是"文本模式能看完整历史"的判据。
-        QVERIFY2(model->rowCount() <= TrafficModel::kRowBudget,
+        QVERIFY2(model->rowCount() <= rowBudget,
             qPrintable(QStringLiteral("模型应已淘汰：当前 %1 条").arg(model->rowCount())));
         QCOMPARE(text->lineCount(), total);
         QCOMPARE(text->document()->blockCount(), total);
+        // 淘汰**必须播报**：缓冲区已满要进状态栏摘要，用户才不会以为是自己看错了。
+        // 这正是压测时"拖到最前面发现少了"唯一能被察觉的出口。
+        auto *status = window.findChild<QLabel *>(QStringLiteral("TrafficStatus"));
+        QVERIFY(status);
+        QTRY_VERIFY2(status->text().contains(QStringLiteral("缓冲区已满")),
+            qPrintable(QStringLiteral("摘要应播报缓冲区已满：") + status->text()));
 
         // 向上翻阅自动解除跟随；滚回顶部，第 1 条仍然在第一行。
         text->verticalScrollBar()->setValue(text->verticalScrollBar()->maximum() - 100);
@@ -1880,7 +2337,8 @@ private slots:
     }
 
     // 显示格式为 HEX 时不重复显示 HEX 对照行：数据本身就是 HEX，再来一行一模一样。
-    // 已固化的旧行不回溯（控制台语义），此断言锁定的是"新行"的行为。
+    // 编码格式是"外观"：切换会立刻作用于**已显示的行**（r5 契约，旧行也重画），
+    // 所以下面的断言都建立在"等掉那次必然发生的防抖重投影"之上，而不是某一条的到达状态。
     void hexEchoSuppressedInHexFormat()    {
         MainWindow window;
         window.setAttribute(Qt::WA_DontShowOnScreen);
@@ -1912,13 +2370,15 @@ private slots:
         QTRY_COMPARE(model->rowCount(), 1);
         QCOMPARE(text->document()->blockCount(), 1); // 只有数据行，没有 HEX 对照行
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("1: 4F 4B"));
-        // UTF-8 格式下对照行恢复出现。
+        // 切 UTF-8：对照行恢复出现，且**已显示的那一行**也要一起重画为 UTF-8 + 对照行。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
+        QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次重投影，等掉它
+        QCOMPARE(text->document()->blockCount(), 2); // 旧行已重画为：数据行 + HEX 对照行
         message.id = 2;
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 2);
-        QCOMPARE(text->document()->blockCount(), 3);
+        QCOMPARE(text->document()->blockCount(), 4); // 两行各带一个 HEX 对照行
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("4F 4B"));
         window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(false);
         window.findChild<QAction *>(QStringLiteral("showTimestamp"))->setChecked(true);
@@ -1953,13 +2413,19 @@ private slots:
                 message.statusText = QStringLiteral("写入失败");
             return message;
         };
-        // 先建立一条可见数据行作基线。
+        // 先建立一条可见数据行。
         panel->appendMessages({makeMessage(1, Traffic::Direction::Receive, "data")});
         QTRY_COMPARE(model->rowCount(), 1);
-        const auto baseline = text->document()->lastBlock().text();
-        // 关闭错误日志：错误事件进模型不进显示，数据行纹丝不动。
+        // 外观（编码格式）改动会立刻作用于已收到的行（r5 契约）：切 UTF-8 后旧的 "data"
+        // 行也应从 HEX 变为 UTF-8。这一步必然触发一次防抖重投影，显式等掉它再取基线——
+        // 不能把基线建立在"重投影还没发生"上（旧断言正是这么过期的：它赌的是 HEX 还没重画）。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
+        QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次重投影，等掉它
+        const auto baseline = text->document()->lastBlock().text();
+        QVERIFY2(baseline.endsWith(QStringLiteral("data")), // 不再是 HEX 的 …64 61 74 61
+            qPrintable(QStringLiteral("切格式后基线行应已变 UTF-8：") + baseline));
+        // 关闭错误日志：错误事件进模型不进显示，数据行纹丝不动。
         window.findChild<QPushButton *>(QStringLiteral("filterError"))->setChecked(false);
         panel->appendMessages({makeMessage(2, Traffic::Direction::Error, "boom")});
         QTRY_COMPARE(model->rowCount(), 2);
@@ -1972,6 +2438,294 @@ private slots:
         QVERIFY2(text->document()->lastBlock().text().endsWith(QStringLiteral("boom2")),
             qPrintable(QStringLiteral("错误行实况：")
                 + text->document()->lastBlock().text()));
+    }
+
+    // 外观重投影不得改变"哪些行在屏幕上"（设计稿 §5 决策表）：改显示设置 / 编码格式只换
+    // 每行长什么样，未点「应用过滤」的关键词绝不能被顺手套到历史行上——否则屏幕会莫名变少、
+    // 待应用提示同时消失。这条用例把该契约钉死。
+    void appearanceReprojectKeepsRowSetAndPendingHint()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *keywords = window.findChild<QLineEdit *>(QStringLiteral("filterKeywords"));
+        auto *apply = window.findChild<QPushButton *>(QStringLiteral("filterRebuild"));
+        auto *timestamp = window.findChild<QAction *>(QStringLiteral("showTimestamp"));
+        QVERIFY(text && model && keywords && apply && timestamp);
+        QVERIFY(timestamp->isChecked()); // 默认显示时间戳，下面用它当"外观"开关
+
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        const auto makeMessage = [endpointId](quint64 id, const char *hex) {
+            Traffic::Message message;
+            message.id = id;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = Traffic::Direction::Receive;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray::fromHex(hex);
+            message.rawLength = message.raw.size();
+            return message;
+        };
+        // 6 条记录：3 条命中关键词 "aa bb"，3 条不命中。先全部显示（此时还没有关键词）。
+        QList<Traffic::Message> batch;
+        for (quint64 i = 0; i < 3; ++i) {
+            batch.append(makeMessage(i * 2 + 1, "AABB"));
+            batch.append(makeMessage(i * 2 + 2, "CCDD"));
+        }
+        panel->appendMessages(batch);
+        QTRY_COMPARE(model->rowCount(), 6);
+        QTRY_COMPARE(text->lineCount(), 6);
+
+        // 敲一个只命中部分记录的关键词，**不点**应用过滤：行集不动，只是提示待应用。
+        keywords->setText(QStringLiteral("aa bb"));
+        QCOMPARE(text->lineCount(), 6);
+        QVERIFY2(apply->text() != QStringLiteral("应用过滤"),
+            qPrintable(QStringLiteral("改条件后应显示待应用提示：") + apply->text()));
+
+        // 改外观（关掉时间戳）：只换每行长什么样，行集必须一字不变，待应用提示保持。
+        timestamp->setChecked(false);
+        QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次外观重投影，等掉它
+        QCOMPARE(text->lineCount(), 6); // 未应用的关键词没有被顺手应用到历史行上
+        QVERIFY2(apply->text() != QStringLiteral("应用过滤"),
+            qPrintable(QStringLiteral("外观重投影后待应用提示必须仍在：") + apply->text()));
+
+        // 点「应用过滤」：这才把关键词补到历史行上，行集按关键词收窄（只有 3 条命中）。
+        apply->click();
+        QCOMPARE(text->lineCount(), 3);
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤")); // 应用后提示消失
+
+        // ---- 清空之后的同类不变量：清空是会话边界，以当前条件为新会话的已应用基线。----
+        keywords->clear(); // 回到无内容条件，再清空
+        window.findChild<QPushButton *>(QStringLiteral("clearTraffic"))->click();
+        QCOMPARE(model->rowCount(), 0);
+        QCOMPARE(text->lineCount(), 1); // 空文档保底的一个空块
+        // 清空 + 首批数据到达后，按钮文字必须是干净的「应用过滤」：这批数据本就是按当前
+        // 条件收的，不该被判成"待应用"（旧实现靠 !m_everProjected 会把 pending 误判为真）。
+        QList<Traffic::Message> again;
+        for (quint64 i = 0; i < 3; ++i) {
+            again.append(makeMessage(100 + i * 2 + 1, "AABB"));
+            again.append(makeMessage(100 + i * 2 + 2, "CCDD"));
+        }
+        panel->appendMessages(again);
+        QTRY_COMPARE(model->rowCount(), 6);
+        QTRY_COMPARE(text->lineCount(), 6);
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤")); // 首批数据不该触发待应用提示
+
+        // 敲一个只命中部分记录的关键词，**不点**应用；再改外观：行集必须一字不变、提示保持
+        // ——清空后的会话同样走这条不变量（外观路径用已应用基线重放，不写 m_projectedOptions）。
+        keywords->setText(QStringLiteral("aa bb"));
+        QCOMPARE(text->lineCount(), 6);
+        timestamp->setChecked(true); // 换个外观值（上一段关掉了时间戳）
+        QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次外观重投影，等掉它
+        QCOMPARE(text->lineCount(), 6); // 未应用的关键词没有被顺手应用
+        QVERIFY2(apply->text() != QStringLiteral("应用过滤"),
+            qPrintable(QStringLiteral("清空后的外观重投影仍应保持待应用提示：") + apply->text()));
+
+        // 点「应用过滤」：行集按关键词收窄。
+        apply->click();
+        QCOMPARE(text->lineCount(), 3);
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+    }
+
+    // QA 独立验收（第二轮）。与工程师的 appearanceReprojectKeepsRowSetAndPendingHint 互补：
+    // 这里专门盯"外观路径绝不写 m_projectedOptions"这一条实现约束，逐组合给出
+    // "若实现退回旧语义，这条断言会怎么挂"。
+    // 关键词选 "aa bb"：hex 紧凑/带空格候选与编码格式无关，用来把变量隔离在"行集"上。
+    void appearanceReprojectIndependenceQa()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *keywords = window.findChild<QLineEdit *>(QStringLiteral("filterKeywords"));
+        auto *apply = window.findChild<QPushButton *>(QStringLiteral("filterRebuild"));
+        auto *timestamp = window.findChild<QAction *>(QStringLiteral("showTimestamp"));
+        auto *format = window.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
+        auto *clear = window.findChild<QPushButton *>(QStringLiteral("clearTraffic"));
+        QVERIFY(text && model && keywords && apply && timestamp && format && clear);
+
+        // 归一化到确定起点，避免被同一次运行里更早的用例留下的共享偏好影响。
+        keywords->clear();
+        format->setCurrentText(QStringLiteral("HEX"));
+        timestamp->setChecked(true);
+        window.findChild<QPushButton *>(QStringLiteral("showPortA"))->setChecked(true);
+        if (auto *rx = window.findChild<QPushButton *>(QStringLiteral("filterRx")))
+            rx->setChecked(true);
+        clear->click();
+        QCOMPARE(model->rowCount(), 0);
+
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        const auto makeMessage = [endpointId](quint64 id, const char *hex) {
+            Traffic::Message message;
+            message.id = id;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = Traffic::Direction::Receive;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray::fromHex(hex);
+            message.rawLength = message.raw.size();
+            return message;
+        };
+        // 6 条：3 条含 "AA BB"，3 条不含。起点无关键词 → 全显示。
+        QList<Traffic::Message> batch;
+        for (quint64 i = 0; i < 3; ++i) {
+            batch.append(makeMessage(i * 2 + 1, "AABB"));
+            batch.append(makeMessage(i * 2 + 2, "CCDD"));
+        }
+        panel->appendMessages(batch);
+        QTRY_COMPARE(model->rowCount(), 6);
+        QTRY_COMPARE(text->lineCount(), 6);
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤")); // 起点：没有待应用
+
+        // ---- C1：敲关键词不应用 + 改外观 → 行集不变、提示仍在 ----
+        keywords->setText(QStringLiteral("aa bb"));
+        QCOMPARE(text->lineCount(), 6); // 只改条件没点应用，屏幕不动
+        QVERIFY2(apply->text() != QStringLiteral("应用过滤"), "改条件后应出现待应用提示");
+        timestamp->setChecked(false); // 外观变化：必然触发一次防抖重投影
+        QTest::qWait(AppearanceReprojectWaitMs);
+        QCOMPARE(text->lineCount(), 6); // 未应用的关键词没有被外观重投影顺手应用
+        QVERIFY2(apply->text() != QStringLiteral("应用过滤"), "外观重投影后提示必须仍在");
+        // 旧语义下：外观路径用当前条件过滤 → 行集 6→3；且 markReprojected 把
+        // m_projectedOptions 记成当前条件 → 提示被清成"应用过滤"。两条断言都会挂。
+
+        // ---- C2：连点两次外观开关（时间戳 + 编码格式同一轮）→ 行集与提示都不变 ----
+        timestamp->setChecked(true);                     // 第一次外观变更
+        format->setCurrentText(QStringLiteral("UTF-8")); // 第二次外观变更（防抖窗口内）
+        QTest::qWait(AppearanceReprojectWaitMs);
+        QCOMPARE(text->lineCount(), 6);
+        QVERIFY2(apply->text() != QStringLiteral("应用过滤"), "两次外观变更后提示仍应在");
+        // 这一条专门证明**外观路径不写 m_projectedOptions**：若它写了，第一次重投影
+        // 之后提示就会被清掉，断言即挂。
+
+        // ---- C3：点应用过滤 → 行集按关键词收窄、提示回到干净；之后再改外观稳定 ----
+        apply->click();
+        QCOMPARE(text->lineCount(), 3);                       // 只有 3 条命中 "aa bb"
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));   // 已应用 → 提示清干净
+        timestamp->setChecked(false); // 再次改外观（当前为 true）
+        QTest::qWait(AppearanceReprojectWaitMs);
+        QCOMPARE(text->lineCount(), 3);                       // 已应用基线已含关键词 → 仍 3
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));   // 提示保持干净
+        // 若 apply 没更新 m_projectedOptions，或外观路径用当前条件却又不更新签名，
+        // 会出现"行集对但提示错"或反之，两条断言至少挂一条。
+
+        // ---- C4：清空 + 首批到达 → 按钮文字干净；随后"清空→敲词不应用→改外观" ----
+        keywords->clear();
+        clear->click();
+        QCOMPARE(model->rowCount(), 0);
+        QList<Traffic::Message> again;
+        for (quint64 i = 0; i < 3; ++i) {
+            again.append(makeMessage(100 + i * 2 + 1, "AABB"));
+            again.append(makeMessage(100 + i * 2 + 2, "CCDD"));
+        }
+        panel->appendMessages(again);
+        QTRY_COMPARE(model->rowCount(), 6);
+        QTRY_COMPARE(text->lineCount(), 6);
+        // 清空是会话边界，以当前条件为新基线：首批数据不该被判成"待应用"。
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+        // 旧实现（清空后 m_everProjected=false）会让 refreshApplyHint 判 pending=true
+        // → 文字变成"应用过滤 •"，此处断言挂。
+
+        keywords->setText(QStringLiteral("aa bb"));
+        QCOMPARE(text->lineCount(), 6);
+        timestamp->setChecked(true); // 换外观值（当前为 false）
+        QTest::qWait(AppearanceReprojectWaitMs);
+        QCOMPARE(text->lineCount(), 6); // 清空后的会话同样不允许外观重投影套上未应用条件
+        QVERIFY2(apply->text() != QStringLiteral("应用过滤"), "清空后的外观重投影仍应保留提示");
+        // 旧实现的关键回归点：清空后无基线（m_everProjected=false），外观路径会退回
+        // "用当前条件"过滤 → 行集 6→3，此条挂。
+
+        // ---- D1：证实"已知残余"与 trafficpanel.cpp:1027-1031 注释一致 ----
+        apply->click(); // 建立"已应用基线 = aa bb"
+        QCOMPARE(text->lineCount(), 3);
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+        keywords->setText(QStringLiteral("cc dd")); // 改条件，不应用（已应用基线仍是 aa bb）
+        QCOMPARE(text->lineCount(), 3);              // 改条件不影响已有行
+        QVERIFY(apply->text() != QStringLiteral("应用过滤"));
+        // 新行到达：增量路径用**当前**条件（cc dd）收流，于是这 2 条 CCDD 先显示出来。
+        panel->appendMessages({makeMessage(200, "CCDD"), makeMessage(201, "CCDD")});
+        QTRY_COMPARE(model->rowCount(), 8);
+        QTRY_COMPARE(text->lineCount(), 5); // 只命中新条件的行先显示——注释所述现象
+        // 一次外观重投影（按已应用基线 aa bb 重放）把它们**收回**，与注释一致。
+        timestamp->setChecked(false);
+        QTest::qWait(AppearanceReprojectWaitMs);
+        QCOMPARE(text->lineCount(), 3);
+        QVERIFY2(apply->text() != QStringLiteral("应用过滤"), "提示仍在（条件尚未应用）");
+    }
+
+    // QA 独立验收（第二轮）D2：外观路径的已应用判定器用**当前编码格式**重建
+    // （Matcher(options, currentDisplayFormat())），而候选视图含"按当前格式渲染的文本"。
+    // 这里实测"只在 DEC 渲染视图里命中"的条件在切到 HEX 后行集是否变化，并固化判定。
+    void appearanceReprojectFormatDependentCandidatesQa()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *keywords = window.findChild<QLineEdit *>(QStringLiteral("filterKeywords"));
+        auto *apply = window.findChild<QPushButton *>(QStringLiteral("filterRebuild"));
+        auto *format = window.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
+        auto *clear = window.findChild<QPushButton *>(QStringLiteral("clearTraffic"));
+        QVERIFY(text && model && keywords && apply && format && clear);
+
+        keywords->clear();
+        clear->click();
+        format->setCurrentText(QStringLiteral("DEC")); // DEC 渲染 = 十进制字节值，如 "0 255"
+        window.findChild<QPushButton *>(QStringLiteral("showPortA"))->setChecked(true);
+        if (auto *rx = window.findChild<QPushButton *>(QStringLiteral("filterRx")))
+            rx->setChecked(true);
+        QCOMPARE(model->rowCount(), 0);
+
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        const auto makeMessage = [endpointId](quint64 id, const char *hex) {
+            Traffic::Message message;
+            message.id = id;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = Traffic::Direction::Receive;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray::fromHex(hex);
+            message.rawLength = message.raw.size();
+            return message;
+        };
+        // 3 条都含 0xFF：DEC 渲染（"0 255"/"255 1"/"2 255"）都有 "255"；
+        // HEX 渲染（"00 FF" 等）与 hex 候选里都没有 "255"。
+        panel->appendMessages({makeMessage(1, "00FF"), makeMessage(2, "FF01"), makeMessage(3, "02FF")});
+        QTRY_COMPARE(model->rowCount(), 3);
+        QTRY_COMPARE(text->lineCount(), 3);
+
+        keywords->setText(QStringLiteral("255")); // 只在 DEC 渲染视图里命中
+        apply->click();
+        QCOMPARE(text->lineCount(), 3);                     // 应用后 3 条都命中
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+
+        // 切到 HEX：已应用条件 "255" 不变，但外观路径按**当前格式 HEX** 重建判定器，
+        // DEC 渲染视图不再是候选。若"外观不改行集"严格成立，这里应仍是 3 行。
+        format->setCurrentText(QStringLiteral("HEX"));
+        QTest::qWait(AppearanceReprojectWaitMs);
+        // 实测固化：格式相关候选（DEC 渲染）消失后，3 条全部不再命中 → 只剩空文档保底块。
+        // 这与"未应用条件被套上"不同：条件 "255" 早已 apply（m_projectedOptions 就是它），
+        // 提示也干净，属于**同一条件在新渲染下的重新求值**。
+        QCOMPARE(text->lineCount(), 1);
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤")); // 提示干净：不是待应用机制在动行集
     }
 
     // ANSI 颜色标识：SGR 序列渲染为前景色分片，转义序列本身不进显示文本，

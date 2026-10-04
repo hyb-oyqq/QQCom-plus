@@ -136,12 +136,12 @@ using CapturedDataPtr = std::shared_ptr<const CapturedData>;
 
 | 项 | Serial Studio | easyDebug |
 | --- | --- | --- |
-| 行数上限 | `scrollbackLines`，默认 1000，`qBound(100, n, 100000)`，`QSettings` 持久化 | 文本视图 `maximumBlockCount(100 万行)` + 字符预算 2.56 亿（超限头部整块淘汰） |
+| 行数上限 | `scrollbackLines`，默认 1000，`qBound(100, n, 100000)`，`QSettings` 持久化，**用户可调** | 文本视图 `maximumBlockCount(400 万块)` + 字符预算 5.12 亿（超限头部整块淘汰，**释放量播报到状态栏**）；目前**不可调** |
 | 上限下调 | 一次性裁掉多余行并回报裁掉多少，视图状态随之平移 | 未涉及 |
 | 相邻重复行折叠 | `collapseDuplicates` 开关，计数并合并相邻重复行（非相邻不合并） | 未实现 |
 | 光标/视图 | 游标行列被夹到列数与 scrollback 上限内；裁剪时游标行随保留行平移 | 跟随 = 追加后 setValue(maximum)，valueChanged<max 即解除跟随 |
 
-easyDebug 的预算更大（100 万行 vs 10 万行），方向不回退；可借鉴的是**"折叠相邻重复行 + 显示重复次数"这个开关**（`duplicateCollapseCountsRepeats` / `duplicateCollapseNeedsAdjacentRows` 两个测试给出了精确语义：只合并相邻行、带计数），对周期性心跳帧刷屏的场景很实用，属于低成本高收益。
+easyDebug 的预算更大（400 万块 vs 10 万行），方向不回退；**值得借鉴的是「上限可调 + 落盘」**——r6 把上限从策略降级为内存安全阀之后，「我就是要留少一点换流畅」这个需求就没有出口了，Serial Studio 的 `scrollbackLines` 正是这个出口的最小形态（一个带上下界的整数 + 持久化）。可借鉴的另一处是**"折叠相邻重复行 + 显示重复次数"这个开关**（`duplicateCollapseCountsRepeats` / `duplicateCollapseNeedsAdjacentRows` 两个测试给出了精确语义：只合并相邻行、带计数），对周期性心跳帧刷屏的场景很实用，属于低成本高收益。
 
 ## 8. 计数与负载治理
 

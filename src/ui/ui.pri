@@ -19,6 +19,7 @@ HEADERS += \
     $$PWD/common/tintedicon.h \
     $$PWD/common/stayopenmenu.h \
     $$PWD/common/endpointformat.h \
+    $$PWD/common/bytesformat.h \
     $$PWD/common/combometrics.h \
     $$PWD/panels/portselector/portselectorwidget.h \
     $$PWD/panels/traffic/trafficpanel.h \

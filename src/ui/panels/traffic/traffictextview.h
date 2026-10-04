@@ -54,6 +54,15 @@ public:
         bool operator!=(const DisplayOptions &other) const { return !(*this == other); }
     };
 
+    // 文本历史的**内存安全阀**，不是"能看多久"的策略（用户钦定：像 JCom 一样一直留着）。
+    // 早先的 100 万块 / 2.56 亿字符看着很大，但真实纵深由"每条报文渲染出多少行"决定：
+    // 一条 442 B、展开成 13 行的报文，100 万块只装得下 7 万多条，压测一小时就摸到顶，
+    // 于是"拖到最前面"发现最早的数据没了；JCom 只有一条纯文本缓冲（1.53M 行原样留着），
+    // 一对比就看出差别。现在按"几十小时压测也碰不到"来定，碰到就是这台机器内存快满了，
+    // 届时必须播报（blocksReleased → 状态栏摘要）。
+    static constexpr int kSafetyBlockBudget = 4000000;
+    static constexpr qint64 kSafetyCharBudget = 512LL * 1024 * 1024;
+
     explicit TrafficTextView(QWidget *parent = nullptr);
 
     // 追加一批消息。载荷按 format 与 options 渲染后写进文档。
@@ -63,12 +72,26 @@ public:
         const DisplayOptions &options);
     void clearAll();
     int lineCount() const { return document()->blockCount(); }
+    // 注入上限（默认即内存安全阀，见 .cpp 顶部）。测试用它把预算压到几十行来验证
+    // "从头部释放 + 播报"；将来的"内存紧张时收紧"也从这里进。
+    void setBudget(int blocks, qint64 chars);
+    // 会话内被安全阀从头部释放掉的块（≈行）累计数；clearAll 归零。
+    int releasedBlocks() const { return m_releasedBlocks; }
     void scrollToBottom();
     // 自动换行开关：开启时按视口宽度折行（横向滚动条随之消失），关闭时长报文水平滚动。
     void setLineWrapping(bool enabled);
 
+signals:
+    // 安全阀触发、从头部整块释放历史时发出（面板据此在状态栏播报）。
+    // 淘汰**不许无声**：屏幕上看不到的那几行，可能是用户唯一想回看的东西。
+    void blocksReleased(int count);
+
 private:
     quint64 m_nextNumber = 1; // 下一条的绝对行号，头部淘汰不回退
+    int m_releasedBlocks = 0; // 见 releasedBlocks()
+    int m_blockBudget = kSafetyBlockBudget;
+    qint64 m_charBudget = kSafetyCharBudget;
+    void trimHeadBlocks(int blocks); // 唯一的头部淘汰动作：行数预算与字符预算都走它
     void enforceCharBudget();
 };
 

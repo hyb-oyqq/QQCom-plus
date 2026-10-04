@@ -49,11 +49,14 @@ void TcpClientTransport::start(const PortDraft &draft, quint64 generation)
         m_open = false;
         if (m_userStop) {
             emit stateChanged(m_generation, int(Transport::State::Closed), tr("已断开"));
-        } else {
+        } else if (wasOpen) {
             // 对端关闭或网络中断：这是调试时最需要看见的事件。
-            emit errorOccurred(m_generation, wasOpen ? tr("连接已断开") : tr("连接失败"));
+            emit errorOccurred(m_generation, tr("连接已断开"));
             emit stateChanged(m_generation, int(Transport::State::Closed), tr("连接已断开"));
         }
+        // wasOpen == false：连接从未建立，失败原因已由 errorOccurred 处理器统一给出
+        //（"连接失败：<errorString>" / "连接超时"）。这里若再播一条"连接失败"，
+        // 一次连不上的端口会同时产生两条 Error + 两条 State，去重与计数都跟着乱。
     });
     connect(m_socket, &QTcpSocket::errorOccurred, this,
         [this](QAbstractSocket::SocketError error) {

@@ -69,7 +69,7 @@ FilterBar::FilterBar(QWidget *parent) : QWidget(parent)
     m_rebuild = new QPushButton(tr("应用过滤"), this);
     m_rebuild->setObjectName("filterRebuild");
     m_rebuild->setIcon(mutedIcon(QStringLiteral(":/icons/filter-check-outline.svg"), BarIconSize));
-    m_rebuild->setToolTip(tr("把当前过滤条件应用到已经收到的全部记录（缓冲范围内全部，最多 5 万条 / 16 MiB）"));
+    m_rebuild->setToolTip(tr("把当前过滤条件应用到已经收到的全部记录（缓冲内全量重放，不设条数上限）"));
     m_rebuild->setEnabled(false); // 还没收到任何记录时没什么可应用的
     connect(m_rebuild, &QPushButton::clicked, this, &FilterBar::rebuildRequested);
     row->addWidget(m_rebuild);
@@ -190,7 +190,7 @@ void FilterBar::setApplyPending(bool pending)
     m_rebuild->setText(pending ? tr("应用过滤 •") : tr("应用过滤"));
     m_rebuild->setToolTip(pending
             ? tr("过滤条件已改，还没作用于已收到的记录。点这里把条件应用到全部已到达的数据")
-            : tr("把当前过滤条件应用到已经收到的全部记录（缓冲范围内全部，最多 5 万条 / 16 MiB）"));
+            : tr("把当前过滤条件应用到已经收到的全部记录（缓冲内全量重放，不设条数上限）"));
 }
 
 FilterBarState FilterBar::state() const

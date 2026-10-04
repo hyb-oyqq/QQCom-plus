@@ -9,28 +9,27 @@
 
 namespace {
 
-// 文本历史的行数上限。JCom 实测 34 万行仍流畅；QPlainTextEdit 只排版可见块，
-// 100 万行的追加与绘制成本同样与总行数无关，剩下的只是文本内存。
-// 淘汰由文档自己完成：从头部整块删除，"停止跟随回滚第 1 条"始终成立。
-constexpr int BlockBudget = 1000000;
+// 内存安全阀的取值与理由见头文件（kSafetyBlockBudget / kSafetyCharBudget）。
 // 不再设单行载荷字符上限：完整显示是显式需求（HEX 对照尤其需要看到全部字节），
-// 内存由下面两个总预算兜底——行数上限挡堆行，字符预算挡"行少但极长"的会话，
+// 内存由这两个总预算兜底——行数上限挡堆行，字符预算挡"行少但极长"的会话，
 // 超限都从头部整块淘汰，总内存永远有界。
-constexpr qint64 CharBudget = 256LL * 1024 * 1024;
 constexpr int CharTrimReservePercent = 10; // 一次淘汰到预算的 90%，避免逐批都做头部搬移
 
 // 语义配色：与工作台主色（连接按钮 #1D4ED8）同一族的高饱和色，浅底上都够深、够清楚。
-// 前缀元信息（行号/时间/长度）用深中性色；方向令牌按类型分色并加粗，
-// RX/TX/状态/警告/错误扫一眼即可分辨，不必去读文字。
-const QColor MetaColor(0x33, 0x3B, 0x47);
+// 前缀元信息（行号/时间/长度）与正文同色（#1C2430）——用户钦定：前缀加粗后与正文
+// 同色，靠字重区分，不再靠颜色深浅分主次；对比度即正文对比度，比原先的灰前缀更高。
+// HEX 对照行保持浅色不动：它是数据行的附注，不是前缀的一部分。
+const QColor MetaColor(0x1C, 0x24, 0x30);
 const QColor BodyColor(0x1C, 0x24, 0x30);
 // HEX 对照行的颜色：它是数据行的**附注**而不是数据本身。用比正文和前缀都浅的
 // 次要中性色，上下两行一眼就能分出"哪行是主体、哪行是对照"，不必读内容。
 const QColor HexCompanionColor(0x6B, 0x76, 0x86);
+// 方向令牌：前缀里的语义色，同样按"高对比"选——这几个值在浅底上的对比度都 ≥ 6:1
+// （RX 与警告比初版各深了一档，初版在加粗后仍显轻）。改色先看这张表。
 const QColor TxColor(0x1D, 0x4E, 0xD8);     // 发送：工作台主蓝
-const QColor RxColor(0x04, 0x78, 0x57);     // 接收：饱和绿
+const QColor RxColor(0x04, 0x6C, 0x4E);     // 接收：饱和绿（深一档，加粗后更实）
 const QColor StateColor(0x6D, 0x28, 0xD9);  // 状态迁移：紫
-const QColor WarningColor(0xB4, 0x53, 0x09); // 警告：琥珀
+const QColor WarningColor(0x92, 0x40, 0x0E); // 警告：深琥珀（同上，深一档）
 const QColor ErrorColor(0xC6, 0x28, 0x28);  // 错误：饱和红
 
 QColor directionColor(Traffic::Direction direction)
@@ -144,7 +143,7 @@ TrafficTextView::TrafficTextView(QWidget *parent) : QPlainTextEdit(parent)
     setFrameShape(QFrame::NoFrame);
     setReadOnly(true);
     setUndoRedoEnabled(false);          // 见头文件注释：撤销栈必须关
-    setMaximumBlockCount(BlockBudget);  // 从头部整块淘汰，回滚第 1 条在预算内永远可行
+    setMaximumBlockCount(m_blockBudget); // 从头部整块淘汰，回滚第 1 条在预算内永远可行
     setTextInteractionFlags(Qt::TextSelectableByKeyboard | Qt::TextSelectableByMouse);
     setCenterOnScroll(false);
     // 文本控制台默认不折行：折行会让"一条消息一行"的行号语义变糊，
@@ -179,6 +178,9 @@ void TrafficTextView::appendMessages(
 
     QTextCharFormat metaFormat;
     metaFormat.setForeground(MetaColor);
+    // 前缀整段 DemiBold（用户钦定）：行号/时间/长度是扫读锚点，加粗后与正文的
+    // 分界靠字重而不是颜色深浅（颜色已与正文同色），浅色主题下也一眼可辨。
+    metaFormat.setFontWeight(QFont::DemiBold);
     // HEX 对照行：更浅的次要色，与数据行分层。
     QTextCharFormat hexFormat;
     hexFormat.setForeground(HexCompanionColor);
@@ -187,13 +189,25 @@ void TrafficTextView::appendMessages(
     // QChar::ParagraphSeparator 是 QTextDocument 的块分隔符（appendPlainText 内部同款），
     // 用 '\n' 也成块但会在文本里留下歧义字符，显式用分隔符更干净。
     bool needSeparator = !document()->isEmpty();
+    // 释放记账的两个起点：写入前的块数，以及本次插入的块分隔符个数。
+    const int blocksBefore = document()->blockCount();
+    int separators = 0;
 
     for (const auto &r : messages) {
         // 载荷里的换行还原成真实换行：文本框就该按文本本来的样子显示。
         // renderMultiline 让 UTF-8/GBK/ASCII 解码里的 \r \n 保持真实字符，
         // 这里统一成 \n；行号与时间只标首行，续行紧跟其后，
         // 多行报文在控制台里展开成多行物理文本，与 JCom 一致。
-        QString payload = PayloadCodec::renderMultiline(r.raw, format);
+        //
+        // 状态/警告/错误行的正文是 statusText（传输层给的"打开串口 COM1 失败：拒绝访问"
+        // "设备错误：…"这类原因），它们的 raw 本来就是空的。以前这里只渲染 raw，
+        // 于是这些行在屏幕上只剩一个前缀、冒号后面什么都没有——端口异常因此
+        // "有行没内容"，看起来就像没有任何提示。**只有 raw 为空时**才拿 statusText 顶上：
+        // 两类信息都在时（例如测试/转发构造的消息）载荷本身才是用户要看的东西，
+        // 不能因为带了原因就把内容吞掉。
+        QString payload = (!r.isData() && r.raw.isEmpty() && !r.statusText.isEmpty())
+            ? r.statusText
+            : PayloadCodec::renderMultiline(r.raw, format);
         if (r.truncated) payload += tr(" …");
         if (r.isFragment() && r.hasMoreFragments) payload += tr(" ⏎");
         payload.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
@@ -213,6 +227,7 @@ void TrafficTextView::appendMessages(
                                              : run.text.mid(start, nl - start);
                 if (needSeparator) {
                     cursor.insertText(QString(QChar::ParagraphSeparator));
+                    ++separators;
                     needSeparator = false;
                 }
                 if (atMessageStart) {
@@ -246,7 +261,8 @@ void TrafficTextView::appendMessages(
                                 : name;
                             QTextCharFormat dirFormat;
                             dirFormat.setForeground(directionColor(r.direction));
-                            // 方向令牌加粗：与元信息和数据的分界一眼可辨。
+                            // 方向令牌维持现状：分色 + DemiBold——与元信息同级字重，
+                            // 前缀是一个整体，字重不齐会显得像两种信息。
                             dirFormat.setFontWeight(QFont::DemiBold);
                             cursor.setCharFormat(dirFormat);
                             cursor.insertText(dir);
@@ -272,7 +288,10 @@ void TrafficTextView::appendMessages(
         if (!options.pure && options.hex && format != PayloadCodec::Format::Hex && !r.raw.isEmpty()) {
             const auto hex = QString::fromLatin1(r.raw.toHex(' ')).toUpper();
             if (needSeparator) needSeparator = false; // 载荷以换行收尾：续块此时是空的
-            else cursor.insertText(QString(QChar::ParagraphSeparator));
+            else {
+                cursor.insertText(QString(QChar::ParagraphSeparator));
+                ++separators;
+            }
             cursor.setCharFormat(hexFormat);
             cursor.insertText(hex);
         }
@@ -284,22 +303,20 @@ void TrafficTextView::appendMessages(
     // 结算这一批的全部文档变更（也是上面那笔固定开销唯一被付掉的地方）。
     cursor.endEditBlock();
     enforceCharBudget();
+    // 释放记账：本次写入的块数 = 插入的块分隔符数（每个分隔符起一个新块；空文档时
+    // 首块复用那个已有的空块，所以这里不加 1）。写入后的块数少于"原有的 + 写入的"，
+    // 差额就是从头部被释放掉的行——Qt 的 maximumBlockCount 与上面的字符预算两条
+    // 路径都算在内。**必须播报**：这是用户唯一能知道"拖到最前面为什么不全"的出口。
+    const int released = blocksBefore + separators - document()->blockCount();
+    if (released > 0) {
+        m_releasedBlocks += released;
+        emit blocksReleased(released);
+    }
     // 不在这里滚动：跟随与否是面板的状态，由面板在追加后统一处理滚动条。
 }
 
-void TrafficTextView::enforceCharBudget()
+void TrafficTextView::trimHeadBlocks(int blocks)
 {
-    // 行数预算由 maximumBlockCount 兜底；字符预算在这里手动执行。
-    // 只有超限时才进这段：预算内的会话一个块都不动。
-    if (document()->characterCount() <= CharBudget) return;
-    const qint64 target = CharBudget * (100 - CharTrimReservePercent) / 100;
-    qint64 counted = 0;
-    int blocks = 0;
-    for (QTextBlock block = document()->firstBlock(); block.isValid()
-         && document()->characterCount() - counted > target; block = block.next()) {
-        counted += block.length(); // block.length 含块分隔符
-        ++blocks;
-    }
     if (blocks <= 0) return;
     QTextCursor trimmer(document());
     trimmer.movePosition(QTextCursor::Start);
@@ -309,10 +326,39 @@ void TrafficTextView::enforceCharBudget()
     // 视图内容整体上移——这是控制台语义的可接受代价，跟随模式下无感知。
 }
 
+void TrafficTextView::setBudget(int blocks, qint64 chars)
+{
+    m_blockBudget = qMax(1, blocks);
+    m_charBudget = qMax<qint64>(1, chars);
+    setMaximumBlockCount(m_blockBudget);
+    // 收紧到当前文档之下要立刻生效（maximumBlockCount 只保证此后不再超）：
+    // "改了上限却没变化"这种静默失效，比上限本身更容易让人误判。
+    if (document()->blockCount() > m_blockBudget)
+        trimHeadBlocks(document()->blockCount() - m_blockBudget);
+    enforceCharBudget();
+}
+
+void TrafficTextView::enforceCharBudget()
+{
+    // 行数预算由 maximumBlockCount 兜底；字符预算在这里手动执行。
+    // 只有超限时才进这段：预算内的会话一个块都不动。
+    if (document()->characterCount() <= m_charBudget) return;
+    const qint64 target = m_charBudget * (100 - CharTrimReservePercent) / 100;
+    qint64 counted = 0;
+    int blocks = 0;
+    for (QTextBlock block = document()->firstBlock(); block.isValid()
+         && document()->characterCount() - counted > target; block = block.next()) {
+        counted += block.length(); // block.length 含块分隔符
+        ++blocks;
+    }
+    trimHeadBlocks(blocks);
+}
+
 void TrafficTextView::clearAll()
 {
     document()->clear(); // maximumBlockCount 是文档属性，clear() 不重置它
     m_nextNumber = 1;
+    m_releasedBlocks = 0; // 清空是新会话：释放计数跟着归零
 }
 
 void TrafficTextView::scrollToBottom()

@@ -2,6 +2,7 @@
 #include "filterbar.h"
 #include "filterflags.h"
 #include "traffictextview.h"
+#include "ui/common/bytesformat.h"
 #include "ui/common/combometrics.h"
 #include "ui/common/endpointformat.h"
 #include "ui/common/stayopenmenu.h"
@@ -10,8 +11,10 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDir>
 #include <QFileDialog>
 #include <QFile>
+#include <QFileInfo>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -22,6 +25,7 @@
 #include <QScrollBar>
 #include <QShortcut>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -36,12 +40,12 @@ constexpr int BarIconSize = 16;
 // 而不是"我们留下了多少"——两者不等即说明发生了截断。
 constexpr int PreviewLimit = 4096;
 
-// 模型的历史预算见 TrafficModel::kByteBudget / kRowBudget——那份预算同时就是
-// "屏幕上能重画的历史"预算：监视区是模型的投影，能回溯多远与一次重投影要多久
-// 都由它决定。实测（tests/perf，128 B/条）投影成本约 6.9 µs/条：
-//   2 万条 ≈ 140 ms，5 万条 ≈ 350 ms，12.8 万条 ≈ 880 ms。
-// 取 5 万条 / 16 MiB：重投影仍在"点一下就有"的量级内，同时是原先
-// 2 万条 / 4 MiB 的四倍纵深。要更远必须先降 traffic_perf 里的投影成本。
+// 上限见 TrafficModel::kSafetyByteBudget / kSafetyRowBudget——它们是**内存安全阀**
+// 而不是历史策略：默认值按"几十小时压测也碰不到"来定，碰到就说明这台机器快撑不住了。
+// 早先的 16 MiB / 5 万条是"重投影还能点一下就有"的性能取舍，代价是压测一万多条
+// 就开始丢最早的记录（用户拿 JCom 一比就发现丢了）。重投影仍然与缓冲线性相关
+// （实测约 6.9 µs/条，tests/perf），所以真跑到安全阀附近的会话，一次重投影会是
+// 秒级——这是"不丢数据"明码标出的代价，不是可以悄悄省掉的开销。
 
 // 重投影的防抖窗口。连点开关、连续切换只做一次重投影；50 ms 短于人能察觉的
 // "卡一下"，又足够把同一轮操作里的多次变化合成一次。
@@ -55,13 +59,19 @@ constexpr int ReprojectWaitCursorRows = 8000;
 // 合成一个插入通知；再长会让人感觉记录"迟一拍"。
 constexpr int FlushIntervalMs = 16;
 
+// 性能心跳：250 ms 一拍、8 拍一个窗口（2 秒）。这个频率下心跳自身几乎不占成本，
+// 而"界面线程被长任务占住"会直接表现为心跳迟到——迟滞因此是用户感知卡顿的直接代理量。
+constexpr int PerfTickMs = 250;
+// 迟滞超过这个值就当"卡"了，在状态栏摘要里说出来。100 ms 与 perf 基准里的
+// over100 判据同一口径：不是帧率洁癖，而是"人开始觉得顿"的那条线。
+constexpr qint64 PerfJankWarnMs = 100;
+
 // 丢弃最旧记录直到回到预算内。逐条移除而不是整体截断，保留最新的连续上下文。
-// 字节与条数两个上限先到者为准；返回丢弃的条数，由调用方决定用哪种模型通知。
-int trimToBudget(QList<Traffic::Message> &records, qint64 &bytes)
+// 字节与条数两个上限先到者为准；返回丢弃的条数，由调用方播报给用户。
+int trimToBudget(QList<Traffic::Message> &records, qint64 &bytes, qint64 byteBudget, int rowBudget)
 {
     int dropped = 0;
-    while (!records.isEmpty()
-           && (bytes > TrafficModel::kByteBudget || records.size() > TrafficModel::kRowBudget)) {
+    while (!records.isEmpty() && (bytes > byteBudget || records.size() > rowBudget)) {
         bytes -= records.first().raw.size();
         records.removeFirst();
         ++dropped;
@@ -69,12 +79,12 @@ int trimToBudget(QList<Traffic::Message> &records, qint64 &bytes)
     return dropped;
 }
 
-void enforceBudget(QList<Traffic::Message> &records)
+int enforceBudget(QList<Traffic::Message> &records, qint64 byteBudget, int rowBudget)
 {
     qint64 bytes = 0;
     for (const auto &record : records)
         bytes += record.raw.size();
-    trimToBudget(records, bytes);
+    return trimToBudget(records, bytes, byteBudget, rowBudget);
 }
 
 // 保留预览长度，并把 rawLength 修正为真实长度。
@@ -95,22 +105,34 @@ TrafficModel::TrafficModel(QObject *parent) : QObject(parent) {}
 int TrafficModel::rowCount() const { return m_records.size(); }
 const Traffic::Message &TrafficModel::record(int row) const { return m_records.at(row); }
 
+void TrafficModel::setBudget(qint64 bytes, int rows)
+{
+    m_byteBudget = qMax<qint64>(1, bytes);
+    m_rowBudget = qMax(1, rows);
+    // 收紧预算要立刻生效：缓冲里已有的记录也按新上限裁一遍，否则"改了上限却没变化"
+    // 会让人以为设置没生效。裁掉的条数由调用方在下次播报里一并说清（这里不静默吞）。
+    enforceBudget(m_records, m_byteBudget, m_rowBudget);
+    m_rawBytes = 0;
+    for (const auto &r : m_records)
+        m_rawBytes += r.raw.size();
+}
+
 void TrafficModel::replaceRecords(QList<Traffic::Message> records)
 {
     // This preview model has a hard cap; live batching belongs to the I/O milestone.
     if (records.size() > 2000) records = records.last(2000);
     for (auto &r : records)
         applyPreviewLimit(r);
-    enforceBudget(records);
+    enforceBudget(records, m_byteBudget, m_rowBudget);
     m_records = std::move(records);
     m_rawBytes = 0;
     for (const auto &r : m_records)
         m_rawBytes += r.raw.size();
 }
 
-void TrafficModel::appendRecords(QList<Traffic::Message> records)
+int TrafficModel::appendRecords(QList<Traffic::Message> records)
 {
-    if (records.isEmpty()) return;
+    if (records.isEmpty()) return 0;
     for (auto &r : records)
         applyPreviewLimit(r);
     const int added = records.size();
@@ -124,8 +146,8 @@ void TrafficModel::appendRecords(QList<Traffic::Message> records)
     int drop = 0;
     qint64 keptBytes = m_rawBytes;
     while (drop < m_records.size()
-           && (keptBytes + incomingBytes > TrafficModel::kByteBudget
-               || (m_records.size() - drop) + added > TrafficModel::kRowBudget)) {
+           && (keptBytes + incomingBytes > m_byteBudget
+               || (m_records.size() - drop) + added > m_rowBudget)) {
         keptBytes -= m_records.at(drop).raw.size();
         ++drop;
     }
@@ -133,6 +155,7 @@ void TrafficModel::appendRecords(QList<Traffic::Message> records)
     if (drop > 0) m_records.remove(0, drop);
     m_rawBytes = keptBytes + incomingBytes;
     m_records += records;
+    return drop;
 }
 
 TrafficFilter::TextCondition::TextCondition(const QString &expression, bool regex, Qt::CaseSensitivity sensitivity)
@@ -403,6 +426,13 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_flushTimer->setSingleShot(true);
     m_flushTimer->setInterval(FlushIntervalMs);
     connect(m_flushTimer, &QTimer::timeout, this, &TrafficPanel::flushPending);
+    // 性能心跳：始终开着（250 ms 一拍，成本可忽略）。窗口不可见时 updatePerformance
+    // 会跳过采样——最小化/隐藏时 Windows 会合并定时器，照采会报出毫无意义的"迟滞"。
+    m_perfTimer = new QTimer(this);
+    m_perfTimer->setInterval(PerfTickMs);
+    connect(m_perfTimer, &QTimer::timeout, this, &TrafficPanel::updatePerformance);
+    m_perfClock.start();
+    m_perfTimer->start();
     // 重投影的防抖定时器：外观变化后排队一次，连续切换只落一次重投影。
     m_reprojectTimer = new QTimer(this);
     m_reprojectTimer->setSingleShot(true);
@@ -410,11 +440,20 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 排上队之后外观又被改回去的情况很常见（连点两下开关），落定时再确认一次，
     // 避免做一次结果与当前外观无关的白工。
     connect(m_reprojectTimer, &QTimer::timeout, this, [this] {
-        if (appearanceChanged()) reprojectView();
+        // 外观路径：用**上次已应用**的条件过滤，不把未应用条件套到历史行上；但它改的是
+        // "每行长什么样"，而候选含"按当前格式渲染的文本"——格式专属渲染（DEC/BASE64/转义）
+        // 里命中的条件会随格式移动命中行。也不播报"已按当前条件重投影"那句（会撒谎）。
+        if (appearanceChanged())
+            reprojectView(/*announce=*/false, /*applyCurrentConditions=*/false);
     });
     // 文本视图是唯一显示视图：每条消息按行号、时间、方向起头，载荷按文本本来的
     // 样子展开。模型只做结构化存储（导出/记录/搜索），不再驱动任何逐帧绘制。
     m_text = new TrafficTextView;
+    // 文本视图自己做的头部淘汰必须回到摘要里（它不认识状态栏）。
+    // 两条淘汰路径——模型（哪条还能重投影/导出）与文本（屏幕上还有多少）——
+    // 各自记账，但都要让用户看得见。
+    connect(m_text, &TrafficTextView::blocksReleased, this,
+        [this](int count) { m_releasedLines += static_cast<quint64>(count); });
     auto *empty = new QLabel(tr("等待接收数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。"));
     empty->setAlignment(Qt::AlignCenter);
     empty->setObjectName("EmptyState");
@@ -435,12 +474,23 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     });
     // 按钮是"立即把条件补到已有记录上"的显式入口：直接调用，不走防抖——
     // 用户点了就要这一下改变屏幕，没道理再等 50ms。
-    // 槽带默认参数（announce），所以必须包一层 lambda：信号没有参数可传。
-    connect(m_filterBar, &FilterBar::rebuildRequested, this, [this] { reprojectView(); });
+    // 槽带默认参数，所以必须包一层 lambda：信号没有参数可传。
+    // 「应用过滤」= 让视图跟上**当前**条件（行集可变）：announce 与 applyCurrentConditions 都为真。
+    connect(m_filterBar, &FilterBar::rebuildRequested, this,
+        [this] { reprojectView(/*announce=*/true, /*applyCurrentConditions=*/true); });
     connect(m_format, &QComboBox::currentIndexChanged, this, [this](int) {
         // 编码格式是"渲染规则"，和显示开关一样属于视图外观：切换会重建判定器
         // （渲染文本与 HEX 视图都按它构造），并排队一次重投影把已有内容一起换过来。
         updateFilter();
+        // 记录期间换格式，要在日志里留一行标记：同一份文件里可能有两种格式的数据，
+        // 没有这行，事后翻日志无从判断某一段是按什么格式记的（数据行本身不带格式）。
+        if (m_logFile) {
+            writeLogText(tr("# 格式切换 → %1 %2")
+                             .arg(PayloadCodec::formatName(currentDisplayFormat()),
+                                 QDateTime::currentDateTime().toString(
+                                     QStringLiteral("yyyy-MM-dd HH:mm:ss")))
+                         + QLatin1Char('\n'));
+        }
     });
     // Ctrl+F 聚焦关键词（必要时先展开）；Ctrl+Shift+F 展开/收起整条。
     auto *focusFilter = new QShortcut(QKeySequence::Find, this);
@@ -458,8 +508,22 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         m_text->clearAll();
         m_totalAccepted = 0;
         m_filteredOut = 0;
-        // 缓冲清空了：视图与条件之间不再有"未追平"的关系，签名也一起复位。
-        m_everProjected = false;
+        m_releasedRecords = 0;
+        m_releasedLines = 0;
+        // 缓冲清空了：视图与条件之间不再有"未追平"的关系。
+        // 清空是会话边界，此刻屏幕为空——以**当前条件**作为这一会话的已应用基线不会丢任何
+        // 已显示的行（本来就没有已显示的行）。由此随后的外观重投影一律走"用已应用条件重放"
+        // 的同一条路径，不再有"没有基线就退回当前条件"的例外分支——那条例外会在
+        // 「清空 → 追加 → 敲关键词未应用 → 改外观」这条链上把关键词无声套到历史上，
+        // 破坏"外观不改变行集"的不变量。同时这也让清空后首批数据到达时不会被误判为
+        // "待应用"（那批数据本就是按当前条件收的）。
+        markReprojected();
+        // 清空是会话边界：正在记录时换一个带时间戳的新文件（旧文件原样留在磁盘上，
+        // 不覆盖、不追加）。记录开关保持勾选——用户清的是屏幕，不是记录任务。
+        if (m_logFile) {
+            closeLogFile();
+            openNewLogFile();
+        }
         updateSummary();
     });
     connect(exportButton, &QPushButton::clicked, this, &TrafficPanel::exportVisible);
@@ -522,8 +586,9 @@ void TrafficPanel::loadExample(const QList<PortDraft> &ports)
     m_model->replaceRecords(records);
     // 示例也走同一条投影路径。视图是模型的投影，示例不该是例外：
     // 否则"切了显示设置有一批行不跟着变"、过滤条件对示例失效，两处都会让人以为坏了。
-    // 不播报摘要——用户点的是"载入示例"，不需要再被告知"视图被重投影过"。
-    reprojectView(false);
+    // 载入示例的语义 = "让视图跟上当前条件"（applyCurrentConditions 为真）；
+    // 只是不播报——用户点的是"载入示例"，不需要再被告知"视图被重投影过"。
+    reprojectView(/*announce=*/false, /*applyCurrentConditions=*/true);
     if (m_follow->isChecked()) m_text->scrollToBottom();
 }
 
@@ -547,8 +612,17 @@ void TrafficPanel::flushPending()
     if (m_pending.isEmpty()) return;
     auto batch = std::move(m_pending);
     m_pending.clear();
-    m_model->appendRecords(batch);
+    // 这一批在界面线程上花了多久：心跳把它当"下一拍可能迟到多少"的预告量上报。
+    // 只记窗口内最大值（见 updatePerformance），单批的瞬时值没有意义。
+    QElapsedTimer work;
+    work.start();
+    // 模型从头部释放的条数要累加播报：安全阀触顶是"历史被裁了"的唯一证据，
+    // 静默丢数据会让用户以为是自己看错了（PLAN.md：允许裁剪，但必须提示）。
+    m_releasedRecords += static_cast<quint64>(m_model->appendRecords(batch));
     writeLog(batch); // 记录与显示同流：进模型的批次才落日志
+    // 日志大小在写完这批后读一次（O(1)）：摘要里的"日志 X MB"由此刷新，
+    // 不记录时 m_logBytes 保持 0，摘要自然不出现这段（只报状态，不做写满盘预警）。
+    if (m_logFile) m_logBytes = m_logFile->size();
     // 文本视图按当前过滤条件逐条判定（TrafficFilter::Matcher 的唯一显示出口）。
     // 这是**增量路径**：只处理这一批新行，判定器是 updateFilter 里预编译好的，
     // 每条消息都不重新解释条件、也不重新编译正则。
@@ -565,6 +639,7 @@ void TrafficPanel::flushPending()
     m_filteredOut += static_cast<quint64>(batch.size() - accepted.size());
     m_text->appendMessages(accepted, format, m_displayOptions);
     if (m_follow->isChecked()) m_text->scrollToBottom();
+    m_lastBatchWorkMs = qMax(m_lastBatchWorkMs, work.elapsed());
     updateSummary();
 }
 
@@ -582,7 +657,8 @@ void TrafficPanel::toggleLogRecording(bool enabled)
         return;
     }
     if (m_logPath.isEmpty()) {
-        // 首次开启才选择文件；之后重新勾选沿用上次路径，继续追加而不是另起文件。
+        // 首次开启才选模板路径；之后重开沿用同一模板（目录+基名+扩展名），
+        // 模板本身不带时间戳——存的是"选定过的位置"，不是某一次的文件名。
         m_logPath = QFileDialog::getSaveFileName(this, tr("选择日志文件"),
             QStringLiteral("easyDebug-log.txt"), tr("文本文件 (*.txt *.log *.tsv)"));
         if (m_logPath.isEmpty()) {
@@ -592,41 +668,116 @@ void TrafficPanel::toggleLogRecording(bool enabled)
             return;
         }
     }
-    m_logFile = new QFile(m_logPath, this);
-    if (!m_logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        // 错误提示经摘要信号顶替状态栏文本；界面状态没有其他变化。
-        reportSummary(tr("日志文件无法打开：%1").arg(m_logFile->errorString()));
-        delete m_logFile;
-        m_logFile = nullptr;
+    // 拿到模板路径后无条件重开：新文件带时间戳、从零开始写，绝不追加到旧文件。
+    openNewLogFile();
+}
+
+bool TrafficPanel::openNewLogFile()
+{
+    // 同一时刻只会有一个打开的文件：重开即换新的，先把上一个收口（幂等）。
+    closeLogFile();
+
+    // 模板路径为空是异常情形（例如偏好里没有 recordPath 又走到启动恢复）：
+    // 退到「文档」目录，保证这次记录一定能落下，而不是静默地什么都不写。
+    QString templatePath = m_logPath;
+    if (templatePath.isEmpty()) {
+        const QString dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+        templatePath = QDir(dir).filePath(QStringLiteral("easyDebug-log.txt"));
+    }
+    // 只取模板的"目录 + 基名 + 扩展名"，实际文件名 = 基名 + -yyyyMMdd-HHmmss + 扩展名。
+    // 无扩展名的模板按约定补 .txt。
+    const QFileInfo info(templatePath);
+    const QString dir = info.absolutePath();
+    const QString base = info.completeBaseName().isEmpty() ? QStringLiteral("easyDebug-log")
+                                                           : info.completeBaseName();
+    const QString suffix = info.suffix().isEmpty() ? QStringLiteral("txt") : info.suffix();
+    const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    QString path = QDir(dir).filePath(QStringLiteral("%1-%2.%3").arg(base, stamp, suffix));
+    // 同一秒内重开（清空后立刻再清空）会撞名：依次 -2、-3… 直到不冲突。
+    // 用 exists 预判而不是等 open 失败再退，是为了不把"撞名"误报成打开错误。
+    for (int n = 2; QFile::exists(path); ++n)
+        path = QDir(dir).filePath(QStringLiteral("%1-%2-%3.%4").arg(base, stamp).arg(n).arg(suffix));
+
+    auto *file = new QFile(path, this);
+    if (!file->open(QIODevice::WriteOnly | QIODevice::Text)) {
+        // 沿用既有语义：错误提示经摘要信号顶替状态栏文本；文件未打开则复位勾选。
+        reportSummary(tr("日志文件无法打开：%1").arg(file->errorString()));
+        delete file;
         const QSignalBlocker blocker(m_recordAction);
         m_recordAction->setChecked(false);
-        return;
+        return false;
     }
+    m_logFile = file;
+    m_logFilePath = path;
+    // 每个新文件都先写一行元信息头：日期时间 + 当前显示格式。数据行本身不带格式，
+    // 有这行，事后翻日志才知道"这是哪一次会话、按什么格式记的"。
+    writeLogText(tr("# easyDebug %1 格式=%2")
+                     .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
+                         PayloadCodec::formatName(currentDisplayFormat()))
+                 + QLatin1Char('\n'));
+    refreshRecordTooltip();
+    return true;
+}
+
+void TrafficPanel::writeLogText(const QString &text)
+{
+    if (!m_logFile || text.isEmpty()) return;
+    QTextStream out(m_logFile);
+    out << text;
+    out.flush();
+    // 写失败不能静默：说清原因并立即停止记录（数据批与 # 元信息行同此路径）。
+    if (out.status() != QTextStream::Ok) stopLogOnFailure(m_logFile->errorString());
+}
+
+void TrafficPanel::stopLogOnFailure(const QString &reason)
+{
+    // 沿用既有文案：先说出原因（此时文件还开着，errorString 才是这一笔的），
+    // 再关闭文件、复位勾选。收口只在这里做，避免数据路径与元信息路径各写一份。
+    reportSummary(tr("日志写入失败，记录已停止：%1").arg(reason));
+    closeLogFile();
+    const QSignalBlocker blocker(m_recordAction);
+    m_recordAction->setChecked(false);
+}
+
+void TrafficPanel::refreshRecordTooltip()
+{
+    // 记录中显示"正在写哪个文件"，用户才知道重开后落到了哪里；未记录时恢复原说明。
+    m_recordAction->setToolTip(m_logFile
+            ? tr("记录到文件 · 正在写 %1").arg(QFileInfo(m_logFilePath).fileName())
+            : tr("把新到达的消息按当前显示格式持续写入日志文件"));
 }
 
 void TrafficPanel::writeLog(const QList<Traffic::Message> &messages)
 {
     if (!m_logFile || messages.isEmpty()) return;
     // 一条一行，与监视区同源渲染：方向是事实字段，内容由当前显示格式决定。
+    // 数据行格式保持原样（制表符分隔），仅新文件与格式切换时才多出 # 元信息行。
     const auto format = currentDisplayFormat();
-    QTextStream out(m_logFile);
+    QString block;
     for (const auto &r : messages) {
-        out << r.timestamp.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
-            << '\t' << endpointLabel(r.source.endpointIndex, r.source.endpointKind)
-            << '\t' << (r.source.hasPeer() ? r.source.peerAddress : QStringLiteral("-"))
-            << '\t' << Traffic::directionName(r.direction)
-            << '\t' << PayloadCodec::render(r.raw, format)
-            << '\n';
+        // 状态/警告/错误行的正文是 statusText（"打开串口 COM1 失败：…"这类原因），
+        // raw 是空的。只写 render(raw) 会让日志里出现"有时间有方向、后面空的"行——
+        // 端口异常因此既没弹窗也没日志可查。只有 raw 为空时才用 statusText 顶正文：
+        // 两者都在时载荷本身才是用户要看的东西。
+        QString body;
+        if (!r.isData() && r.raw.isEmpty() && !r.statusText.isEmpty()) {
+            body = r.statusText;
+            // "一条一行"是日志的硬约定：正文里的制表符/换行必须扁平化，
+            // 否则断行的后半截会被下游当成新的一条记录。
+            body.replace(QLatin1Char('\t'), QLatin1Char(' '));
+            body.replace(QLatin1Char('\n'), QLatin1Char(' '));
+            body.replace(QLatin1Char('\r'), QLatin1Char(' '));
+        } else {
+            body = PayloadCodec::render(r.raw, format);
+        }
+        block += r.timestamp.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
+            + QLatin1Char('\t') + endpointLabel(r.source.endpointIndex, r.source.endpointKind)
+            + QLatin1Char('\t') + (r.source.hasPeer() ? r.source.peerAddress : QStringLiteral("-"))
+            + QLatin1Char('\t') + Traffic::directionName(r.direction)
+            + QLatin1Char('\t') + body
+            + QLatin1Char('\n');
     }
-    out.flush();
-    if (out.status() != QTextStream::Ok) {
-        reportSummary(tr("日志写入失败，记录已停止：%1").arg(m_logFile->errorString()));
-        m_logFile->close();
-        delete m_logFile;
-        m_logFile = nullptr;
-        const QSignalBlocker blocker(m_recordAction);
-        m_recordAction->setChecked(false);
-    }
+    writeLogText(block);
 }
 
 void TrafficPanel::closeLogFile()
@@ -636,6 +787,10 @@ void TrafficPanel::closeLogFile()
         delete m_logFile;
         m_logFile = nullptr;
     }
+    // 没有打开的文件，就不该再声称"正在写某个文件"；字节数归零，摘要里的"日志 X"随之消失。
+    m_logBytes = 0;
+    m_logFilePath.clear();
+    refreshRecordTooltip();
 }
 
 void TrafficPanel::setPreferences(PreferencesStore *store)
@@ -684,15 +839,21 @@ void TrafficPanel::loadPreferences()
     m_logPath = m_preferences->value("traffic/recordPath").toString();
     // 折叠状态先落位（此时仍在抑制保存），再统一应用一次。
     m_filterToggle->setChecked(m_preferences->value("filter/expanded", true).toBool());
+    // 启动恢复"记录到文件"：用 QSignalBlocker 拦住 toggled，避免走 toggleLogRecording
+    // 弹出文件对话框（用户钦定启动不打扰，直接开新文件）。勾选先于 m_loading 复位，
+    // 好让随后的 updateFilter→savePreferences 把 record=true 原样写回。
     const bool recordOn = m_preferences->value("traffic/record", false).toBool();
     if (recordOn) {
-        // 上次开着记录：沿用原文件继续追加；文件不可用则复位勾选（含提示）。
+        const QSignalBlocker blocker(m_recordAction);
         m_recordAction->setChecked(true);
     }
     m_loading = false;
     setFilterExpanded(m_filterToggle->isChecked());
     updatePortVisibility();
     updateFilter(); // 恢复完成后统一刷新一次过滤
+    // 恢复完成后才真正开文件：此时显示格式已从偏好落位，元信息头能记下正确格式。
+    // m_logPath 为空的异常情形由 openNewLogFile 兜底到「文档」目录。
+    if (recordOn) openNewLogFile();
 }
 
 void TrafficPanel::savePreferences()
@@ -805,17 +966,40 @@ void TrafficPanel::refreshFilterToggle()
     m_filterBar->setResetAvailable(m_flags->activeCount() > 0);
 }
 
-void TrafficPanel::reprojectView(bool announce)
+void TrafficPanel::reprojectView(bool announce, bool applyCurrentConditions)
 {
     // 视图与条件取得一致的唯一入口。它同时承担两件事：
-    //   ① 显示设置 / 编码格式变化 —— 每行长什么样（用户要求：必须立刻作用于已收到的内容）
-    //   ② 过滤条件变化 —— 哪些行进来（追溯过去要靠它，增量路径只管新行）
+    //   ① 外观（显示设置 / 编码格式）变化 —— 改"每行长什么样"。它只用**上次已应用的条件**
+    //      （m_projectedOptions），因此**不会把未应用的条件套到历史上**；但候选项里含
+    //      "按当前显示格式渲染的文本"（见 TrafficFilter::Matcher），所以**只在某格式专属
+    //      渲染里命中的条件**（DEC / BASE64 / 转义字节等）会随编码格式移动命中的行。这是
+    //      "同一条件在新渲染下的重新求值"，不是条件被换掉——判别依据：此时
+    //      m_projectedOptions == m_filterOptions、「应用过滤」提示保持干净。
+    //   ② 过滤条件变化 —— 换"哪些行进来"，只有「应用过滤」/载入示例才走这条（用户钦定）
     // 数据源是模型的完整缓冲，所以它覆盖的是**全部已到达的数据**，而不是"此后的新行"。
     //
     // 投影成本实测约 6.9 µs/条（见 tests/perf/traffic_perf.cpp）：
     // 关掉那个编辑块优化会让它退回 360 µs/条，5 万条就是 18 秒——这里的每一次调用
     // 都建立在 TrafficTextView::appendMessages 那个 beginEditBlock 之上。
     const int rows = m_model->rowCount();
+
+    // 这次用哪份条件过滤，是唯一的分歧点：
+    //   · applyCurrentConditions —— 用**当前**条件（m_matcher）：行集可变，代表"让视图跟上当前条件"。
+    //   · 否则（外观路径）—— 用**上次已应用**的条件（见上①：不套未应用条件；但格式专属命中的
+    //     条件会随格式重新求值，行集可能移动）。
+    // ⚠️ 边界：一次投影都没做过时 m_projectedOptions 还是默认构造值（endpoints 为空 →
+    //    Matcher::accepts 全 false，会把屏幕清空）。此时没有"已应用条件"可用，回退用当前
+    //    条件，并把它记为已应用（见下方 conditionsApplied）；这条兜底只在外观路径上可能触发。
+    const bool useAppliedConditions = !applyCurrentConditions && m_everProjected;
+    TrafficFilter::Matcher appliedMatcher;
+    const TrafficFilter::Matcher *matcher = &m_matcher;
+    if (useAppliedConditions) {
+        // 已应用条件是不含 format 的值类型，按**当前**编码格式现场预编译一份判定器：
+        // HEX 候选视图依赖 format，不能直接复用绑了当前条件的 m_matcher。
+        appliedMatcher = TrafficFilter::Matcher(m_projectedOptions, currentDisplayFormat());
+        matcher = &appliedMatcher;
+    }
+
     // 翻阅历史时切开关不该被弹回顶部：记下滚动位置的比例，重投影后按比例放回去。
     // 跟随模式下无所谓（反正要钉到底部），所以只在没跟随时记。
     auto *scroll = m_text->verticalScrollBar();
@@ -831,12 +1015,20 @@ void TrafficPanel::reprojectView(bool announce)
     accepted.reserve(rows);
     for (int row = 0; row < rows; ++row) {
         const auto &message = m_model->record(row);
-        if (m_matcher.accepts(message)) accepted.append(message);
+        if (matcher->accepts(message)) accepted.append(message);
     }
+    // 重投影期间临时断开滚动条信号：clearAll + appendMessages 会触发 valueChanged，
+    // 导致"位置不在底部时自动取消跟随"的逻辑误触发，把用户的跟随状态清掉。
+    // 投影完成后手动恢复滚动位置（跟随 → 底部；否则 → 按比例），不需要中间过程触发。
+    disconnect(scroll, &QScrollBar::valueChanged, this, nullptr);
     // 行号按投影结果从 1 重新排：清空与重放是同一个动作的两半，中间不能让旧行号
     // 留在文档里，否则"第 3 行"会指向两条不同的记录。
     m_text->clearAll();
     m_text->appendMessages(accepted, currentDisplayFormat(), m_displayOptions);
+    // 重新连接滚动条信号：向上翻阅时自动取消跟随。
+    connect(scroll, &QScrollBar::valueChanged, this, [this](int position) {
+        if (position < m_text->verticalScrollBar()->maximum()) m_follow->setChecked(false);
+    });
 
     if (showWait) QApplication::restoreOverrideCursor();
 
@@ -844,13 +1036,16 @@ void TrafficPanel::reprojectView(bool announce)
     // 因为更早的行已经被这一次投影丢掉（缓冲之外的历史无法追溯）。
     m_totalAccepted = static_cast<quint64>(accepted.size());
     m_filteredOut = static_cast<quint64>(rows - accepted.size());
-    markReprojected();
+    // conditionsApplied：这次到底有没有"让视图跟上当前条件"。外观路径走已应用条件 → false，
+    // 未应用的条件必须仍被判为待应用；回退用当前条件的那次（还没投影过）算真，因为确实用上了。
+    markReprojected(applyCurrentConditions || !useAppliedConditions);
     if (follow) m_text->scrollToBottom();
     else if (scrollFraction > 0.0)
         scroll->setValue(qRound(scrollFraction * scroll->maximum()));
     updateSummary();
-    // 摘要要说明"这是重投影结果"，否则用户会以为视图一直是这个样子。
-    if (announce && rows > 0)
+    // 只有"跟上当前条件"的这次才播报：那句文案说的是"当前条件"，用在外观路径上会撒谎；
+    // 而外观变化本来就立刻可见，不必再报。
+    if (announce && applyCurrentConditions && rows > 0)
         reportSummary(tr("已按当前条件重投影：显示 %1 条（缓冲 %2 条内匹配）")
                           .arg(accepted.size())
                           .arg(rows));
@@ -873,12 +1068,21 @@ bool TrafficPanel::appearanceChanged() const
     return m_projectedFormat != currentDisplayFormat() || m_projectedDisplay != m_displayOptions;
 }
 
-void TrafficPanel::markReprojected()
+void TrafficPanel::markReprojected(bool conditionsApplied)
 {
-    m_projectedOptions = m_filterOptions;
+    // 外观签名无论哪条路径都要更新：否则 appearanceChanged() 会一直为真，
+    // 防抖定时器每拍都会再做一次同样的重投影。
     m_projectedFormat = currentDisplayFormat();
     m_projectedDisplay = m_displayOptions;
     m_everProjected = true;
+    // 只有真正"让视图跟上当前条件"的这次投影才更新已应用条件（外观路径不动它）：
+    // 这一条正是「应用过滤 •」待应用提示能被正确保持/清除的根据。
+    if (conditionsApplied) m_projectedOptions = m_filterOptions;
+    // 已知残余（所选模型的固有代价，不是 bug）：视图 = 上次投影 + 此后按**当前**条件到达的
+    // 新行。若用户改了条件却没点「应用过滤」，随后到达的、只命中新条件的行会先显示出来；
+    // 此时一次外观重投影（按已应用基线重放）会把它们**收回**，屏幕会变少。这不可怕——
+    // 只要「应用过滤 •」在 m_projectedOptions != m_filterOptions 期间一直可见，用户就知道
+    // 屏幕还没有跟上他刚改的条件、点一下即可落定。所以外观路径绝不写 m_projectedOptions。
 }
 
 void TrafficPanel::refreshApplyHint()
@@ -910,9 +1114,63 @@ void TrafficPanel::updateSummary()
     }
     m_stack->setCurrentWidget(m_totalAccepted == 0 ? static_cast<QWidget *>(m_empty)
                                                    : static_cast<QWidget *>(m_text));
-    reportSummary(m_filteredOut > 0
+    reportSummary([this] {
+        // 摘要 = 会话累计 + 挡住多少 + 安全阀释放了多少。三段都是事实，缺一段就会让人
+        // 误判："看到的少"到底是没收到、被条件挡了，还是最早的被裁掉了。
+        // 释放量只在真的发生过时出现（正常情况下永远是 0，摘要保持干净）。
+        QString summary = m_filteredOut > 0
             ? tr("共 %1 条 · 过滤掉 %2 条").arg(m_totalAccepted).arg(m_filteredOut)
-            : tr("共 %1 条").arg(m_totalAccepted));
+            : tr("共 %1 条").arg(m_totalAccepted);
+        // 缓冲已满是一个事实，不是一个计数：无论触顶发生在模型侧（释放最旧记录）
+        // 还是文本侧（裁掉最早的行），对用户的含义都是"最早的那段已经不在屏幕上了"。
+        // 只报这一句，不再摊开两串对不上号的条数/行数——用户要的是判断，不是算术。
+        if (m_releasedRecords > 0 || m_releasedLines > 0) summary += tr(" · 缓冲区已满");
+        // 日志大小是"用户自己看着办"的状态信息：写满盘由用户判断，我们只报当前多大。
+        if (m_logFile) summary += tr(" · 日志 %1").arg(formatBytes(m_logBytes));
+        // 卡了才说：迟滞超过 100 ms（人开始觉得顿的那条线）才在状态栏出现，
+        // 健康时一个字都不加；详细数值在状态栏的 tooltip 里（performanceChanged）。
+        if (m_reportedLagMs >= PerfJankWarnMs)
+            summary += tr(" · 界面迟滞 %1 ms").arg(m_reportedLagMs);
+        return summary;
+    }());
+}
+
+void TrafficPanel::updatePerformance()
+{
+    // 迟滞 = 这一拍实际比预期晚了多少。用 restart() 拿到距上一拍的真实间隔：
+    // 界面线程被长任务占住时，连 250 ms 的心跳都会迟到，迟到量就是感知到的卡顿量。
+    const qint64 delta = m_perfClock.restart();
+    if (!isVisible()) {
+        // 窗口不可见（最小化/隐藏）：定时器会被系统合并，采样没有意义，
+        // 但要把窗口置空，免得恢复显示时把隐藏期间的值当成"刚才卡了一下"报出去。
+        for (int i = 0; i < PerfWindowTicks; ++i) m_lagSamples[i] = m_workSamples[i] = 0;
+        m_lastBatchWorkMs = 0;
+        m_reportedLagMs = 0;
+        return;
+    }
+    m_lagSamples[m_perfCursor] = qMax<qint64>(0, delta - PerfTickMs);
+    m_workSamples[m_perfCursor] = m_lastBatchWorkMs;
+    m_lastBatchWorkMs = 0;
+    m_perfCursor = (m_perfCursor + 1) % PerfWindowTicks;
+    // 报窗口内最大值而不是平均：用户感知的是长尾，一次 300 ms 的卡顿会被平均值抹平。
+    qint64 maxLag = 0;
+    qint64 maxWork = 0;
+    for (int i = 0; i < PerfWindowTicks; ++i) {
+        maxLag = qMax(maxLag, m_lagSamples[i]);
+        maxWork = qMax(maxWork, m_workSamples[i]);
+    }
+    emit performanceChanged(tr("最近 %1 秒：界面迟滞 ≤ %2 ms · 单批处理 ≤ %3 ms · 缓冲 %4 · 日志 %5")
+                                .arg(PerfWindowTicks * PerfTickMs / 1000)
+                                .arg(maxLag)
+                                .arg(maxWork)
+                                .arg(formatBytes(m_model->rawBytes()),
+                                    m_logFile ? formatBytes(m_logBytes) : tr("未记录")));
+    // 摘要里的告警只在阈值状态翻转时重算，不做每拍无谓的字符串拼接。
+    const qint64 reported = maxLag >= PerfJankWarnMs ? maxLag : 0;
+    if (reported != m_reportedLagMs) {
+        m_reportedLagMs = reported;
+        updateSummary();
+    }
 }
 
 void TrafficPanel::reportSummary(const QString &text)

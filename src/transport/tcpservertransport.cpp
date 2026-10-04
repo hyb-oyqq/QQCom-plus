@@ -128,8 +128,13 @@ void TcpServerTransport::detachPeer(QTcpSocket *socket)
 {
     if (!m_peers.contains(socket))
         return;
+    // 客户端离开必须看得见：以前只在 peer 列表里悄悄少一个（状态栏数字变化），
+    // "对端什么时候断的"无从查起。作为运行期异常事件发布，服务器本身仍在监听。
+    // 用户主动 stop() 时由上层代次过滤这些收尾事件，不会误报。
+    const QString address = m_peers.value(socket).address;
     m_peers.remove(socket);
     socket->deleteLater();
+    emit errorOccurred(m_generation, tr("客户端 %1 已断开").arg(address));
     QList<Transport::PeerInfo> peers;
     peers.reserve(m_peers.size());
     for (auto pit = m_peers.cbegin(); pit != m_peers.cend(); ++pit)
