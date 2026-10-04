@@ -33,6 +33,13 @@ public:
     ~MainWindow();
     void loadExample();
     void showRoutes();
+    // --auto-open（压测/QA 专用，test-only）：把端点 A 的草稿替换为命令行给定配置，
+    // 并触发与"打开 A"按钮完全相同的 open 路径——打开失败弹窗、Error 行、状态行等
+    // 需求 3 的行为照常生效。仅由 main() 在构造并 show 之后调用一次。
+    void autoOpenEndpoint(const PortDraft &draft);
+    // 压测探针对账用的会话累计值：接收记录条数（含示例）与 RX 原始字节数。
+    quint64 sessionRecordCount() const;
+    qint64 sessionRxBytes() const;
 
 protected:
     // 轮询只在窗口真实显示时运行；离屏实例（快照、自动化测试）不扫描硬件。

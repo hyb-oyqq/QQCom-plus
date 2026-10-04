@@ -304,6 +304,18 @@ void MainWindow::toggleEndpoint(int index)
         Q_ARG(int, index), Q_ARG(PortDraft, draft));
 }
 
+void MainWindow::autoOpenEndpoint(const PortDraft &draft)
+{
+    constexpr int EndpointA = 0;
+    if (m_selectors.isEmpty()) return;
+    // 与"打开 A"按钮走同一条路径：草稿落进选择控件 → 广播到各面板 → toggleEndpoint。
+    // setDraft 是"载入"语义、不广播 configurationChanged，所以这里显式 refresh 一次；
+    // 打开失败弹窗 / Error 行 / 状态行等需求 3 的行为由 openEndpoint 事件照常触发。
+    m_selectors.at(EndpointA)->setDraft(draft);
+    refreshEndpoints();
+    toggleEndpoint(EndpointA);
+}
+
 void MainWindow::handleEndpointState(int index, int state, const QString &detail)
 {
     if (index < 0 || index >= m_selectors.size()) return;
@@ -370,6 +382,10 @@ void MainWindow::updateRateLabels()
 }
 
 void MainWindow::loadExample() { m_traffic->loadExample(m_ports); }
+
+quint64 MainWindow::sessionRecordCount() const { return m_traffic ? m_traffic->totalAccepted() : 0; }
+
+qint64 MainWindow::sessionRxBytes() const { return m_rxBytes; }
 
 void MainWindow::showRoutes()
 {

@@ -3,6 +3,7 @@
 
 #include <QElapsedTimer>
 #include <QObject>
+#include <QTimer>
 #include "app/receiveframer.h"
 #include "domain/portdraft.h"
 #include "domain/trafficmessage.h"
