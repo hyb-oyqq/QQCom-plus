@@ -3,10 +3,14 @@
 INCLUDEPATH += $$PWD/.. $$PWD/../..
 
 SOURCES += \
+    $$PWD/commanditem.cpp \
+    $$PWD/commandset.cpp \
     $$PWD/networkaddress.cpp \
     $$PWD/trafficmessage.cpp
 
 HEADERS += \
+    $$PWD/commanditem.h \
+    $$PWD/commandset.h \
     $$PWD/networkaddress.h \
     $$PWD/portdraft.h \
     $$PWD/receiveframing.h \

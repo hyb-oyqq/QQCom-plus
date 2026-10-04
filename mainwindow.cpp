@@ -5,6 +5,7 @@
 #include "ui/panels/routing/routeeditorwidget.h"
 #include "ui/panels/sending/sendpanel.h"
 #include "ui/panels/traffic/trafficpanel.h"
+#include "ui/panels/commands/commandpanel.h"
 #include "discovery/portdiscoveryservice.h"
 #include "persistence/preferencesstore.h"
 
@@ -177,11 +178,26 @@ MainWindow::MainWindow(QWidget *parent)
     dataSplitter->setStretchFactor(0, 1);
     dataSplitter->setStretchFactor(1, 0);
     m_dataSplitter = dataSplitter;
+
+    // 水平分割：左侧数据区（监视+发送），右侧指令面板
+    auto *horizontalSplitter = new QSplitter(Qt::Horizontal);
+
     auto *dataArea = new QWidget;
     auto *dataLayout = new QVBoxLayout(dataArea);
     dataLayout->setContentsMargins(14, 12, 14, 12);
     dataLayout->addWidget(dataSplitter);
-    root->addWidget(dataArea, 1);
+
+    // 指令面板（右侧）
+    m_commandPanel = new CommandPanel;
+    m_commandPanel->setPreferencesStore(preferences);
+    connect(m_commandPanel, &CommandPanel::sendCommand, this, &MainWindow::handleCommandSend);
+
+    horizontalSplitter->addWidget(dataArea);
+    horizontalSplitter->addWidget(m_commandPanel);
+    horizontalSplitter->setStretchFactor(0, 1);
+    horizontalSplitter->setStretchFactor(1, 0);
+
+    root->addWidget(horizontalSplitter, 1);
 
     ui->statusbar->setSizeGripEnabled(true);
     auto *status = new QWidget;
@@ -417,3 +433,48 @@ void MainWindow::hideEvent(QHideEvent *event)
     m_autoRefresh->stop();
     m_rateTimer->stop();
 }
+
+void MainWindow::handleCommandSend(const QString &content, bool isHex, int targetEndpoint)
+{
+    // 指令面板发送：转换格式后通过发送面板发送
+    // targetEndpoint: 0=A, 1=B, 2=AB
+    if (!m_sender) return;
+
+    // 将内容设置到发送面板
+    // 这里简化处理：直接通过 runtime 发送
+    QByteArray payload;
+    if (isHex) {
+        // HEX 格式：移除空格，转换为字节
+        QString hexStr = content;
+        hexStr.remove(QChar(' '));
+        hexStr.remove(QChar(','));
+        payload = QByteArray::fromHex(hexStr.toLatin1());
+    } else {
+        payload = content.toUtf8();
+    }
+
+    if (payload.isEmpty()) return;
+
+    // 发送到指定端点
+    QList<int> targets;
+    if (targetEndpoint == 0) {
+        targets.append(0); // A
+    } else if (targetEndpoint == 1) {
+        targets.append(1); // B
+    } else if (targetEndpoint == 2) {
+        targets.append(0); // AB
+        targets.append(1);
+    }
+
+    for (int index : targets) {
+        if (index >= 0 && index < m_selectors.size()) {
+            // 通过运行时发送
+            QMetaObject::invokeMethod(m_runtime, "write",
+                                      Qt::QueuedConnection,
+                                      Q_ARG(int, index),
+                                      Q_ARG(QByteArray, payload),
+                                      Q_ARG(QUuid, QUuid())); // 空 UUID = 广播
+        }
+    }
+}
+

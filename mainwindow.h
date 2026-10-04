@@ -17,6 +17,7 @@ class PreferencesStore;
 class RouteEditorWidget;
 class SendPanel;
 class TrafficPanel;
+class CommandPanel;
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -56,6 +57,8 @@ private:
     void handleMessage(const Traffic::Message &message);
     void updateEndpointStatus();
     void updateRateLabels();
+    void handleCommandSend(const QString &content, bool isHex, int targetEndpoint);
+
     Ui::MainWindow *ui;
     PreferencesStore *m_preferences = nullptr; // 端点草稿持久化（面板各有自己的注入通道）
     QList<PortDraft> m_ports;
@@ -66,6 +69,7 @@ private:
     RouteEditorWidget *m_bridge;
     TrafficPanel *m_traffic;
     SendPanel *m_sender;
+    CommandPanel *m_commandPanel = nullptr;
     QLabel *m_routeStatus;
 
     // 通信运行时：GUI 组装与观察，命令与数据都经 Qt 队列跨线程。

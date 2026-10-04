@@ -6,6 +6,8 @@ INCLUDEPATH += $$PWD/.. $$PWD/../..
 include($$PWD/common/codec.pri)
 
 SOURCES += \
+    $$PWD/panels/commands/commandpanel.cpp \
+    $$PWD/panels/commands/commandtablewidget.cpp \
     $$PWD/panels/portselector/portselectorwidget.cpp \
     $$PWD/panels/traffic/trafficpanel.cpp \
     $$PWD/panels/traffic/traffictextview.cpp \
@@ -21,6 +23,8 @@ HEADERS += \
     $$PWD/common/endpointformat.h \
     $$PWD/common/bytesformat.h \
     $$PWD/common/combometrics.h \
+    $$PWD/panels/commands/commandpanel.h \
+    $$PWD/panels/commands/commandtablewidget.h \
     $$PWD/panels/portselector/portselectorwidget.h \
     $$PWD/panels/traffic/trafficpanel.h \
     $$PWD/panels/traffic/traffictextview.h \
