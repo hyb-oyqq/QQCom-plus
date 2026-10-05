@@ -64,6 +64,7 @@ private:
     void updateMargins();
 
     QVBoxLayout *m_mainLayout = nullptr;
+    QWidget *m_topBarWidget = nullptr;  // 顶部工具栏容器，用于整体显示/隐藏
     QComboBox *m_setComboBox = nullptr;
     QPushButton *m_addSetButton = nullptr;
     QPushButton *m_removeSetButton = nullptr;

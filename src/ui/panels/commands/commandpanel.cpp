@@ -42,21 +42,23 @@ void CommandPanel::setupUi()
     m_mainLayout->setContentsMargins(4, 4, 4, 4);
     m_mainLayout->setSpacing(4);
 
-    // 顶部工具栏（单行铺开）
-    auto *topBar = new QHBoxLayout();
+    // 顶部工具栏（单行铺开）- 放入容器以便整体控制显示/隐藏
+    m_topBarWidget = new QWidget(this);
+    auto *topBar = new QHBoxLayout(m_topBarWidget);
+    topBar->setContentsMargins(0, 0, 0, 0);
 
-    m_setComboBox = new QComboBox(this);
+    m_setComboBox = new QComboBox(m_topBarWidget);
     m_setComboBox->setMinimumWidth(120);
     connect(m_setComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &CommandPanel::onCurrentSetChanged);
 
     // 撤销/重做已移除：指令面板的编辑都是"所见即所得"的即时落库，撤销栈带来的
     // 隐蔽状态反而让用户困惑（用户钦定）。
-    m_addSetButton = new QPushButton(tr("添加"), this);
-    m_removeSetButton = new QPushButton(tr("删除"), this);
-    m_notesButton = new QPushButton(tr("备注"), this);
-    m_importButton = new QPushButton(tr("导入"), this);
-    m_exportButton = new QPushButton(tr("导出"), this);
+    m_addSetButton = new QPushButton(tr("添加"), m_topBarWidget);
+    m_removeSetButton = new QPushButton(tr("删除"), m_topBarWidget);
+    m_notesButton = new QPushButton(tr("备注"), m_topBarWidget);
+    m_importButton = new QPushButton(tr("导入"), m_topBarWidget);
+    m_exportButton = new QPushButton(tr("导出"), m_topBarWidget);
 
     connect(m_addSetButton, &QPushButton::clicked, this, &CommandPanel::onAddSetClicked);
     connect(m_removeSetButton, &QPushButton::clicked, this, &CommandPanel::onRemoveSetClicked);
@@ -64,7 +66,7 @@ void CommandPanel::setupUi()
     connect(m_importButton, &QPushButton::clicked, this, &CommandPanel::onImportClicked);
     connect(m_exportButton, &QPushButton::clicked, this, &CommandPanel::onExportClicked);
 
-    topBar->addWidget(new QLabel(tr("分组:"), this));
+    topBar->addWidget(new QLabel(tr("分组:"), m_topBarWidget));
     topBar->addWidget(m_setComboBox);
     topBar->addWidget(m_addSetButton);
     topBar->addWidget(m_removeSetButton);
@@ -73,7 +75,7 @@ void CommandPanel::setupUi()
     topBar->addWidget(m_importButton);
     topBar->addWidget(m_exportButton);
 
-    m_mainLayout->addLayout(topBar);
+    m_mainLayout->addWidget(m_topBarWidget);
 
     // 指令表格：只有一份列表，周期发送与协议解析页已移除
     m_commandTable = new CommandTableWidget(this);
@@ -104,6 +106,8 @@ void CommandPanel::setExpanded(bool expanded)
 
 void CommandPanel::applyExpandedState()
 {
+    // 折叠时隐藏顶部工具栏和指令表格，为数据显示让出空间
+    if (m_topBarWidget) m_topBarWidget->setVisible(m_expanded);
     if (m_commandTable) m_commandTable->setVisible(m_expanded);
 
     if (m_expanded) {
@@ -111,8 +115,8 @@ void CommandPanel::applyExpandedState()
         setMaximumWidth(QWIDGETSIZE_MAX);
     } else {
         setMinimumWidth(0);
-        // 收起后只剩顶栏那一排按钮的宽度，分栏边框贴住它
-        setMaximumWidth(qMax(80, m_setComboBox ? m_setComboBox->sizeHint().width() + 40 : 120));
+        // 折叠后面板宽度为 0，完全隐藏
+        setMaximumWidth(0);
     }
 
     updateMargins();
