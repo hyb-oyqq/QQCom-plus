@@ -40,8 +40,8 @@ enum Column
 
 // 发送列的宽度由表内最长指令名决定，上下都封顶：下限保证短名称时按钮也不至于挤成
 // 一团，上限防止一条超长名称把整个发送框列吃掉（超出的部分仍走 tooltip）。
-constexpr int SendColumnMinWidth = 90;
-constexpr int SendColumnMaxWidth = 160;
+constexpr int SendColumnMinWidth = 100;
+constexpr int SendColumnMaxWidth = 200;  // 增加到 200px，显示更多按钮文字
 
 // 结尾符列不写死宽度：按 combo 的 sizeHint 量（见 updateTailColumnWidth）。
 // 这个下限只在空表探针也量不出时兜底，确保最长的 "+\\r\\n" 在任何字体下都完整可见。
@@ -452,7 +452,10 @@ void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
     // 用户看起来就像"点不中、选不了"。
     fitComboToItems(tailComboBox);
     tailComboBox->setToolTip(tr("发送时附加的结尾符"));
-    connect(tailComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
+    // 性能优化：使用 activated 信号而不是 currentIndexChanged
+    // activated 只在用户主动选择时触发，不会在程序设置 setCurrentIndex 时触发
+    // 减少不必要的信号处理，提升响应速度
+    connect(tailComboBox, QOverload<int>::of(&QComboBox::activated), this, [this] {
         if (!m_updating) emit commandsChanged();
     });
     m_table->setCellWidget(row, TailColumn, wrapCentered(tailComboBox));

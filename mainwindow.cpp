@@ -86,7 +86,7 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
     setWindowTitle(QStringLiteral(EASYDEBUG_APP_TITLE) + tr(" · 通信调试工作台"));
-    setMinimumSize(1120, 660);
+    setMinimumSize(1280, 720);  // 增加最小宽度到 1280px，避免扩展面板展开后挤压按钮
     resize(1440, 920);
     ui->menubar->hide();
 
