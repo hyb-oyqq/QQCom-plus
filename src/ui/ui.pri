@@ -8,6 +8,7 @@ include($$PWD/common/codec.pri)
 SOURCES += \
     $$PWD/panels/commands/commandpanel.cpp \
     $$PWD/panels/commands/commandtablewidget.cpp \
+    $$PWD/panels/commands/exportgroupsdialog.cpp \
     $$PWD/panels/portselector/portselectorwidget.cpp \
     $$PWD/panels/traffic/trafficpanel.cpp \
     $$PWD/panels/traffic/traffictextview.cpp \
@@ -15,7 +16,8 @@ SOURCES += \
     $$PWD/panels/traffic/filterflags.cpp \
     $$PWD/panels/sending/sendpanel.cpp \
     $$PWD/panels/routing/routeeditorwidget.cpp \
-    $$PWD/common/endpointformat.cpp
+    $$PWD/common/endpointformat.cpp \
+    $$PWD/common/styledialogs.cpp
 
 HEADERS += \
     $$PWD/common/tintedicon.h \
@@ -23,8 +25,10 @@ HEADERS += \
     $$PWD/common/endpointformat.h \
     $$PWD/common/bytesformat.h \
     $$PWD/common/combometrics.h \
+    $$PWD/common/styledialogs.h \
     $$PWD/panels/commands/commandpanel.h \
     $$PWD/panels/commands/commandtablewidget.h \
+    $$PWD/panels/commands/exportgroupsdialog.h \
     $$PWD/panels/portselector/portselectorwidget.h \
     $$PWD/panels/traffic/trafficpanel.h \
     $$PWD/panels/traffic/traffictextview.h \
