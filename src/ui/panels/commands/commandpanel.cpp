@@ -200,7 +200,7 @@ void CommandPanel::onCurrentSetChanged(int index)
 void CommandPanel::onAddSetClicked()
 {
     bool ok;
-    QString name = QInputDialog::getText(this, tr("添加指令集"),
+    QString name = QInputDialog::getText(window(), tr("添加指令集"),
                                          tr("指令集名称:"), QLineEdit::Normal,
                                          tr("新指令集"), &ok);
     if (!ok || name.trimmed().isEmpty()) return;
@@ -244,7 +244,7 @@ void CommandPanel::onNotesClicked()
     CommandSet set = CommandManager::instance()->getSet(currentId);
 
     bool ok;
-    QString notes = QInputDialog::getMultiLineText(this, tr("备注"),
+    QString notes = QInputDialog::getMultiLineText(window(), tr("备注"),
                                                     tr("指令集备注:"),
                                                     set.notes, &ok);
     if (!ok) return;
