@@ -192,6 +192,9 @@ MainWindow::MainWindow(QWidget *parent)
     m_commandPanel->setPreferencesStore(preferences);
     connect(m_commandPanel, &CommandPanel::sendCommand, this, &MainWindow::handleCommandSend);
 
+    // 连接流量面板的展开/折叠按钮到指令面板
+    connect(m_traffic, &TrafficPanel::commandPanelToggled, m_commandPanel, &CommandPanel::setExpanded);
+
     horizontalSplitter->addWidget(dataArea);
     horizontalSplitter->addWidget(m_commandPanel);
     horizontalSplitter->setStretchFactor(0, 1);

@@ -441,8 +441,12 @@ void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
     // 列5: 结尾符（ComboBox）
     auto *tailComboBox = new QComboBox(this);
     tailComboBox->addItems(tailLabels());
-    // 用索引存取：CommandTail 的取值 0/1/2/3 与下拉顺序一致，且不依赖翻译文本
-    tailComboBox->setCurrentIndex(static_cast<int>(cmd.tail));
+    // 将字符串转换为下拉框索引
+    int tailIndex = 0;
+    if (cmd.tail == "CR") tailIndex = 1;
+    else if (cmd.tail == "LF") tailIndex = 2;
+    else if (cmd.tail == "CR+LF") tailIndex = 3;
+    tailComboBox->setCurrentIndex(tailIndex);
     // 按项目统一约定让样式表自己算宽（箭头画在 combo 的右侧内边距里，只按文本量会偏窄）。
     // 之前它没有走这一步，列宽只有 62px 时 "+\\r\\n" 这类文本把可视区挤到几乎为零，
     // 用户看起来就像"点不中、选不了"。
@@ -475,6 +479,18 @@ void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
     // 手柄控件自己吃掉事件的话就再也拖不动了。
     handle->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_table->setCellWidget(row, HandleColumn, handle);
+}
+
+// 辅助函数：将下拉框索引转换为结尾符字符串
+static QString commandTailFromInt(int index)
+{
+    switch (index) {
+        case 0: return "无";
+        case 1: return "CR";
+        case 2: return "LF";
+        case 3: return "CR+LF";
+        default: return "无";
+    }
 }
 
 CommandItem CommandTableWidget::commandFromRow(int row) const

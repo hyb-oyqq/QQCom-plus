@@ -2,6 +2,7 @@
 #define COMMANDMANAGER_H
 
 #include "domain/commandset.h"
+#include "commandformats.h"
 #include <QObject>
 #include <QList>
 #include <QStack>
@@ -21,7 +22,8 @@ public:
     QList<CommandSet> allSets() const { return m_sets; }
     CommandSet getSet(const QUuid &id) const;
     void addSet(const CommandSet &set);
-    void updateSet(const QUuid &id, const CommandSet &set);
+    void updateSet(const QUuid &id, const CommandSet &set, bool pushUndo = false);
+    void syncSet(const QUuid &id, const CommandSet &set);
     void removeSet(const QUuid &id);
     int setCount() const { return m_sets.size(); }
 
@@ -30,8 +32,9 @@ public:
     void save(PreferencesStore *store);
 
     // 导入导出
-    bool exportToFile(const QString &filePath);
-    bool importFromFile(const QString &filePath, QString &errorMessage);
+    bool exportToFile(const QString &filePath, const CommandFormats::Format format,
+                     const QList<CommandSet> &sets, const QString &errorMessage);
+    bool importFromFile(const QString &filePath, QString &errorMessage, QString *importedSetName = nullptr);
 
     // 撤销重做（操作快照）
     void pushSnapshot();

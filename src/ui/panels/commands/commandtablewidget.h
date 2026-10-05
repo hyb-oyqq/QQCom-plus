@@ -7,6 +7,8 @@
 class QTableWidget;
 class QPushButton;
 class QTimer;
+class QSpinBox;
+class QComboBox;
 
 // 指令表格：显示和编辑单个指令集的所有指令。
 // 支持添加、删除、编辑、拖拽排序、单条发送、批量发送。
@@ -35,6 +37,14 @@ private slots:
     void removeCommand();
     void onCellChanged(int row, int column);
     void onSendClicked();
+    void onCustomContextMenuRequested(const QPoint &pos);
+
+public:
+    void refreshColumnWidths();
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void setupUi();
@@ -42,13 +52,47 @@ private:
     void updateRow(int row, const CommandItem &cmd);
     CommandItem commandFromRow(int row) const;
 
+    // 行操作
+    int rowCount() const;
+    bool isRowChecked(int row) const;
+    QList<int> checkedRows() const;
+    void copyRows(const QList<int> &rows);
+    void removeRows(const QList<int> &rows);
+    void moveRow(int from, int to);
+    bool confirmRemoval(int count);
+    void renameRow(int row);
+
+    // 列宽管理
+    void updateSendColumnWidth();
+    void updateTailColumnWidth();
+
+    // 几何同步
+    void syncCellWidgetGeometry();
+    QWidget *wrapCentered(QWidget *widget);
+
+    // 拖拽指示器
+    void showDropIndicator(int insertAt);
+    void hideDropIndicator();
+    void setDragRowDimmed(int row, bool dimmed);
+
+    // 辅助获取控件
+    QSpinBox *delaySpinBoxAt(int row) const;
+    QComboBox *tailComboBoxAt(int row) const;
+    QPushButton *sendButtonAt(int row) const;
+
     QTableWidget *m_table = nullptr;
     QPushButton *m_addButton = nullptr;
     QPushButton *m_removeButton = nullptr;
     QPushButton *m_batchSendButton = nullptr;
+    QWidget *m_dropIndicator = nullptr;
 
     CommandSet m_currentSet;
     bool m_updating = false; // 防止递归更新
+    bool m_syncingGeometry = false; // 防止递归同步几何
+
+    // 拖拽状态
+    int m_dragRow = -1;
+    int m_dropAt = -1;
 };
 
 #endif

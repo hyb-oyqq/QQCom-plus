@@ -3,11 +3,13 @@
 INCLUDEPATH += $$PWD/.. $$PWD/../..
 
 SOURCES += \
+    $$PWD/commandformats.cpp \
     $$PWD/commandmanager.cpp \
     $$PWD/endpointruntime.cpp \
     $$PWD/receiveframer.cpp
 
 HEADERS += \
+    $$PWD/commandformats.h \
     $$PWD/commandmanager.h \
     $$PWD/endpointruntime.h \
     $$PWD/receiveframer.h

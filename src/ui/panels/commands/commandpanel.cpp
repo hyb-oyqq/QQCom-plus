@@ -415,3 +415,26 @@ void CommandPanel::savePreferences()
     m_preferences->setValue("commandPanel/currentSet",
                             m_setComboBox->currentData().toString());
 }
+
+void CommandPanel::onUndoClicked()
+{
+    CommandManager::instance()->undo();
+}
+
+void CommandPanel::onRedoClicked()
+{
+    CommandManager::instance()->redo();
+}
+
+void CommandPanel::refreshUndoRedoButtons()
+{
+    // 撤销/重做按钮状态更新
+    // TODO: 当 CommandManager 实现撤销栈后，这里更新按钮的启用状态
+}
+
+void CommandPanel::onPeriodicSendTimeout()
+{
+    // 周期发送定时器触发
+    // TODO: 实现周期发送功能
+}
+

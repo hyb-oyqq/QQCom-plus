@@ -1,0 +1,1 @@
+﻿easyDebug	PID=21144	CPU=0%

@@ -11,6 +11,7 @@ class QPushButton;
 class QSpinBox;
 class QTabWidget;
 class QTimer;
+class QVBoxLayout;
 class CommandTableWidget;
 class PreferencesStore;
 
@@ -50,12 +51,19 @@ private slots:
     void refreshSetComboBox();
     void refreshUndoRedoButtons();
 
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
+
 private:
     void setupUi();
     void saveCurrentSet();
     void loadPreferences();
     void savePreferences();
+    void applyExpandedState();
+    void updateMargins();
 
+    QVBoxLayout *m_mainLayout = nullptr;
     QComboBox *m_setComboBox = nullptr;
     QPushButton *m_addSetButton = nullptr;
     QPushButton *m_removeSetButton = nullptr;
@@ -67,6 +75,7 @@ private:
     QPushButton *m_expandButton = nullptr;
 
     QTabWidget *m_tabs = nullptr;
+    CommandTableWidget *m_commandTable = nullptr;
     CommandTableWidget *m_initTable = nullptr;
     CommandTableWidget *m_periodicTable = nullptr;
 
@@ -76,6 +85,7 @@ private:
 
     PreferencesStore *m_preferences = nullptr;
     bool m_expanded = true;
+    bool m_updatingSets = false;
     QUuid m_currentSetId;
 };
 

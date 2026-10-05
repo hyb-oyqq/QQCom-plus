@@ -31,13 +31,15 @@ public:
 signals:
     // payload 已按当前格式/末尾解析为原始字节；targetMask 位 1/2 表示 A/B。
     // 定时发送的每一拍也走同一个信号，路径与手动发送完全一致。
-    void sendRequested(const QByteArray &payload, int targetMask);
+    // scheduled 参数表示是否为定时发送（false 为手动发送）
+    void sendRequested(const QByteArray &payload, int targetMask, bool scheduled = false);
 
 private:
     void updatePreview();
     void updateTargets();
     void updateSendAvailability();
-    void issueSend();
+    void issueSend(bool scheduled = false);
+    int targetMask() const;
     void loadPreferences();
     void savePreferences();
 

@@ -33,9 +33,11 @@ void CommandManager::addSet(const CommandSet &set)
     emit setsChanged();
 }
 
-void CommandManager::updateSet(const QUuid &id, const CommandSet &set)
+void CommandManager::updateSet(const QUuid &id, const CommandSet &set, bool pushUndo)
 {
-    pushSnapshot();
+    if (pushUndo) {
+        pushSnapshot();
+    }
     for (int i = 0; i < m_sets.size(); ++i) {
         if (m_sets[i].id == id) {
             m_sets[i] = set;
@@ -87,10 +89,14 @@ void CommandManager::save(PreferencesStore *store)
     store->setValue("commandSets", array);
 }
 
-bool CommandManager::exportToFile(const QString &filePath)
+bool CommandManager::exportToFile(const QString &filePath, const CommandFormats::Format format,
+                                 const QList<CommandSet> &sets, const QString &errorMessage)
 {
+    Q_UNUSED(format);  // 当前只支持 JSON 格式
+    Q_UNUSED(errorMessage);  // 预留用于错误消息
+
     QJsonArray array;
-    for (const auto &set : m_sets) {
+    for (const auto &set : sets) {
         array.append(set.toJson());
     }
 
@@ -109,8 +115,10 @@ bool CommandManager::exportToFile(const QString &filePath)
     return true;
 }
 
-bool CommandManager::importFromFile(const QString &filePath, QString &errorMessage)
+bool CommandManager::importFromFile(const QString &filePath, QString &errorMessage, QString *importedSetName)
 {
+    Q_UNUSED(importedSetName);  // 预留用于返回导入的集合名称
+
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         errorMessage = tr("无法打开文件");
@@ -181,4 +189,10 @@ void CommandManager::redo()
     m_sets = m_redoStack.pop();
     emit setsChanged();
     emit undoRedoChanged();
+}
+
+void CommandManager::syncSet(const QUuid &id, const CommandSet &set)
+{
+    // 静默更新，不触发撤销栈
+    updateSet(id, set, false);
 }

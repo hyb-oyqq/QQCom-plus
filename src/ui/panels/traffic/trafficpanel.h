@@ -14,6 +14,7 @@
 
 class FilterBar;
 class FilterFlags;
+struct FilterFlagsState;
 class QAction;
 class QComboBox;
 class QFile;
@@ -153,6 +154,7 @@ public:
     quint64 totalAccepted() const { return m_totalAccepted; }
     // 组合根注入的偏好存储；为空时全部显示选项不落盘（示例预览等场景）。
     void setPreferences(PreferencesStore *store);
+    void setCommandPanelToggle(bool expanded);
 signals:
     // 会话累计条数与一次性提示（导出结果、日志写失败）都从这根信号出，
     // 由主窗口放进底部状态栏——面板内部不再为摘要保留一行 UI。
@@ -161,6 +163,8 @@ signals:
     // 主窗口把它挂到状态栏的 tooltip 上——性能属于"要看才发现"的信息，
     // 不值得为它再占一段状态栏宽度，但必须随手可得。
     void performanceChanged(const QString &text);
+    // 指令面板切换信号
+    void commandPanelToggled(bool expanded);
 private:
     void updateFilter();
     // 重投影：把**已应用**的过滤条件与**当前**显示设置重新作用到模型缓冲里的全部记录上。
@@ -196,6 +200,8 @@ private:
     void setFilterExpanded(bool expanded);
     // 折叠按钮的文字：状态 + 生效条件数，收起时也能一眼看出"当前在过滤"。
     void refreshFilterToggle();
+    int activeFlagCount() const;
+    FilterFlagsState filterFlagsState() const;
     void updatePortVisibility();
     void updateSummary();
     // 性能心跳：量"这一拍比预期晚了多少"（界面迟滞）与"上一批处理花了多久"，
@@ -240,6 +246,12 @@ private:
     QPushButton *m_filterToggle;
     FilterFlags *m_flags;
     FilterBar *m_filterBar;
+    // 过滤标志开关
+    QAction *m_stateAction;
+    QAction *m_warningAction;
+    QAction *m_errorAction;
+    // 指令面板切换按钮
+    QPushButton *m_commandPanelToggle = nullptr;
     // 折叠状态用显式标志而不是 isVisible()：窗口整体隐藏时 isVisible() 恒为假，
     // 记忆状态会跟着被读错。
     bool m_filterExpanded = true;

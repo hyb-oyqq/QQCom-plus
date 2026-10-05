@@ -14,6 +14,7 @@ struct CommandItem
     QString description;         // 描述文本（按钮显示）
     bool isHex = false;          // 是否按HEX格式发送
     int delayMs = 50;            // 发送前延时（毫秒）
+    QString tail = "无";         // 结尾符："无" / "CR" / "LF" / "CR+LF"
     QString packMode = "无";     // 组包模式："无" / "组包"
     bool enabled = true;         // 是否启用（对应勾选框）
 
@@ -25,6 +26,9 @@ struct CommandItem
 
     // 验证
     bool isValid() const { return !content.trimmed().isEmpty(); }
+
+    // 获取带结尾符的完整内容
+    QString contentWithTail() const;
 };
 
 #endif
