@@ -195,6 +195,11 @@ MainWindow::MainWindow(QWidget *parent)
     // 连接流量面板的展开/折叠按钮到指令面板
     connect(m_traffic, &TrafficPanel::commandPanelToggled, m_commandPanel, &CommandPanel::setExpanded);
 
+    // 同步初始状态：确保按钮状态和面板状态一致
+    // TrafficPanel 的按钮默认是 checked=true（展开），CommandPanel 的 m_expanded 也是 true
+    // 但需要触发一次 setExpanded 来确保 UI 正确应用这个状态
+    m_commandPanel->setExpanded(true);
+
     horizontalSplitter->addWidget(dataArea);
     horizontalSplitter->addWidget(m_commandPanel);
     horizontalSplitter->setStretchFactor(0, 1);
