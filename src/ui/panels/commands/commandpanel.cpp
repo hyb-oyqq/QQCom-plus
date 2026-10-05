@@ -221,7 +221,7 @@ void CommandPanel::onAddSetClicked()
 void CommandPanel::onRemoveSetClicked()
 {
     if (m_setComboBox->count() <= 1) {
-        QMessageBox::warning(this, tr("无法删除"), tr("至少保留一个指令集"));
+        QMessageBox::warning(window(), tr("无法删除"), tr("至少保留一个指令集"));
         return;
     }
 
@@ -229,7 +229,7 @@ void CommandPanel::onRemoveSetClicked()
     if (currentId.isNull()) return;
 
     QString message = tr("确定要删除指令集 \"%1\" 吗？").arg(m_setComboBox->currentText());
-    int ret = QMessageBox::question(this, tr("删除确认"), message);
+    int ret = QMessageBox::question(window(), tr("删除确认"), message);
     if (ret != QMessageBox::Yes) return;
 
     CommandManager::instance()->removeSet(currentId);
@@ -270,7 +270,7 @@ void CommandPanel::onRedoClicked()
 
 void CommandPanel::onImportClicked()
 {
-    QString filePath = QFileDialog::getOpenFileName(this, tr("导入指令集"),
+    QString filePath = QFileDialog::getOpenFileName(window(), tr("导入指令集"),
                                                      QString(),
                                                      tr("JSON 文件 (*.json)"));
     if (filePath.isEmpty()) return;
@@ -279,16 +279,16 @@ void CommandPanel::onImportClicked()
     bool success = CommandManager::instance()->importFromFile(filePath, errorMessage);
 
     if (success) {
-        QMessageBox::information(this, tr("导入成功"), tr("指令集已成功导入"));
+        QMessageBox::information(window(), tr("导入成功"), tr("指令集已成功导入"));
         savePreferences();
     } else {
-        QMessageBox::critical(this, tr("导入失败"), errorMessage);
+        QMessageBox::critical(window(), tr("导入失败"), errorMessage);
     }
 }
 
 void CommandPanel::onExportClicked()
 {
-    QString filePath = QFileDialog::getSaveFileName(this, tr("导出指令集"),
+    QString filePath = QFileDialog::getSaveFileName(window(), tr("导出指令集"),
                                                      "commands.json",
                                                      tr("JSON 文件 (*.json)"));
     if (filePath.isEmpty()) return;
@@ -296,10 +296,10 @@ void CommandPanel::onExportClicked()
     bool success = CommandManager::instance()->exportToFile(filePath);
 
     if (success) {
-        QMessageBox::information(this, tr("导出成功"),
+        QMessageBox::information(window(), tr("导出成功"),
                                  tr("指令集已导出到:\n%1").arg(filePath));
     } else {
-        QMessageBox::critical(this, tr("导出失败"), tr("无法写入文件"));
+        QMessageBox::critical(window(), tr("导出失败"), tr("无法写入文件"));
     }
 }
 
