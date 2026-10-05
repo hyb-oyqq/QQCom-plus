@@ -7,12 +7,12 @@
 #include "ui/common/endpointformat.h"
 #include "ui/common/stayopenmenu.h"
 #include "ui/common/tintedicon.h"
+#include "ui/common/styledialogs.h"
 #include "persistence/preferencesstore.h"
 
 #include <QApplication>
 #include <QComboBox>
 #include <QDir>
-#include <QFileDialog>
 #include <QFile>
 #include <QFileInfo>
 #include <QKeyEvent>
@@ -26,6 +26,7 @@
 #include <QShortcut>
 #include <QStackedWidget>
 #include <QStandardPaths>
+#include <QStyle>
 #include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -274,8 +275,10 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     setAttribute(Qt::WA_StyledBackground, true);
     setObjectName("Surface");
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(16, 14, 16, 12);
-    layout->setSpacing(12);
+    // 内边距与行距按"紧凑布局、空间全给数据显示区"收紧：四周从 16/14 收到 10/8，
+    // 头块与文本台之间从 12 收到 8。仍保留可见留白，不与卡片边框糊在一起。
+    layout->setContentsMargins(10, 8, 10, 8);
+    layout->setSpacing(8);
 
     // 两行头：第一行是原顶栏（A/B、编码、过滤折叠按钮、显示设置、导出、滚动到底、清空），
     // 第二行是过滤条件条。两行同属一个头块，行距压到 6px——它们是"一次头"，
@@ -322,8 +325,9 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(m_filterToggle, &QPushButton::toggled, this, &TrafficPanel::setFilterExpanded);
     top->addWidget(m_filterToggle);
 
-    // 方向与事件开关就住在折叠按钮旁边（用户钦定）：它们**不进可折叠的第二行**，
-    // 这样条件条收起来时这排开关仍在原位。图标 + 两字文案，不需要悬停就能读懂。
+    // 方向开关（RX / TX）就住在折叠按钮旁边（用户钦定）：它们**不进可折叠的第二行**，
+    // 这样条件条收起来时这两个开关仍在原位。事件类型（状态/警告/错误）已迁进显示设置
+    // 菜单——切换频次低得多，且与那批行内容开关同类，放一起更顺（用户钦定）。
     m_flags = new FilterFlags(this);
     top->addWidget(m_flags);
 
@@ -367,6 +371,16 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         savePreferences();
     });
     displayMenu->addSeparator();
+    // 事件类型开关：状态迁移 / 警告 / 错误。从顶栏搬进来（用户钦定）——它们与上面那批
+    // "我关心哪些行"的选项同类，只是管的是行**类型**而非行**长相**，放在同一个菜单里
+    // 比在顶栏并排五个按钮顺；顶栏只留最常切的 RX/TX。
+    m_stateAction = rowToggle("showStates", tr("状态迁移"), true);
+    m_stateAction->setToolTip(tr("显示状态迁移（端口打开 / 关闭 / 重连）"));
+    m_warningAction = rowToggle("showWarnings", tr("警告"), true);
+    m_warningAction->setToolTip(tr("显示警告日志"));
+    m_errorAction = rowToggle("showErrors", tr("错误"), true);
+    m_errorAction->setToolTip(tr("显示错误日志"));
+    displayMenu->addSeparator();
     // 记录到文件：与"导出"互补。导出是"把当前所见存一份"，记录是"边看边记"——
     // 记录行跟随当前显示格式（HEX 模式记 HEX、文本模式记文本），所见即所记。
     m_recordAction = displayMenu->addAction(tr("记录到文件"));
@@ -395,6 +409,35 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     auto *clear = new QPushButton(tr("清空"));
     clear->setObjectName("clearTraffic");
     top->addWidget(clear);
+
+    // 右侧指令面板的开关，紧挨"清空"（用户钦定把面板的收起/展开放在这里）。
+    // 做成勾选型开关（默认按下=面板展开）：勾选态用 QSS 的 checked 底衬。
+    // 收起时按钮换琥珀色 + 右向箭头（"可展开"），展开时蓝色 + 左向箭头（"可收起"），
+    // 两种状态都有明确的字形与颜色，不会让人以为按钮失效了。
+    m_commandPanelToggle = new QPushButton(tr("扩展"), this);
+    m_commandPanelToggle->setObjectName("commandPanelToggle");
+    m_commandPanelToggle->setCheckable(true);
+    m_commandPanelToggle->setChecked(true);
+    m_commandPanelToggle->setToolTip(tr("展开 / 收起右侧快捷指令面板"));
+    connect(m_commandPanelToggle, &QPushButton::toggled, this, [this](bool expanded) {
+        emit commandPanelToggled(expanded);
+    });
+    // 图标随勾选态换：QPushButton 的图标状态位跟的是 pressed 不是 checked，必须手动换。
+    // 展开 → 双左箭头（提示"可以往左收起"）；收起 → 双右箭头（提示"可以往右展开"）。
+    const QIcon expandedIcon = tintedIcon(QStringLiteral(":/icons/chevron-double-left.svg"),
+                                          QColor(0xff, 0xff, 0xff), BarIconSize);
+    const QIcon collapsedIcon = tintedIcon(QStringLiteral(":/icons/chevron-double-right.svg"),
+                                           QColor(0x7a, 0x3f, 0x00), BarIconSize);
+    const auto refreshToggleAppearance = [this, expandedIcon, collapsedIcon](bool expanded) {
+        m_commandPanelToggle->setIcon(expanded ? expandedIcon : collapsedIcon);
+        // 收起态给按钮加一个属性，供 QSS 画出"值得注意"的琥珀底（用户钦定）。
+        m_commandPanelToggle->setProperty("collapsed", !expanded);
+        m_commandPanelToggle->style()->unpolish(m_commandPanelToggle);
+        m_commandPanelToggle->style()->polish(m_commandPanelToggle);
+    };
+    connect(m_commandPanelToggle, &QPushButton::toggled, this, refreshToggleAppearance);
+    refreshToggleAppearance(m_commandPanelToggle->isChecked());
+    top->addWidget(m_commandPanelToggle);
 
     headLayout->addLayout(top);
 
@@ -454,6 +497,11 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // "回到不过滤"必须是整套动作，否则会留下半套条件。
     connect(m_filterBar, &FilterBar::resetRequested, this, [this] {
         m_flags->restore(FilterFlagsState());
+        // 事件类型开关也要一并复位：条件分散在两个控件里，"回到不过滤"必须是整套动作。
+        for (auto *action : {m_stateAction, m_warningAction, m_errorAction}) {
+            const QSignalBlocker blocker(action);
+            action->setChecked(true);
+        }
         updateFilter();
     });
     // 按钮是"立即把条件补到已有记录上"的显式入口：直接调用，不走防抖——
@@ -645,7 +693,7 @@ void TrafficPanel::toggleLogRecording(bool enabled)
     if (m_logPath.isEmpty()) {
         // 首次开启才选模板路径；之后重开沿用同一模板（目录+基名+扩展名），
         // 模板本身不带时间戳——存的是"选定过的位置"，不是某一次的文件名。
-        m_logPath = QFileDialog::getSaveFileName(this, tr("选择日志文件"),
+        m_logPath = StyleDialogs::getSaveFileName(this, tr("选择日志文件"),
             QStringLiteral("easyDebug-log.txt"), tr("文本文件 (*.txt *.log *.tsv)"));
         if (m_logPath.isEmpty()) {
             // 用户取消 = 不开启；阻断信号复位勾选，避免显示与实际状态不一致。
@@ -804,7 +852,15 @@ void TrafficPanel::loadPreferences()
     const auto legacyEvents = m_preferences->value("traffic/errors", true);
     flags.warnings = m_preferences->value("filter/warnings", legacyEvents).toBool();
     flags.errors = m_preferences->value("filter/errors", legacyEvents).toBool();
+    // 方向两项（RX/TX）回到顶栏控件；事件三项回到显示设置的 QAction——它们各住一处，
+    // 但共用同一套 filter/* 键，所以"条件存在哪"与"开关画在哪"互不影响。
     m_flags->restore(flags);
+    {
+        const QSignalBlocker s(m_stateAction), w(m_warningAction), e(m_errorAction);
+        m_stateAction->setChecked(flags.states);
+        m_warningAction->setChecked(flags.warnings);
+        m_errorAction->setChecked(flags.errors);
+    }
     FilterBarState filter;
     filter.caseSensitive = m_preferences->value("filter/caseSensitive", false).toBool();
     filter.keywords = m_preferences->value("filter/keywords").toStringList();
@@ -846,7 +902,7 @@ void TrafficPanel::savePreferences()
     if (!m_preferences || m_loading) return;
     // 过滤条件分散在两个控件里：顶栏的常驻开关 + 条件条的内容条件。
     // 两者都只是"收集条件"，落盘时一并搬运。
-    const auto flags = m_flags->state();
+    const auto flags = filterFlagsState();
     const auto filter = m_filterBar->state();
     m_preferences->setValue("filter/expanded", m_filterExpanded);
     m_preferences->setValue("filter/rx", flags.rx);
@@ -878,6 +934,13 @@ TrafficPanel::~TrafficPanel()
     closeLogFile();
 }
 
+void TrafficPanel::setCommandPanelToggle(bool expanded)
+{
+    if (!m_commandPanelToggle) return;
+    // setChecked 会 emit toggled（状态真的变了才 emit），主窗口据此执行显隐。
+    m_commandPanelToggle->setChecked(expanded);
+}
+
 void TrafficPanel::updatePortVisibility()
 {
     // A/B 为独立开关：勾选集合即当前显示范围，两个都勾相当于看全部。
@@ -887,12 +950,32 @@ void TrafficPanel::updatePortVisibility()
     updateFilter();
 }
 
+FilterFlagsState TrafficPanel::filterFlagsState() const
+{
+    // 条件分散在两个控件里：方向（RX/TX）在顶栏的 FilterFlags，事件类型（状态/警告/错误）
+    // 在显示设置菜单的 QAction。汇总只此一处，其余代码一律读它，不再各自记"哪项在哪"。
+    FilterFlagsState flags = m_flags->state();
+    if (m_stateAction) flags.states = m_stateAction->isChecked();
+    if (m_warningAction) flags.warnings = m_warningAction->isChecked();
+    if (m_errorAction) flags.errors = m_errorAction->isChecked();
+    return flags;
+}
+
+int TrafficPanel::activeFlagCount() const
+{
+    // 默认全开：关掉任意一项即算"在过滤"。两项来源合并计数——只数顶栏会漏掉
+    // "只关掉了警告"这种最容易被忘掉的情形，而那个数字正是「过滤 · N」的唯一出口。
+    const auto flags = filterFlagsState();
+    return (flags.rx ? 0 : 1) + (flags.tx ? 0 : 1) + (flags.states ? 0 : 1)
+        + (flags.warnings ? 0 : 1) + (flags.errors ? 0 : 1);
+}
+
 void TrafficPanel::updateFilter()
 {
-    // 条件只有三个来源：顶栏的端点范围、顶栏的方向/事件开关、第二行的条件条。
-    // 三者都只是"收集条件"，判定在 Matcher 一处。端点不重复设条件——
+    // 条件只有三个来源：顶栏的端点范围、方向开关（顶栏）+ 事件开关（显示设置）、
+    // 第二行的条件条。三者都只是"收集条件"，判定在 Matcher 一处。端点不重复设条件——
     // A/B 按钮就是端点维度本身（设计稿 §3.1）。
-    const auto flags = m_flags->state();
+    const auto flags = filterFlagsState();
     const auto filter = m_filterBar->state();
     TrafficFilter::Options options;
     options.endpoints = m_visibleEndpoints;
@@ -940,13 +1023,13 @@ void TrafficPanel::refreshFilterToggle()
 {
     // 生效条件数是两处的合计：常驻顶栏的开关 + 条件条的内容条件。
     // 只统计条件条会漏掉"只关掉 RX"这种最常见的情形。
-    const int active = m_flags->activeCount() + m_filterBar->activeConditionCount();
+    const int active = activeFlagCount() + m_filterBar->activeConditionCount();
     const QString caret = m_filterExpanded ? QStringLiteral("▾") : QStringLiteral("▸");
     // 生效条件数写在按钮上：条子收起时，这个数字是"内容条件里还有几条在用"的唯一出口。
     m_filterToggle->setText(active > 0 ? tr("过滤 · %1 %2").arg(active).arg(caret)
                                       : tr("过滤 %1").arg(caret));
     // 重置必须能清掉整组条件，因此它关心的也是这个合计数。
-    m_filterBar->setResetAvailable(m_flags->activeCount() > 0);
+    m_filterBar->setResetAvailable(activeFlagCount() > 0);
 }
 
 void TrafficPanel::reprojectView(bool announce, bool applyCurrentConditions)
@@ -1073,7 +1156,7 @@ void TrafficPanel::updateSummary()
 {
     // 模型是导出用的结构化存储（有上限），屏幕上的历史在文本视图里（上限高得多），
     // 摘要按"会话累计接收条数"播报，不随任何一方的淘汰缩水。
-    const bool filtering = m_flags->activeCount() + m_filterBar->activeConditionCount() > 0;
+    const bool filtering = activeFlagCount() + m_filterBar->activeConditionCount() > 0;
     // 有记录才谈得上"应用过滤"：置灰而不是点了没反应。
     m_filterBar->setRebuildAvailable(m_model->rowCount() > 0);
     // 条件/外观是否已经作用到已有内容上——放在每次摘要刷新时核对，
@@ -1158,7 +1241,7 @@ void TrafficPanel::reportSummary(const QString &text)
 void TrafficPanel::exportVisible()
 {
     if (!m_model->rowCount()) { reportSummary(tr("当前没有可导出的记录")); return; }
-    const auto path = QFileDialog::getSaveFileName(this, tr("导出记录"), "easyDebug-preview.tsv", tr("制表符文件 (*.tsv)"));
+    const auto path = StyleDialogs::getSaveFileName(this, tr("导出记录"), "easyDebug-preview.tsv", tr("制表符文件 (*.tsv)"));
     if (path.isEmpty()) return;
     // 导出列与显示列解耦：导出的是完整的结构化事实。
     // 时间用 ISO 格式带毫秒，方向/边界/来源用稳定名称，HEX 用大写无分隔。

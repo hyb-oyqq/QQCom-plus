@@ -1,15 +1,19 @@
 #include "commandpanel.h"
 #include "commandtablewidget.h"
+#include "exportgroupsdialog.h"
+#include "app/commandformats.h"
 #include "app/commandmanager.h"
 #include "persistence/preferencesstore.h"
 #include "domain/commanditem.h"
+#include "ui/common/styledialogs.h"
 #include <QComboBox>
-#include <QFileDialog>
+#include <QDialog>
 #include <QHBoxLayout>
-#include <QInputDialog>
 #include <QLabel>
-#include <QMessageBox>
+#include <QLineEdit>
 #include <QPushButton>
+#include <QResizeEvent>
+#include <QShowEvent>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTimer>
@@ -22,137 +26,65 @@ CommandPanel::CommandPanel(QWidget *parent) : QWidget(parent)
     // 连接 CommandManager 信号
     connect(CommandManager::instance(), &CommandManager::setsChanged,
             this, &CommandPanel::refreshSetComboBox);
-    connect(CommandManager::instance(), &CommandManager::undoRedoChanged,
-            this, &CommandPanel::refreshUndoRedoButtons);
-
-    // 周期发送定时器
-    m_periodicTimer = new QTimer(this);
-    connect(m_periodicTimer, &QTimer::timeout, this, &CommandPanel::onPeriodicSendTimeout);
 
     refreshSetComboBox();
-    refreshUndoRedoButtons();
+
+    // 构造完就把"默认展开"落到控件上（最小宽度、内边距）。不能只靠 m_expanded 的
+    // 初值——那是"状态"不是"几何"，外部再调 setExpanded(true) 会因为值没变而直接返回。
+    applyExpandedState();
 }
 
 void CommandPanel::setupUi()
 {
-    auto *mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(4, 4, 4, 4);
-    mainLayout->setSpacing(4);
+    m_mainLayout = new QVBoxLayout(this);
+    // 左右边距按面板当前宽度等比给（QSS 给不出"随宽度变化"的值），上下保持 4px。
+    // 见 updateMargins：拖动右侧分栏边框时这里会跟着重算。
+    m_mainLayout->setContentsMargins(4, 4, 4, 4);
+    m_mainLayout->setSpacing(4);
 
-    // 顶部工具栏
+    // 顶部工具栏（单行铺开）
     auto *topBar = new QHBoxLayout();
 
     m_setComboBox = new QComboBox(this);
-    m_setComboBox->setMinimumWidth(150);
+    m_setComboBox->setMinimumWidth(120);
     connect(m_setComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &CommandPanel::onCurrentSetChanged);
 
+    // 撤销/重做已移除：指令面板的编辑都是"所见即所得"的即时落库，撤销栈带来的
+    // 隐蔽状态反而让用户困惑（用户钦定）。
     m_addSetButton = new QPushButton(tr("添加"), this);
     m_removeSetButton = new QPushButton(tr("删除"), this);
     m_notesButton = new QPushButton(tr("备注"), this);
-    m_undoButton = new QPushButton(tr("↶"), this);
-    m_redoButton = new QPushButton(tr("↷"), this);
     m_importButton = new QPushButton(tr("导入"), this);
     m_exportButton = new QPushButton(tr("导出"), this);
-    m_expandButton = new QPushButton(tr("«"), this);
-    m_expandButton->setMaximumWidth(30);
-
-    m_undoButton->setToolTip(tr("撤销"));
-    m_redoButton->setToolTip(tr("重做"));
-    m_expandButton->setToolTip(tr("收起面板"));
 
     connect(m_addSetButton, &QPushButton::clicked, this, &CommandPanel::onAddSetClicked);
     connect(m_removeSetButton, &QPushButton::clicked, this, &CommandPanel::onRemoveSetClicked);
     connect(m_notesButton, &QPushButton::clicked, this, &CommandPanel::onNotesClicked);
-    connect(m_undoButton, &QPushButton::clicked, this, &CommandPanel::onUndoClicked);
-    connect(m_redoButton, &QPushButton::clicked, this, &CommandPanel::onRedoClicked);
     connect(m_importButton, &QPushButton::clicked, this, &CommandPanel::onImportClicked);
     connect(m_exportButton, &QPushButton::clicked, this, &CommandPanel::onExportClicked);
-    connect(m_expandButton, &QPushButton::clicked, this, [this] {
-        setExpanded(!m_expanded);
-    });
 
     topBar->addWidget(new QLabel(tr("分组:"), this));
     topBar->addWidget(m_setComboBox);
     topBar->addWidget(m_addSetButton);
     topBar->addWidget(m_removeSetButton);
     topBar->addWidget(m_notesButton);
-    topBar->addWidget(m_undoButton);
-    topBar->addWidget(m_redoButton);
+    topBar->addStretch();
     topBar->addWidget(m_importButton);
     topBar->addWidget(m_exportButton);
-    topBar->addStretch();
-    topBar->addWidget(m_expandButton);
 
-    mainLayout->addLayout(topBar);
+    m_mainLayout->addLayout(topBar);
 
-    // 标签页
-    m_tabs = new QTabWidget(this);
-
-    // 标签页1: 初始化
-    m_initTable = new CommandTableWidget(this);
-    connect(m_initTable, &CommandTableWidget::commandsChanged,
+    // 指令表格：只有一份列表，周期发送与协议解析页已移除
+    m_commandTable = new CommandTableWidget(this);
+    connect(m_commandTable, &CommandTableWidget::commandsChanged,
             this, &CommandPanel::onCommandsChanged);
-    connect(m_initTable, &CommandTableWidget::sendCommand,
+    connect(m_commandTable, &CommandTableWidget::sendCommand,
             this, &CommandPanel::onSendCommand);
-    connect(m_initTable, &CommandTableWidget::batchSendRequested,
+    connect(m_commandTable, &CommandTableWidget::batchSendRequested,
             this, &CommandPanel::onBatchSendRequested);
-    m_tabs->addTab(m_initTable, tr("初始化"));
 
-    // 标签页2: 周期发送
-    auto *periodicWidget = new QWidget(this);
-    auto *periodicLayout = new QVBoxLayout(periodicWidget);
-
-    auto *periodicControlLayout = new QHBoxLayout();
-    periodicControlLayout->addWidget(new QLabel(tr("间隔:"), this));
-    m_periodicInterval = new QSpinBox(this);
-    m_periodicInterval->setRange(100, 60000);
-    m_periodicInterval->setValue(1000);
-    m_periodicInterval->setSuffix(" ms");
-    periodicControlLayout->addWidget(m_periodicInterval);
-
-    m_startPeriodicButton = new QPushButton(tr("启动周期发送"), this);
-    m_startPeriodicButton->setCheckable(true);
-    connect(m_startPeriodicButton, &QPushButton::toggled, this, [this](bool checked) {
-        if (checked) {
-            m_periodicTimer->start(m_periodicInterval->value());
-            m_startPeriodicButton->setText(tr("停止周期发送"));
-            m_periodicInterval->setEnabled(false);
-        } else {
-            m_periodicTimer->stop();
-            m_startPeriodicButton->setText(tr("启动周期发送"));
-            m_periodicInterval->setEnabled(true);
-        }
-    });
-    periodicControlLayout->addWidget(m_startPeriodicButton);
-    periodicControlLayout->addStretch();
-
-    periodicLayout->addLayout(periodicControlLayout);
-
-    m_periodicTable = new CommandTableWidget(this);
-    connect(m_periodicTable, &CommandTableWidget::commandsChanged,
-            this, &CommandPanel::onCommandsChanged);
-    connect(m_periodicTable, &CommandTableWidget::sendCommand,
-            this, &CommandPanel::onSendCommand);
-    periodicLayout->addWidget(m_periodicTable);
-
-    m_tabs->addTab(periodicWidget, tr("周期发送"));
-
-    // 标签页3: 解析(HEX) - 占位
-    auto *hexParseWidget = new QWidget(this);
-    auto *hexParseLayout = new QVBoxLayout(hexParseWidget);
-    hexParseLayout->addWidget(new QLabel(tr("HEX 解析功能待实现..."), this));
-    hexParseLayout->addStretch();
-    m_tabs->addTab(hexParseWidget, tr("解析(HEX)"));
-
-    // 标签页4: 解析(TXT) - 占位
-    auto *txtParseWidget = new QWidget(this);
-    auto *txtParseLayout = new QVBoxLayout(txtParseWidget);
-    txtParseLayout->addWidget(new QLabel(tr("TXT 解析功能待实现..."), this));
-    txtParseLayout->addStretch();
-    m_tabs->addTab(txtParseWidget, tr("解析(TXT)"));
-
-    mainLayout->addWidget(m_tabs);
+    m_mainLayout->addWidget(m_commandTable, 1);
 }
 
 void CommandPanel::setPreferencesStore(PreferencesStore *store)
@@ -163,45 +95,84 @@ void CommandPanel::setPreferencesStore(PreferencesStore *store)
 
 void CommandPanel::setExpanded(bool expanded)
 {
+    // 面板整体的收起/展开由监视区「扩展」开关驱动（见 TrafficPanel::setCommandPanelExpanded）。
+    // 这里只负责把内容区收起来——外侧的分栏会跟着缩到只剩工具栏那条宽。
+    if (m_expanded == expanded) return;
     m_expanded = expanded;
+    applyExpandedState();
+}
 
-    if (expanded) {
-        m_tabs->show();
-        m_expandButton->setText(tr("«"));
-        m_expandButton->setToolTip(tr("收起面板"));
-        setMinimumWidth(400);
+void CommandPanel::applyExpandedState()
+{
+    if (m_commandTable) m_commandTable->setVisible(m_expanded);
+
+    if (m_expanded) {
+        setMinimumWidth(520);
+        setMaximumWidth(QWIDGETSIZE_MAX);
     } else {
-        m_tabs->hide();
-        m_expandButton->setText(tr("»"));
-        m_expandButton->setToolTip(tr("展开面板"));
-        setMaximumWidth(100);
+        setMinimumWidth(0);
+        // 收起后只剩顶栏那一排按钮的宽度，分栏边框贴住它
+        setMaximumWidth(qMax(80, m_setComboBox ? m_setComboBox->sizeHint().width() + 40 : 120));
     }
 
-    adjustSize();
+    updateMargins();
+}
+
+void CommandPanel::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    // 拖动右侧分栏边框只改变本控件宽度，布局不会替我们做这件事：宽度变了就重算
+    // 内边距。表格那一列是 stretch（QHeaderView::Stretch），Qt 自己会跟着宽度重排，
+    // 不必在这里插手，否则会和"发送列按最长名称自适应"打架。
+    updateMargins();
+}
+
+void CommandPanel::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    updateMargins();
+    // 首次显示时表格宽度到这里才定型：让发送列按可用宽度再量一次
+    if (m_commandTable) m_commandTable->refreshColumnWidths();
+}
+
+void CommandPanel::updateMargins()
+{
+    if (!m_mainLayout) return;
+
+    // 面板越宽，左右留白越大——但只在很窄的区间内变化（4~10px），避免宽面板反而
+    // 把内容挤得离边框太近。上下保持 4px：纵向空间永远让给数据区。
+    const int panelWidth = QWidget::width();
+    const int side = qBound(4, (panelWidth - 400) / 80 + 4, 10);
+    if (m_mainLayout->contentsMargins().left() == side
+        && m_mainLayout->contentsMargins().top() == 4) {
+        return;
+    }
+    m_mainLayout->setContentsMargins(side, 4, side, 4);
 }
 
 void CommandPanel::onCurrentSetChanged(int index)
 {
     if (index < 0) return;
+    // 下拉框重建期间的伪变更：不回写、不重载，交给 refreshSetComboBox 自己收尾
+    if (m_updatingSets) return;
 
     QUuid setId = m_setComboBox->itemData(index).toUuid();
-    if (setId.isNull()) return;
+    if (setId.isNull() || setId == m_currentSetId) return;
 
-    // 保存旧的指令集
+    // 保存旧的指令集（静默回写，不触发 setsChanged）
     saveCurrentSet();
 
     // 加载新的指令集
     m_currentSetId = setId;
     CommandSet set = CommandManager::instance()->getSet(setId);
-    m_initTable->setCommandSet(set);
-    m_periodicTable->setCommandSet(set);
+    m_commandTable->setCommandSet(set);
 }
 
 void CommandPanel::onAddSetClicked()
 {
     bool ok;
-    QString name = QInputDialog::getText(window(), tr("添加指令集"),
-                                         tr("指令集名称:"), QLineEdit::Normal,
+    QString name = StyleDialogs::getText(this, tr("添加指令集"),
+                                         tr("指令集名称:"),
                                          tr("新指令集"), &ok);
     if (!ok || name.trimmed().isEmpty()) return;
 
@@ -221,7 +192,7 @@ void CommandPanel::onAddSetClicked()
 void CommandPanel::onRemoveSetClicked()
 {
     if (m_setComboBox->count() <= 1) {
-        QMessageBox::warning(window(), tr("无法删除"), tr("至少保留一个指令集"));
+        StyleDialogs::warning(this, tr("无法删除"), tr("至少保留一个指令集"));
         return;
     }
 
@@ -229,8 +200,7 @@ void CommandPanel::onRemoveSetClicked()
     if (currentId.isNull()) return;
 
     QString message = tr("确定要删除指令集 \"%1\" 吗？").arg(m_setComboBox->currentText());
-    int ret = QMessageBox::question(window(), tr("删除确认"), message);
-    if (ret != QMessageBox::Yes) return;
+    if (!StyleDialogs::question(this, tr("删除确认"), message)) return;
 
     CommandManager::instance()->removeSet(currentId);
     savePreferences();
@@ -244,62 +214,73 @@ void CommandPanel::onNotesClicked()
     CommandSet set = CommandManager::instance()->getSet(currentId);
 
     bool ok;
-    QString notes = QInputDialog::getMultiLineText(window(), tr("备注"),
+    QString notes = StyleDialogs::getMultiLineText(this, tr("备注"),
                                                     tr("指令集备注:"),
                                                     set.notes, &ok);
     if (!ok) return;
 
     set.notes = notes;
-    CommandManager::instance()->updateSet(currentId, set);
-    savePreferences();
-}
-
-void CommandPanel::onUndoClicked()
-{
-    CommandManager::instance()->undo();
-    refreshSetComboBox();
-    savePreferences();
-}
-
-void CommandPanel::onRedoClicked()
-{
-    CommandManager::instance()->redo();
-    refreshSetComboBox();
+    // 改备注是用户真正的编辑动作：广播让下拉框刷新
+    CommandManager::instance()->updateSet(currentId, set, true);
     savePreferences();
 }
 
 void CommandPanel::onImportClicked()
 {
-    QString filePath = QFileDialog::getOpenFileName(window(), tr("导入指令集"),
+    QString filePath = StyleDialogs::getOpenFileName(this, tr("导入指令集"),
                                                      QString(),
-                                                     tr("JSON 文件 (*.json)"));
+                                                     tr("指令集文件 (*.json *.port *.blemsg);;所有文件 (*.*)"));
     if (filePath.isEmpty()) return;
 
     QString errorMessage;
-    bool success = CommandManager::instance()->importFromFile(filePath, errorMessage);
+    QString detectedLabel;
+    bool success = CommandManager::instance()->importFromFile(filePath, errorMessage,
+                                                              &detectedLabel);
 
     if (success) {
-        QMessageBox::information(window(), tr("导入成功"), tr("指令集已成功导入"));
+        StyleDialogs::information(this, tr("导入成功"),
+                                 tr("已按 %1 格式导入指令集").arg(detectedLabel));
         savePreferences();
     } else {
-        QMessageBox::critical(window(), tr("导入失败"), errorMessage);
+        StyleDialogs::critical(this, tr("导入失败"), errorMessage);
     }
 }
 
 void CommandPanel::onExportClicked()
 {
-    QString filePath = QFileDialog::getSaveFileName(window(), tr("导出指令集"),
-                                                     "commands.json",
-                                                     tr("JSON 文件 (*.json)"));
+    QList<CommandSet> sets = CommandManager::instance()->allSets();
+    if (sets.isEmpty()) {
+        StyleDialogs::information(this, tr("没有可导出的分组"), tr("当前没有任何指令集"));
+        return;
+    }
+
+    // 先把界面上还没落模型的最后一次编辑同步进来，否则导出的会少这一下改动
+    saveCurrentSet();
+    sets = CommandManager::instance()->allSets();
+
+    ExportGroupsDialog dialog(sets, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    QList<CommandSet> selected = dialog.selectedSets();
+    if (selected.isEmpty()) {
+        StyleDialogs::warning(this, tr("未选择分组"), tr("请至少勾选一个分组"));
+        return;
+    }
+
+    const CommandFormats::Format format = dialog.format();
+    const QString defaultName = QStringLiteral("commands.%1").arg(CommandFormats::suffix(format));
+
+    QString filePath = StyleDialogs::getSaveFileName(this, tr("导出指令集"),
+                                                    defaultName,
+                                                    CommandFormats::saveFilter(format));
     if (filePath.isEmpty()) return;
 
-    bool success = CommandManager::instance()->exportToFile(filePath);
-
-    if (success) {
-        QMessageBox::information(window(), tr("导出成功"),
+    QString errorMessage;
+    if (CommandManager::instance()->exportToFile(filePath, format, selected, errorMessage)) {
+        StyleDialogs::information(this, tr("导出成功"),
                                  tr("指令集已导出到:\n%1").arg(filePath));
     } else {
-        QMessageBox::critical(window(), tr("导出失败"), tr("无法写入文件"));
+        StyleDialogs::critical(this, tr("导出失败"), errorMessage);
     }
 }
 
@@ -311,36 +292,41 @@ void CommandPanel::onCommandsChanged()
 
 void CommandPanel::onSendCommand(const CommandItem &cmd, int targetEndpoint)
 {
-    // 延时后发送
-    QTimer::singleShot(cmd.delayMs, this, [this, cmd, targetEndpoint] {
-        emit sendCommand(cmd.content, cmd.isHex, targetEndpoint);
+    // 结尾符在这里附加，MainWindow 的发送接口只认 content + isHex。
+    // targetEndpoint 作为兼容参数继续透传，但 MainWindow 一律以发送区选中的目标为准
+    // （用户钦定：快捷面板单击发送要发到发送区选中的端口），此处的取值不再影响去向。
+    const QString payload = cmd.contentWithTail();
+    QTimer::singleShot(cmd.delayMs, this, [this, payload, isHex = cmd.isHex, targetEndpoint] {
+        emit sendCommand(payload, isHex, targetEndpoint);
     });
 }
 
 void CommandPanel::onBatchSendRequested(const QList<CommandItem> &commands, int targetEndpoint)
 {
-    // 批量发送，累加延时
+    // 批量发送，累加延时；目标同样以发送区选中的端点为准。
     int totalDelay = 0;
     for (const auto &cmd : commands) {
         totalDelay += cmd.delayMs;
-        QTimer::singleShot(totalDelay, this, [this, cmd, targetEndpoint] {
-            emit sendCommand(cmd.content, cmd.isHex, targetEndpoint);
+        const QString payload = cmd.contentWithTail();
+        QTimer::singleShot(totalDelay, this, [this, payload, isHex = cmd.isHex, targetEndpoint] {
+            emit sendCommand(payload, isHex, targetEndpoint);
         });
-    }
-}
-
-void CommandPanel::onPeriodicSendTimeout()
-{
-    // 周期发送所有启用的指令
-    QList<CommandItem> commands = m_periodicTable->enabledCommands();
-    if (!commands.isEmpty()) {
-        onBatchSendRequested(commands, 0); // 默认发送到 A
     }
 }
 
 void CommandPanel::refreshSetComboBox()
 {
-    QUuid currentId = m_setComboBox->currentData().toUuid();
+    // 重入保护：refresh → currentIndexChanged → 回写 → setsChanged → refresh 会无限递归
+    if (m_updatingSets) return;
+    m_updatingSets = true;
+
+    // clear() 把 currentIndex 打回 -1、随后 addItem() 又变回 0，整段重建产生的都是
+    // 伪变更。屏蔽信号保证"模型 → UI"单向流动：重建期间绝不回写模型。
+    const QSignalBlocker blocker(m_setComboBox);
+
+    const QUuid selectedId = m_currentSetId.isNull()
+                                 ? m_setComboBox->currentData().toUuid()
+                                 : m_currentSetId;
 
     m_setComboBox->clear();
 
@@ -350,29 +336,38 @@ void CommandPanel::refreshSetComboBox()
     }
 
     // 恢复选中
-    int indexToSelect = 0;
+    int indexToSelect = -1;
     for (int i = 0; i < m_setComboBox->count(); ++i) {
-        if (m_setComboBox->itemData(i).toUuid() == currentId) {
+        if (m_setComboBox->itemData(i).toUuid() == selectedId) {
             indexToSelect = i;
             break;
         }
     }
+    // 原选中项可能已被删除（removeSet / undo），退回第一项
+    if (indexToSelect < 0 && m_setComboBox->count() > 0) indexToSelect = 0;
     m_setComboBox->setCurrentIndex(indexToSelect);
 
     m_removeSetButton->setEnabled(m_setComboBox->count() > 1);
-}
 
-void CommandPanel::refreshUndoRedoButtons()
-{
-    m_undoButton->setEnabled(CommandManager::instance()->canUndo());
-    m_redoButton->setEnabled(CommandManager::instance()->canRedo());
+    // 下拉框的选中项可能已被外部改变（撤销/删除/导入/加载），把模型里的指令集灌回表格。
+    // 表格只是模型的镜像，这一步只灌数据、绝不反向回写。
+    const QUuid idToLoad = indexToSelect >= 0
+                               ? m_setComboBox->itemData(indexToSelect).toUuid()
+                               : QUuid();
+    m_currentSetId = idToLoad;
+    const CommandSet currentSet = idToLoad.isNull()
+                                      ? CommandSet()
+                                      : CommandManager::instance()->getSet(idToLoad);
+    m_commandTable->setCommandSet(currentSet);
+
+    m_updatingSets = false;
 }
 
 void CommandPanel::saveCurrentSet()
 {
     if (m_currentSetId.isNull()) return;
 
-    CommandSet set = m_initTable->commandSet();
+    CommandSet set = m_commandTable->commandSet();
     set.id = m_currentSetId;
 
     // 保留原来的名称和备注
@@ -380,7 +375,9 @@ void CommandPanel::saveCurrentSet()
     set.name = oldSet.name;
     set.notes = oldSet.notes;
 
-    CommandManager::instance()->updateSet(m_currentSetId, set);
+    // 静默回写：不压撤销快照、不广播 setsChanged。广播会触发下拉框/表格重建，
+    // 重建又产生 currentIndexChanged → saveCurrentSet，是之前栈溢出的直接来源。
+    CommandManager::instance()->syncSet(m_currentSetId, set);
 }
 
 void CommandPanel::loadPreferences()

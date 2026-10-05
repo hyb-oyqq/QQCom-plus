@@ -6,6 +6,17 @@ QWidget {
 }
 QMainWindow, QWidget#centralwidget { background: #e9edf4; }
 QLabel#Muted { color: #5c6880; font-size: 12px; }
+/* 发送区「目标」小标签：做成与 A/B/AB 按钮同族的浅底圆角小块，而不是裸文字。
+   裸文字紧挨三个圆角按钮，字号/边界都对不齐，看着像没排完版。同一套底色与圆角，
+   只是不画边框、不加交互态——它是说明文字，不是可点控件。 */
+QLabel#TargetLabel {
+    background: #eef1f7;
+    color: #4a5670;
+    border: 1px solid #d5dce8;
+    border-radius: 5px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
 QLabel#ByteCount { color: #1d4ed8; font-weight: 600; }
 QLabel#EmptyState { background: #fbfcfe; color: #5c6880; border: 1px dashed #c3ccda; border-radius: 5px; }
 QWidget#Surface { background: #ffffff; border: 1px solid #c8d1e0; border-radius: 8px; }
@@ -28,6 +39,17 @@ QPushButton#showPortA:checked:hover { background: #163fb3; border-color: #163fb3
 QPushButton#showPortA:checked:pressed { background: #12369c; }
 QPushButton#showPortA:!checked, QPushButton#showPortB:!checked { background: #e3e7ee; border-color: #c3ccda; color: #8a94a6; }
 QPushButton#showPortA:!checked:hover { border-color: #9aa7bd; color: #6b7690; }
+/* 指令面板「扩展」开关：展开时实心蓝（面板在位），收起时换成琥珀"提醒色"——
+   面板被收走后按钮仍在，必须比常态更显眼，用户才会想起它还在那儿（用户钦定）。
+   图标随勾选态在 C++ 里手动换（白箭头 / 深琥珀箭头），QSS 只管底色与文字色。 */
+QPushButton#commandPanelToggle:checked { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
+QPushButton#commandPanelToggle:checked:hover { background: #163fb3; border-color: #163fb3; }
+QPushButton#commandPanelToggle:checked:pressed { background: #12369c; }
+QPushButton#commandPanelToggle:!checked { background: #fbbf24; border-color: #b45309; color: #7a3f00; font-weight: 600; }
+QPushButton#commandPanelToggle:!checked:hover { background: #f5b016; border-color: #92400e; color: #5c2f00; }
+QPushButton#commandPanelToggle:!checked:pressed { background: #e09f0a; border-color: #7a3f00; }
+QPushButton#commandPanelToggle[collapsed="true"] { background: #fbbf24; border-color: #b45309; color: #7a3f00; font-weight: 600; }
+QPushButton#commandPanelToggle[collapsed="false"] { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
 QPushButton#PrimaryButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
 QPushButton#PrimaryButton:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#PrimaryButton:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }
@@ -55,15 +77,23 @@ QComboBox::down-arrow { image: url(:/icons/chevron-down.xpm); width: 10px; heigh
 QComboBox QAbstractItemView { background: white; selection-background-color: #1d4ed8; selection-color: #ffffff; border: 1px solid #a9b5c9; outline: none; }
 QPlainTextEdit { background: #ffffff; border: 1px solid #a9b5c9; border-radius: 5px; padding: 9px; selection-background-color: #1d4ed8; selection-color: #ffffff; }
 QCheckBox { spacing: 6px; color: #1f2a3d; }
-QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #8b99b0; border-radius: 3px; background: #ffffff; }
+/* 勾选态必须是"看得见的勾"而不是一块纯色块：用户反馈只填蓝底时分不清有没有勾上。
+   勾画成三段折线的 SVG 内联图（data URI），随底色一起缩放，不依赖外部资源。 */
+QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #8b99b0; border-radius: 4px; background: #ffffff; }
 QCheckBox::indicator:hover { border-color: #1d4ed8; }
-QCheckBox::indicator:checked { background: #1d4ed8; border-color: #1a45c0; }
+QCheckBox::indicator:checked {
+    background: #1d4ed8;
+    border-color: #1a45c0;
+    image: url(:/icons/check-white.svg);
+}
+QCheckBox::indicator:checked:hover { background: #163fb3; }
+QCheckBox::indicator:disabled { background: #eceff5; border-color: #c3ccda; }
 QWidget#BridgeRow { background: #eef2f9; }
 QSplitter::handle { background: transparent; }
 QSplitter::handle:vertical { height: 10px; }
 QSplitter::handle:horizontal { width: 4px; }
 QSplitter::handle:hover { background: #d8e3f7; }
-QStatusBar { background: #ffffff; border-top: 1px solid #b9c4d6; min-height: 30px; }
+QStatusBar { background: #ffffff; border-top: 1px solid #b9c4d6; min-height: 24px; }
 QStatusBar::item { border: none; }
 QLabel#RxStatus { color: #047857; font-family: "Segoe UI"; font-weight: 600; }
 QLabel#TxStatus { color: #1d4ed8; font-family: "Segoe UI"; font-weight: 600; }
@@ -99,7 +129,7 @@ CommandPanel QTableWidget {
     gridline-color: #e4eaf4;
 }
 CommandPanel QTableWidget::item {
-    padding: 4px;
+    padding: 0px;  /* 移除 padding，让 cellWidget 能正确定位 */
     color: #182334;
 }
 CommandPanel QTableWidget::item:selected {
