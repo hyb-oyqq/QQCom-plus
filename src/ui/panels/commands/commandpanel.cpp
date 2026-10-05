@@ -102,6 +102,8 @@ void CommandPanel::setExpanded(bool expanded)
     if (m_expanded == expanded) return;
     m_expanded = expanded;
     applyExpandedState();
+    savePreferences();
+    emit expandedChanged(m_expanded);  // 通知主窗口调整分割器
 }
 
 void CommandPanel::applyExpandedState()

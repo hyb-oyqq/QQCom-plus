@@ -34,6 +34,7 @@ public:
 signals:
     void sendCommand(const QString &content, bool isHex, int targetEndpoint);
     void batchSendRequested(const QStringList &commands, const QList<int> &delays, int targetEndpoint);
+    void expandedChanged(bool expanded);  // 展开/折叠状态改变时发出
 
 private slots:
     void onCurrentSetChanged(int index);

@@ -181,6 +181,8 @@ MainWindow::MainWindow(QWidget *parent)
 
     // 水平分割：左侧数据区（监视+发送），右侧指令面板
     auto *horizontalSplitter = new QSplitter(Qt::Horizontal);
+    horizontalSplitter->setChildrenCollapsible(true);  // 允许完全折叠子控件
+    m_horizontalSplitter = horizontalSplitter;
 
     auto *dataArea = new QWidget;
     auto *dataLayout = new QVBoxLayout(dataArea);
@@ -194,6 +196,32 @@ MainWindow::MainWindow(QWidget *parent)
 
     // 连接流量面板的展开/折叠按钮到指令面板
     connect(m_traffic, &TrafficPanel::commandPanelToggled, m_commandPanel, &CommandPanel::setExpanded);
+
+    // 连接指令面板的展开/折叠状态变化，动态调整分割器
+    connect(m_commandPanel, &CommandPanel::expandedChanged, this, [this](bool expanded) {
+        if (!m_horizontalSplitter) return;
+
+        // 获取当前分割器尺寸
+        QList<int> sizes = m_horizontalSplitter->sizes();
+        if (sizes.size() != 2) return;
+
+        if (expanded) {
+            // 展开：如果右侧宽度为 0，则分配 520 像素
+            if (sizes[1] == 0) {
+                int totalWidth = sizes[0] + sizes[1];
+                sizes[1] = 520;
+                sizes[0] = totalWidth - 520;
+                if (sizes[0] < 300) sizes[0] = 300;  // 确保左侧至少有 300px
+                m_horizontalSplitter->setSizes(sizes);
+            }
+        } else {
+            // 折叠：将右侧宽度设为 0，所有空间给左侧
+            int totalWidth = sizes[0] + sizes[1];
+            sizes[0] = totalWidth;
+            sizes[1] = 0;
+            m_horizontalSplitter->setSizes(sizes);
+        }
+    });
 
     // 同步初始状态：确保按钮状态和面板状态一致
     // TrafficPanel 的按钮默认是 checked=true（展开），CommandPanel 的 m_expanded 也是 true

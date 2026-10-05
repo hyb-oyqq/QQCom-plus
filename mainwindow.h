@@ -65,6 +65,7 @@ private:
     QList<PortSelectorWidget *> m_selectors;
     QTimer *m_autoRefresh;
     QSplitter *m_dataSplitter;
+    QSplitter *m_horizontalSplitter = nullptr;  // 水平分割器：左侧数据区，右侧指令面板
     bool m_dataRatioApplied = false;
     RouteEditorWidget *m_bridge;
     TrafficPanel *m_traffic;
