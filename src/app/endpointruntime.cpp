@@ -21,11 +21,59 @@ EndpointRuntime::~EndpointRuntime()
     }
 }
 
+namespace {
+
+// 状态行的正文：**状态词 + 传输层细节**。
+//
+// 传输层给的 detail 只是"哪个口的什么参数"（例如 `COM2 @115200`），单看它读不出
+// 这条是"刚打开"还是"刚失败"——用户反馈"只有端口信息而没有已打开已关闭的日志"，
+// 指的就是这个：屏幕上出现一行 `状态: COM2 @115200`，看不出连接到底成没成。
+// 所以 Open/Opening 加状态词。
+//
+// **Closed 则要反过来补身份**：它的 detail 是通用措辞（`已关闭 · 用户停止` /
+// `设备错误`），本身不含端口，单看一行"状态: 已关闭 · 用户停止"根本不知道是哪个口关了
+//（用户反馈"不知道谁关闭了"）。而 Open 的 detail（`COM3 @115200`）与 Error 的正文
+//（`打开串口 COM3 失败`）都已自带端口，再补身份就是把同一个端口说两遍——所以身份
+// 只补在**没说清是谁**的地方（`identity` 为空时自动省略）。
+QString stateRowText(int state, const QString &detail, const QString &identity)
+{
+    switch (Transport::State(state)) {
+    case Transport::State::Open:
+        return detail.isEmpty() ? QObject::tr("已打开") : QObject::tr("已打开 · %1").arg(detail);
+    case Transport::State::Opening:
+        return detail.isEmpty() ? QObject::tr("正在打开") : QObject::tr("正在打开 · %1").arg(detail);
+    case Transport::State::Closed:
+        if (detail.isEmpty())
+            return identity.isEmpty() ? QObject::tr("已关闭")
+                                      : QObject::tr("%1 已关闭").arg(identity);
+        return identity.isEmpty() ? detail : QStringLiteral("%1 %2").arg(identity, detail);
+    }
+    return detail;
+}
+
+// 事件行的端点身份：**字母 + 具体端口**，例如 `A · COM3`、`B · 127.0.0.1:9000`。
+// 字母与端点在界面上的叫法一致（用户按"端口 A / 端口 B"思考），端口取自草稿的真实
+// 配置值（未配置时退化成只有字母，不拿默认端口冒充）。
+//
+// 这里没有复用 UI 的 endpointLabel()：那个是"字母 · 类型"（`A · 串口`），出自
+// src/ui/common，而运行时属于 app 层、不能依赖 UI（见 services.pri 的分层）。
+// 两者用途不同——那个用于参数区标识，这个是日志行的归属标记，带的是端口而非类型。
+QString endpointIdentity(int index, const PortDraft &draft)
+{
+    if (index < 0 || index > 25) return {};
+    const QString letter = QString(QChar::fromLatin1('A' + char(index)));
+    const QString port = portShortLabel(draft);
+    return port.isEmpty() ? letter : QStringLiteral("%1 · %2").arg(letter, port);
+}
+
+} // namespace
+
 void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
 {
     if (index < 0 || index >= EndpointCount) return;
     closeTransport(index);
     m_generations[index]++;
+    m_pendingFailureGeneration[index] = 0; // 换代即作废旧失败合并锚点，避免串代误并
     m_drafts[index] = draft;
     // 组帧策略随 open 下发；换策略即清空缓冲，不把上次连接的半帧带进来。
     m_framers[index].setConfig(draft.framing);
@@ -48,10 +96,23 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
     connect(transport, &AbstractTransport::stateChanged, this,
         [this, index, generation](quint64 gen, int state, const QString &detail) {
             if (gen != m_generations[index]) return;
-            auto message = makeMessage(index, Traffic::Direction::State, Traffic::Origin::Automatic,
-                {}, Traffic::Framing::Message);
-            message.statusText = detail;
-            publish(std::move(message));
+            // 一次失败被传输层拆成"errorOccurred + Closed"两条信号；错误行已经给出了完整
+            // 原因，这条随之而来的 Closed 若再单独成行，用户看到的就是"错误 xx"＋"状态 打开失败"
+            // 两条（他反馈的"错误跟状态感觉重复了"）。所以它只负责把端点确实回到 Closed
+            // 这件事告诉界面（复位按钮、状态栏摘要），不再写第二条日志。
+            const bool mergedIntoRecentError = state == int(Transport::State::Closed)
+                && m_pendingFailureGeneration[index] == generation;
+            m_pendingFailureGeneration[index] = 0; // 任何一次状态上报都消费掉这个锚点
+            if (!mergedIntoRecentError) {
+                auto message = makeMessage(index, Traffic::Direction::State, Traffic::Origin::Automatic,
+                    {}, Traffic::Framing::Message);
+            // 状态词与细节在这里拼定，监视区因此能看到"已打开 · COM2 @115200"这样
+            // 一眼读出结果的迁移记录（见 stateRowText 的说明）。
+            // 身份取自**当前草稿**：它要么是本代次 open 下发的配置，要么（重开后）
+            // 已是新配置，两种情况都比"不写是谁"准确。
+            message.statusText = stateRowText(state, detail, endpointIdentity(index, m_drafts[index]));
+                publish(std::move(message));
+            }
             emit endpointStateChanged(index, state, detail);
         });
     connect(transport, &AbstractTransport::dataReceived, this,
@@ -80,6 +141,10 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
     connect(transport, &AbstractTransport::errorOccurred, this,
         [this, index, generation](quint64 gen, const QString &text) {
             if (gen != m_generations[index]) return;
+            // 失败的唯一一条日志：错误行正文就是完整原因。传输层随后若紧跟一条同代次
+            // Closed（打开失败 / 设备错误 / 连接断开都会），状态处理器会把它并进这里，
+            // 不再单独成行——但"端点已回到 Closed"仍会照常上报给界面。
+            m_pendingFailureGeneration[index] = generation;
             auto message = makeMessage(index, Traffic::Direction::Error, Traffic::Origin::Automatic,
                 {}, Traffic::Framing::Message);
             message.statusText = text;
@@ -94,11 +159,19 @@ void EndpointRuntime::closeEndpoint(int index)
     if (index < 0 || index >= EndpointCount) return;
     closeTransport(index);
 
+    // "谁关的"必须写在正文里：以前这条写死"已关闭"，用户看着一条没有来源的关闭记录，
+    // 无从判断是自己点了停止，还是对端断了。用户主动关闭是这个来源的**专有措辞**，
+    // 语义落在 detail 本身（而不是给所有关闭统一套前缀——那会把"打开失败"读成"关过"）。
+    const QString stopped = tr("已关闭 · 用户停止");
     auto message = makeMessage(index, Traffic::Direction::State, Traffic::Origin::Automatic,
         {}, Traffic::Framing::Message);
-    message.statusText = tr("已关闭");
+    // 与传输层上报的状态行共用同一套拼装（stateRowText）——用户主动关闭也是一次
+    // 状态迁移，正文口径必须一致。身份同样要带上，否则"谁关了"只答了一半：
+    // 知道了原因，还是不知道是哪个端口。
+    message.statusText = stateRowText(int(Transport::State::Closed), stopped,
+        endpointIdentity(index, m_drafts[index]));
     publish(std::move(message));
-    emit endpointStateChanged(index, int(Transport::State::Closed), tr("已关闭"));
+    emit endpointStateChanged(index, int(Transport::State::Closed), stopped);
     emit endpointPeersChanged(index, {});
 }
 

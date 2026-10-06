@@ -29,15 +29,17 @@ CommandItem CommandItem::fromJson(const QJsonObject &json)
     return item;
 }
 
+QByteArray CommandItem::tailBytes() const
+{
+    // 结尾符就是这三个字节序列之一。tail 字段的取值只有这四种，非法值按"无"处理
+    // ——发送路径上多一个字节和少一个字节都是协议错误，宁可什么都不加。
+    if (tail == QLatin1String("CR")) return QByteArray("\r", 1);
+    if (tail == QLatin1String("LF")) return QByteArray("\n", 1);
+    if (tail == QLatin1String("CR+LF")) return QByteArray("\r\n", 2);
+    return {};
+}
+
 QString CommandItem::contentWithTail() const
 {
-    QString result = content;
-    if (tail == "CR") {
-        result += "\r";
-    } else if (tail == "LF") {
-        result += "\n";
-    } else if (tail == "CR+LF") {
-        result += "\r\n";
-    }
-    return result;
+    return content + QString::fromLatin1(tailBytes());
 }

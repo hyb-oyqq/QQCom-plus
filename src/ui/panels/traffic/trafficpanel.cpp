@@ -2,15 +2,18 @@
 #include "filterbar.h"
 #include "filterflags.h"
 #include "traffictextview.h"
+#include "viewtoggles.h"
 #include "ui/common/bytesformat.h"
 #include "ui/common/combometrics.h"
 #include "ui/common/endpointformat.h"
+#include "ui/common/rowmetrics.h"
 #include "ui/common/stayopenmenu.h"
 #include "ui/common/tintedicon.h"
 #include "ui/common/styledialogs.h"
 #include "persistence/preferencesstore.h"
 
 #include <QApplication>
+#include <QBoxLayout>
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
@@ -275,9 +278,11 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     setAttribute(Qt::WA_StyledBackground, true);
     setObjectName("Surface");
     auto *layout = new QVBoxLayout(this);
-    // 内边距与行距按"紧凑布局、空间全给数据显示区"收紧：四周从 16/14 收到 10/8，
+    // 内边距与行距按"紧凑布局、空间全给数据显示区"收紧：四周从 16/14 收到 6/8，
     // 头块与文本台之间从 12 收到 8。仍保留可见留白，不与卡片边框糊在一起。
-    layout->setContentsMargins(10, 8, 10, 8);
+    // **左右必须是 6**：数据区外边距 6 + 这里 6 = 12，与端口条内容的缩进对齐
+    //（用户反馈"边框距离内部元素没有对齐"）——改这一项要同步核对那两个数。
+    layout->setContentsMargins(6, 8, 6, 8);
     layout->setSpacing(8);
 
     // 两行头：第一行是原顶栏（A/B、编码、过滤折叠按钮、显示设置、导出、滚动到底、清空），
@@ -326,8 +331,8 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     top->addWidget(m_filterToggle);
 
     // 方向开关（RX / TX）就住在折叠按钮旁边（用户钦定）：它们**不进可折叠的第二行**，
-    // 这样条件条收起来时这两个开关仍在原位。事件类型（状态/警告/错误）已迁进显示设置
-    // 菜单——切换频次低得多，且与那批行内容开关同类，放一起更顺（用户钦定）。
+    // 这样条件条收起来时这两个开关仍在原位。事件类型（状态/警告/错误）在显示设置
+    // 菜单里——切换频次低得多，且与那批行内容开关同类，放一起更顺（用户钦定）。
     m_flags = new FilterFlags(this);
     top->addWidget(m_flags);
 
@@ -335,7 +340,8 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     top->addStretch(1);
 
     // 日志显示设置：行内容开关收进菜单，顶栏只留一个入口。
-    // 方向与事件开关不在这里——它们管的是"哪些行进来"，已迁到过滤条（设计稿 §7.4）。
+    // 方向与事件开关不在这里——它们管的是"哪些行进来"，不是外观：方向常驻顶栏，
+    // 事件（状态/警告/错误）与上面那批"显示哪些行类型"的项一起留在这个菜单里。
     auto *settings = new QPushButton(tr("显示设置"));
     settings->setObjectName("displaySettings");
     settings->setIcon(mutedIcon(QStringLiteral(":/icons/cog.svg"), BarIconSize));
@@ -354,10 +360,16 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_timestampAction = rowToggle("showTimestamp", tr("显示时间戳"), true);
     m_directionAction = rowToggle("showDirection", tr("显示数据方向"), true);
     m_lengthAction = rowToggle("showLength", tr("显示数据长度"), false);
-    m_hexAction = rowToggle("showHex", tr("同时显示 HEX"), false);
-    m_hexAction->setToolTip(tr("数据行之后另起一行显示 HEX 对照（HEX 显示格式下自动省略）"));
-    m_pureAction = rowToggle("pureData", tr("纯数据模式"), false);
-    m_pureAction->setToolTip(tr("移除行号、时间、方向等一切前缀，只显示数据本身"));
+    // 顶栏按钮文案一律取短（用户反馈"按钮文字太长了"）：这一行要塞下 5 个开关 +
+    // 一批动作按钮，每个字都是宽度。**菜单项与顶栏按钮共用 QAction 的文案**（不另抄
+    // 一份短名）——两处说的必须是同一件事，完整解释放进 tooltip。
+    //
+    // 第三个刻意保留"自动"二字：本应用里「换行」另有含义（发送区的结尾符 CR/LF），
+    // 只说「换行」会被读成"给指令加换行符"，那是另一件事。
+    m_hexAction = rowToggle("showHex", tr("HEX 同显"), false);
+    m_hexAction->setToolTip(tr("同时显示 HEX：数据行之后另起一行显示 HEX 对照（HEX 显示格式下自动省略）"));
+    m_pureAction = rowToggle("pureData", tr("纯数据"), false);
+    m_pureAction->setToolTip(tr("纯数据模式：移除行号、时间、方向等一切前缀，只显示数据本身"));
     // 纯数据开启时，行前缀开关全部失效置灰，状态一目了然。
     connect(m_pureAction, &QAction::toggled, this, [this](bool pure) {
         for (auto *action : {m_numberAction, m_timestampAction, m_directionAction, m_lengthAction,
@@ -365,21 +377,33 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
             action->setEnabled(!pure);
     });
     m_wrapAction = rowToggle("wrapTraffic", tr("自动换行"), false);
-    m_wrapAction->setToolTip(tr("按窗口宽度折行显示；关闭时长报文水平滚动"));
+    m_wrapAction->setToolTip(tr("自动换行：按窗口宽度折行显示；关闭时长报文水平滚动"));
     connect(m_wrapAction, &QAction::toggled, this, [this](bool wrap) {
         m_text->setLineWrapping(wrap);
         savePreferences();
     });
     displayMenu->addSeparator();
-    // 事件类型开关：状态迁移 / 警告 / 错误。从顶栏搬进来（用户钦定）——它们与上面那批
-    // "我关心哪些行"的选项同类，只是管的是行**类型**而非行**长相**，放在同一个菜单里
-    // 比在顶栏并排五个按钮顺；顶栏只留最常切的 RX/TX。
+    // 事件类型开关：状态迁移 / 警告 / 错误。它们与上面那批"我关心哪些行"的选项同类，
+    // 只是管的是行**类型**而非行**长相**，放在同一个菜单里比在顶栏并排更顺；
+    // 顶栏那个位置让给了调用频次更高的显示开关（见下）。
     m_stateAction = rowToggle("showStates", tr("状态迁移"), true);
     m_stateAction->setToolTip(tr("显示状态迁移（端口打开 / 关闭 / 重连）"));
     m_warningAction = rowToggle("showWarnings", tr("警告"), true);
     m_warningAction->setToolTip(tr("显示警告日志"));
     m_errorAction = rowToggle("showErrors", tr("错误"), true);
     m_errorAction->setToolTip(tr("显示错误日志"));
+
+    // 显示开关（纯数据模式 / 同时显示 HEX / 自动换行）常驻顶栏，紧跟方向开关之后（用户钦定）：
+    // 三者都是"随手切一下"的外观项目，频次高到不该藏在菜单里两步。顶上的是同一批
+    // QAction 的门面——菜单项照旧保留，两处永远一致（见 ViewToggles）。
+    // 插在 m_flags 之后而不是 addWidget：顶栏右端那批动作按钮的位置与顺序不动。
+    m_viewToggles = new ViewToggles(this);
+    m_viewToggles->bind(m_pureAction, m_hexAction, m_wrapAction);
+    top->insertWidget(top->indexOf(m_flags) + 1, m_viewToggles);
+    // 菜单项显示 tooltip：顶栏按钮文案为了省宽度已经收短，完整解释只在这里还留着，
+    // 不该让用户"按了才知道是什么意思"。
+    displayMenu->setToolTipsVisible(true);
+
     displayMenu->addSeparator();
     // 记录到文件：与"导出"互补。导出是"把当前所见存一份"，记录是"边看边记"——
     // 记录行跟随当前显示格式（HEX 模式记 HEX、文本模式记文本），所见即所记。
@@ -439,6 +463,12 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     refreshToggleAppearance(m_commandPanelToggle->isChecked());
     top->addWidget(m_commandPanelToggle);
 
+    // 顶栏这一行"最少要多宽"由控件自己说了算：一律按 sizeHint 占位
+    // （中间那个 spacer 会被跳过，它不产生宽度需求）。于是这一行的下限就是布局算出来的
+    // minimumSizeHint，不需要（也不允许）外部再逐项求和——手工对账漏掉面板内边距 /
+    // 边框就会差几个像素，表现为最后一个按钮探出右缘（见 rowmetrics.h）。
+    pinRowToContents(top);
+
     headLayout->addLayout(top);
 
     // 过滤条：恒为一行，宽度铺满。它是"哪些行进来"的唯一出口，
@@ -493,23 +523,34 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
 
     connect(m_filterBar, &FilterBar::changed, this, &TrafficPanel::updateFilter);
     connect(m_flags, &FilterFlags::changed, this, &TrafficPanel::updateFilter);
-    // 重置要把常驻顶栏的方向/事件开关一并复位：条件分散在两个控件里，
+    // 重置要把常驻顶栏的方向开关与菜单里的事件开关一并复位：条件分散在两个控件里，
     // "回到不过滤"必须是整套动作，否则会留下半套条件。
     connect(m_filterBar, &FilterBar::resetRequested, this, [this] {
-        m_flags->restore(FilterFlagsState());
+        m_flags->restore(DirectionFlags());
         // 事件类型开关也要一并复位：条件分散在两个控件里，"回到不过滤"必须是整套动作。
         for (auto *action : {m_stateAction, m_warningAction, m_errorAction}) {
             const QSignalBlocker blocker(action);
             action->setChecked(true);
         }
         updateFilter();
+        // **必须显式重投影**：updateFilter() 末尾的 scheduleReproject() 只在"外观变了"
+        // 时才排队（过滤条件的变化按设计只作用于新行），所以仅靠它，按「清除过滤」后
+        // 屏幕上已经过滤掉的行**不会回来**——用户点了却看不到"全部"，等于没反应。
+        // 「清除过滤」与「应用过滤」同属"用户显式要求屏幕跟着变"的动作，都走全量重放，
+        // 区别只在此时条件是空的。announce 为真：状态栏会把重放了多少条说出来。
+        reprojectView(/*announce=*/true, /*applyCurrentConditions=*/true);
     });
     // 按钮是"立即把条件补到已有记录上"的显式入口：直接调用，不走防抖——
     // 用户点了就要这一下改变屏幕，没道理再等 50ms。
     // 槽带默认参数，所以必须包一层 lambda：信号没有参数可传。
     // 「应用过滤」= 让视图跟上**当前**条件（行集可变）：announce 与 applyCurrentConditions 都为真。
-    connect(m_filterBar, &FilterBar::rebuildRequested, this,
-        [this] { reprojectView(/*announce=*/true, /*applyCurrentConditions=*/true); });
+    connect(m_filterBar, &FilterBar::rebuildRequested, this, [this] {
+        // **先刷新条件快照**：正常敲字时 changed() 已经刷过，但「清除过滤」的停用期间
+        // changed() 拿到的是空条件（state() 被停用短路），快照停在空上——这里不补一次，
+        // 点「应用过滤」就会拿旧快照重放，表现为"点了应用过滤却不过滤"。
+        updateFilter();
+        reprojectView(/*announce=*/true, /*applyCurrentConditions=*/true);
+    });
     connect(m_format, &QComboBox::currentIndexChanged, this, [this](int) {
         // 编码格式是"渲染规则"，和显示开关一样属于视图外观：切换会重建判定器
         // （渲染文本与 HEX 视图都按它构造），并排队一次重投影把已有内容一起换过来。
@@ -845,21 +886,18 @@ void TrafficPanel::loadPreferences()
         m_format->setCurrentText(format);
     // 过滤条件：filter/* 是现在的键，旧版 traffic/rx|tx|errors 作为兜底——
     // 上一版把方向开关放在显示设置里，升级后不该让用户的开关状态凭空复位。
-    FilterFlagsState flags;
-    flags.rx = m_preferences->value("filter/rx", m_preferences->value("traffic/rx", true)).toBool();
-    flags.tx = m_preferences->value("filter/tx", m_preferences->value("traffic/tx", true)).toBool();
-    flags.states = m_preferences->value("filter/states", true).toBool();
-    const auto legacyEvents = m_preferences->value("traffic/errors", true);
-    flags.warnings = m_preferences->value("filter/warnings", legacyEvents).toBool();
-    flags.errors = m_preferences->value("filter/errors", legacyEvents).toBool();
     // 方向两项（RX/TX）回到顶栏控件；事件三项回到显示设置的 QAction——它们各住一处，
     // 但共用同一套 filter/* 键，所以"条件存在哪"与"开关画在哪"互不影响。
-    m_flags->restore(flags);
+    DirectionFlags directions;
+    directions.rx = m_preferences->value("filter/rx", m_preferences->value("traffic/rx", true)).toBool();
+    directions.tx = m_preferences->value("filter/tx", m_preferences->value("traffic/tx", true)).toBool();
+    m_flags->restore(directions);
     {
+        const auto legacyEvents = m_preferences->value("traffic/errors", true);
         const QSignalBlocker s(m_stateAction), w(m_warningAction), e(m_errorAction);
-        m_stateAction->setChecked(flags.states);
-        m_warningAction->setChecked(flags.warnings);
-        m_errorAction->setChecked(flags.errors);
+        m_stateAction->setChecked(m_preferences->value("filter/states", true).toBool());
+        m_warningAction->setChecked(m_preferences->value("filter/warnings", legacyEvents).toBool());
+        m_errorAction->setChecked(m_preferences->value("filter/errors", legacyEvents).toBool());
     }
     FilterBarState filter;
     filter.caseSensitive = m_preferences->value("filter/caseSensitive", false).toBool();
@@ -903,7 +941,10 @@ void TrafficPanel::savePreferences()
     // 过滤条件分散在两个控件里：顶栏的常驻开关 + 条件条的内容条件。
     // 两者都只是"收集条件"，落盘时一并搬运。
     const auto flags = filterFlagsState();
-    const auto filter = m_filterBar->state();
+    // 用 **storedState()**（输入框里的原始内容）而不是 state()：后者在「清除过滤」之后
+    // 是空的（那正是停用的表现），拿它落盘会把用户敲的条件**从配置里抹掉**，
+    // 下次启动就真没了（用户反馈"关键词过滤与排除是否可以记忆……又得重新输入"）。
+    const auto filter = m_filterBar->storedState();
     m_preferences->setValue("filter/expanded", m_filterExpanded);
     m_preferences->setValue("filter/rx", flags.rx);
     m_preferences->setValue("filter/tx", flags.tx);
@@ -954,7 +995,10 @@ FilterFlagsState TrafficPanel::filterFlagsState() const
 {
     // 条件分散在两个控件里：方向（RX/TX）在顶栏的 FilterFlags，事件类型（状态/警告/错误）
     // 在显示设置菜单的 QAction。汇总只此一处，其余代码一律读它，不再各自记"哪项在哪"。
-    FilterFlagsState flags = m_flags->state();
+    const auto directions = m_flags->directions();
+    FilterFlagsState flags;
+    flags.rx = directions.rx;
+    flags.tx = directions.tx;
     if (m_stateAction) flags.states = m_stateAction->isChecked();
     if (m_warningAction) flags.warnings = m_warningAction->isChecked();
     if (m_errorAction) flags.errors = m_errorAction->isChecked();
@@ -1013,7 +1057,7 @@ void TrafficPanel::setFilterExpanded(bool expanded)
 {
     m_filterExpanded = expanded;
     // 收起只隐藏第二行（内容条件）：判定器、记忆状态一律不动——
-    // "折叠"是显示行为，不是"关闭过滤"；顶栏的方向/事件开关也不受影响。
+    // "折叠"是显示行为，不是"关闭过滤"；顶栏的方向开关与显示开关都不受影响。
     m_filterBar->setVisible(expanded);
     refreshFilterToggle();
     savePreferences();

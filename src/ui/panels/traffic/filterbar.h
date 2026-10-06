@@ -9,8 +9,9 @@ class QPushButton;
 
 // 条件条的完整状态：与 TrafficFilter::Options 的内容条件一一对应，不依赖它——
 // 条件条只是"收集条件"，不引入反向依赖，也便于单测直接构造。
-// 方向与事件开关（rx/tx/states/warnings/errors）**不在这里**：它们常驻顶栏，
-// 由 `FilterFlags` 持有（用户钦定：条件条收起来时这排开关仍然要看得见）。
+// 方向与事件开关（rx/tx/states/warnings/errors）**不在这里**：它们管的是"哪些行进来"
+// 而不是"行里的内容长什么样"。方向开关常驻顶栏（FilterFlags），事件开关在显示设置菜单
+// （用户钦定）——两者都在本控件之外，但"重置"要能把它们一并复位，见 setResetAvailable。
 struct FilterBarState
 {
     bool caseSensitive = false;
@@ -34,9 +35,13 @@ public:
 
     // 条件快照：与 TrafficFilter::Options 的同名内容条件一一对应。
     FilterBarState state() const;
+    // 输入框里的**原始条件**。与 state() 的唯一差别：**不受「清除过滤」的停用影响**。
+    // 持久化用这一份——按下「清除过滤」只是停用当前过滤，敲进去的关键词/排除词该被记住
+    //（用户反馈"关键词过滤与排除是否可以记忆，当我清除过滤时，又得重新输入，很麻烦"）。
+    FilterBarState storedState() const;
 
     // 本行生效的内容条件个数（关键词 / 排除词 / 大小写）。
-    // 方向与事件开关常驻顶栏，由面板把它们的计数并进来（见 setResetAvailable）。
+    // 方向与事件开关都在本控件之外，由面板把它们的计数并进来（见 setResetAvailable）。
     int activeConditionCount() const;
 
     // 恢复条件：内部抑制 changed，避免加载半成品状态时把已存的值覆盖掉。
@@ -45,7 +50,7 @@ public:
     // 一键回到不过滤（重置按钮与外部入口共用）：只清本行的内容条件。
     void clearAll();
 
-    // 顶栏那排方向/事件开关不在本控件内，但"重置"要能把它们一并复位：
+    // 顶栏那排方向开关（与显示设置里的事件开关）不在本控件内，但"重置"要能把它们一并复位：
     // 面板通过这个入口说明"外面还有条件在用"，否则只关掉 RX 时重置按钮会是灰的。
     void setResetAvailable(bool available);
 
@@ -85,10 +90,14 @@ private:
     QPushButton *m_case = nullptr;
     QPushButton *m_rebuild = nullptr;
     QPushButton *m_reset = nullptr;
-    bool m_resetAvailable = false;   // 外部（顶栏方向/事件开关）是否还有生效条件
+    bool m_resetAvailable = false;   // 外部（方向开关 / 事件开关）是否还有生效条件
     bool m_rebuildAvailable = false; // 模型里还有记录可回溯
     bool m_applyPending = false;     // 条件改了但还没补到已有记录上
     bool m_restoring = false;        // 恢复期间抑制 changed
+    // 「清除过滤」按下后为真：条件**停用**但**输入框内容保留**。它让 state() 返回空条件
+    // （于是显示全部），而 storedState() 照旧拿到用户敲的内容。用户一改输入框或点
+    // 「应用过滤」即恢复生效。
+    bool m_suspended = false;
 };
 
 #endif

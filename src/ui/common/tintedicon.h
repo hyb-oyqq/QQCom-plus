@@ -65,6 +65,24 @@ inline QIcon tintedIcon(const QString &path, const QColor &color, int size)
     return icon;
 }
 
+// 「上移」版静音图标：QLineEdit 的 leading action 图标由 Qt 落进内容矩形，实测比同行
+// 文字的视觉中线低约 2 个逻辑像素（用户反馈"图标偏左下角"；改 SVG viewBox 补偿在 Qt 的
+// SVG 渲染下不生效——preserveAspectRatio 的对齐把平移吃掉了），所以在像素层面直接把
+// 图形上移。顶部被裁掉的是图标自身四周的透明边距（MDI 字形上缘距 viewBox 顶约 3/24），
+// liftPx=2 时没有可见损失。
+inline QIcon liftedMutedIcon(const QString &path, int size, int liftPx = 2)
+{
+    const QPixmap src = tintedPixmap(path, QColor(QStringLiteral("#647590")), size);
+    QPixmap dst(size, size);
+    dst.fill(Qt::transparent);
+    QPainter painter(&dst);
+    painter.drawPixmap(0, -liftPx, src);
+    painter.end();
+    QIcon icon;
+    icon.addPixmap(dst);
+    return icon;
+}
+
 // 勾选型按钮的图标随勾选态换色：未勾选用静音灰，勾选用 QSS 选中态文字色（深琥珀）。
 // 每个勾选按钮都要这三行，抽出来只有一份——"琥珀底上出现灰字"这个错只需要防一次。
 inline void bindToggleIcon(QPushButton *button, const QString &path, int size,

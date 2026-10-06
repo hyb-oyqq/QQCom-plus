@@ -7,23 +7,18 @@ QWidget {
     color: #e8ecf1;
 }
 QMainWindow, QWidget#centralwidget { background: #1a1f2e; }
-QLabel#Muted { color: #8b95a8; font-size: 12px; }
-QLabel#TargetLabel {
-    background: #252b3d;
-    color: #a5b1c7;
-    border: 1px solid #35405a;
-    border-radius: 5px;
-    padding: 4px 8px;
-    font-size: 12px;
-}
-QLabel#ByteCount { color: #5b9eff; font-weight: 600; }
+QLabel#Muted, QLabel#StatusNote { color: #8b95a8; font-size: 12px; }
+/* 字节数的颜色**不在这里**：它与预览文本合并在同一个 QLabel 里、用富文本 span 着色
+   （见 sendpanel.cpp 的 ByteCountColor）。QSS 不作用于 span，所以那个值必须写在代码里。 */
 QLabel#EmptyState { background: #1e2433; color: #7a8599; border: 1px dashed #3d4758; border-radius: 5px; }
 QWidget#Surface { background: #242936; border: 1px solid #2f3749; border-radius: 8px; }
-QFrame#EndpointBar { background: #242936; border-bottom: 1px solid #343d52; }
+/* 与浅色表同款：端口条 = 卡片外观（见 workbench.qss 的说明）。 */
+QFrame#EndpointBar { background: #242936; border: 1px solid #2f3749; border-radius: 8px; }
 QFrame#EndpointDivider { color: #2d3649; max-height: 1px; }
 QFrame#BridgeDivider { color: #2f3749; max-width: 1px; }
 QLabel#EndpointBadge { background: #1d4ed8; color: #ffffff; border: 1px solid #1a45c0; border-radius: 12px; font-weight: 700; }
-PortSelectorWidget { background: #242936; }
+/* 端点行不再铺底：自绘背景会盖掉端口条的圆角（见浅色表的说明）。 */
+PortSelectorWidget { background: transparent; }
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: #242936; }
 QPushButton, QToolButton { background: #2d3548; border: 1px solid #434d64; border-radius: 5px; padding: 4px 11px; min-height: 18px; color: #d4dae5; }
@@ -81,15 +76,22 @@ QCheckBox::indicator:checked {
 }
 QCheckBox::indicator:checked:hover { background: #2860e8; }
 QCheckBox::indicator:disabled { background: #1e2433; border-color: #3d4758; }
+/* 批量发送进度：与浅色表同一套语义（琥珀=正在发，绿=已发），只按深色调色板调亮度。 */
+QCheckBox[sendState="sending"]::indicator:checked { background: #d97706; border-color: #92400e; }
+QCheckBox[sendState="sent"]::indicator:checked { background: #047857; border-color: #03674a; }
+QPushButton[sending="true"] { background: #4a3a17; border-color: #b45309; color: #fbbf24; font-weight: 600; }
+QPushButton[sending="true"]:hover { background: #5a4718; border-color: #d97706; }
 QWidget#BridgeRow { background: #1e2433; }
 QSplitter::handle { background: transparent; }
 QSplitter::handle:vertical { height: 10px; }
 QSplitter::handle:horizontal { width: 4px; }
 QSplitter::handle:hover { background: #2f3749; }
+/* 与浅色表同款：状态栏所有标签统一字号（见 workbench.qss 的说明）。 */
+QStatusBar QLabel { font-size: 12px; }
 QStatusBar { background: #242936; border-top: 1px solid #343d52; min-height: 24px; }
 QStatusBar::item { border: none; }
-QLabel#RxStatus { color: #10b981; font-family: "Segoe UI"; font-weight: 600; }
-QLabel#TxStatus { color: #5b9eff; font-family: "Segoe UI"; font-weight: 600; }
+QLabel#RxStatus { color: #10b981; font-weight: 600; }
+QLabel#TxStatus { color: #5b9eff; font-weight: 600; }
 QLabel#TrafficStatus { color: #8b95a8; }
 QTableView {
     background: #242936;

@@ -57,6 +57,11 @@ private:
     AbstractTransport *m_transports[EndpointCount] = {};
     PortDraft m_drafts[EndpointCount];
     quint64 m_generations[EndpointCount] = {};
+    // 失败合并的锚点：传输层把一次失败拆成 errorOccurred + stateChanged(Closed) 两条信号
+    // （两条都是真实事件，底层契约不许删），但用户需要读到的只有一条。这里记下"刚报过
+    // 错误的代次"，紧随其后的同代次 Closed 便并入那条错误行、不再另发零信息的状态行。
+    // 0 是哨兵：代次从 1 起递增，0 永远不是一次真实事件的代次。
+    quint64 m_pendingFailureGeneration[EndpointCount] = {};
     ReceiveFramer m_framers[EndpointCount];
     // 空闲输出定时器：在本对象归属 I/O 线程后（openEndpoint 里）创建，线程归属才正确。
     QTimer *m_idleTimers[EndpointCount] = {};

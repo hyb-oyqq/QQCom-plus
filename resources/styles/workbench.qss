@@ -5,26 +5,22 @@ QWidget {
     color: #182334;
 }
 QMainWindow, QWidget#centralwidget { background: #e9edf4; }
-QLabel#Muted { color: #5c6880; font-size: 12px; }
-/* 发送区「目标」小标签：做成与 A/B/AB 按钮同族的浅底圆角小块，而不是裸文字。
-   裸文字紧挨三个圆角按钮，字号/边界都对不齐，看着像没排完版。同一套底色与圆角，
-   只是不画边框、不加交互态——它是说明文字，不是可点控件。 */
-QLabel#TargetLabel {
-    background: #eef1f7;
-    color: #4a5670;
-    border: 1px solid #d5dce8;
-    border-radius: 5px;
-    padding: 4px 8px;
-    font-size: 12px;
-}
-QLabel#ByteCount { color: #1d4ed8; font-weight: 600; }
+QLabel#Muted, QLabel#StatusNote { color: #5c6880; font-size: 12px; }
+/* 字节数的颜色**不在这里**：它与预览文本合并在同一个 QLabel 里、用富文本 span 着色
+   （见 sendpanel.cpp 的 ByteCountColor）。QSS 不作用于 span，所以那个值必须写在代码里。 */
 QLabel#EmptyState { background: #fbfcfe; color: #5c6880; border: 1px dashed #c3ccda; border-radius: 5px; }
 QWidget#Surface { background: #ffffff; border: 1px solid #c8d1e0; border-radius: 8px; }
-QFrame#EndpointBar { background: #ffffff; border-bottom: 1px solid #b9c4d6; }
+/* 端口条与数据显示区用**同一套卡片外观**（白底 + 1px 边框 + 8px 圆角），
+   而不是原来的"通栏白底 + 底部分割线"：它现在与数据区上下相邻、同宽同缩进，
+   外观不一致会看成两个体系（用户反馈"白底也要跟数据显示区一样有圆弧倒角"）。
+   原来的 border-bottom 分割线一并去掉——两张卡片之间的 8px 空隙已经承担了分隔。 */
+QFrame#EndpointBar { background: #ffffff; border: 1px solid #c8d1e0; border-radius: 8px; }
 QFrame#EndpointDivider { color: #d9e0ea; max-height: 1px; }
 QFrame#BridgeDivider { color: #c8d1e0; max-width: 1px; }
 QLabel#EndpointBadge { background: #1d4ed8; color: #ffffff; border: 1px solid #1a45c0; border-radius: 12px; font-weight: 700; }
-PortSelectorWidget { background: #ffffff; }
+/* 端点行自己**不再铺白底**：它铺满端口条整宽，自绘背景会把父级的 8px 圆角盖成直角
+   ——圆角只有背景层能画，子控件不透明就等于把它擦掉了。白底统一由 EndpointBar 提供。 */
+PortSelectorWidget { background: transparent; }
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: #ffffff; }
 QPushButton, QToolButton { background: #f4f6fa; border: 1px solid #a9b5c9; border-radius: 5px; padding: 4px 11px; min-height: 18px; color: #1f2a3d; }
@@ -88,15 +84,32 @@ QCheckBox::indicator:checked {
 }
 QCheckBox::indicator:checked:hover { background: #163fb3; }
 QCheckBox::indicator:disabled { background: #eceff5; border-color: #c3ccda; }
+/* 批量发送进度（用户钦定：要能看出"发到哪一条了"）。勾选状态用**颜色**区分：
+   琥珀 = 正在发送这一条，绿色 = 这一轮已经发过。两者都只在勾选态上覆盖底色，
+   白色勾始终保留——"发了没发"和"勾没勾"是两个维度，不能靠有没有勾来判断。
+   色值刻意避开 RX 的 #047857，免得在监视区旁边被读成"接收"。 */
+QCheckBox[sendState="sending"]::indicator:checked { background: #f59e0b; border-color: #b45309; }
+QCheckBox[sendState="sent"]::indicator:checked { background: #059669; border-color: #036c50; }
+/* 正在发送的那一行，发送按钮也换成琥珀强调底，视线不必来回找。 */
+QPushButton[sending="true"] { background: #fde8c0; border-color: #c79a46; color: #70511c; font-weight: 600; }
+QPushButton[sending="true"]:hover { background: #fbdca4; border-color: #b45309; }
 QWidget#BridgeRow { background: #eef2f9; }
 QSplitter::handle { background: transparent; }
-QSplitter::handle:vertical { height: 10px; }
+/* 监视区卡片与发送区卡片之间的缝：两张卡片各有 1px 边框，6px 已经足够分开，
+   再宽就成了"两块板子中间空一块"（用户反馈区域之间要窄一些）。 */
+QSplitter::handle:vertical { height: 6px; }
 QSplitter::handle:horizontal { width: 4px; }
 QSplitter::handle:hover { background: #d8e3f7; }
+/* 状态栏里所有文字**统一字号**：统计行（RX/TX/条数/桥接）、端点状态、右侧提示，原来只有
+   StatusNote 写了 12px、其余继承默认字号，并排看就是大小不一（用户反馈）。
+   这里按容器统一下发，新增状态栏标签自动跟随，不用逐个记得补字号。 */
+QStatusBar QLabel { font-size: 12px; }
 QStatusBar { background: #ffffff; border-top: 1px solid #b9c4d6; min-height: 24px; }
 QStatusBar::item { border: none; }
-QLabel#RxStatus { color: #047857; font-family: "Segoe UI"; font-weight: 600; }
-QLabel#TxStatus { color: #1d4ed8; font-family: "Segoe UI"; font-weight: 600; }
+/* 颜色与加粗各自保留；**不再写 font-family**——"Segoe UI" 只是 Windows 的默认 UI 字体，
+   显式写死会在换系统字体/切换语言时与旁边标签不一致，而这正是"看着没统一"的来源之一。 */
+QLabel#RxStatus { color: #047857; font-weight: 600; }
+QLabel#TxStatus { color: #1d4ed8; font-weight: 600; }
 QLabel#TrafficStatus { color: #5c6880; }
 QMenu { background: white; border: 1px solid #a9b5c9; padding: 4px; }
 QMenu::item { padding: 8px 20px; }
@@ -113,10 +126,10 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 /* 过滤条（监视区第二行）：竖线用与端点分隔线同一族的浅灰；chip 用主色浅底，
    和工具条按钮区分开——它是"条件标签"，不是动作。 */
 QFrame#FilterDivider { color: #d9e0ea; max-width: 1px; }
-/* 常驻顶栏的方向 / 事件开关 与 条件条上的匹配选项、重新过滤：
+/* 常驻顶栏的方向 / 显示开关 与 条件条上的匹配选项、重新过滤：
    图标 + 文案，左右内边距比通用按钮收紧 3px，一行里唯一"可以再挤一点"的元素。 */
-QPushButton#filterRx, QPushButton#filterTx, QPushButton#filterState,
-QPushButton#filterWarning, QPushButton#filterError,
+QPushButton#filterRx, QPushButton#filterTx,
+QPushButton#viewPureData, QPushButton#viewHexEcho, QPushButton#viewLineWrap,
 QPushButton#filterCaseSensitive, QPushButton#filterRegex,
 QPushButton#filterRebuild { padding: 4px 8px; }
 

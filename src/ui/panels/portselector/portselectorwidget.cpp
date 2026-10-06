@@ -99,7 +99,10 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     m_loading = true;
     setAttribute(Qt::WA_StyledBackground, true);
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(12, 5, 12, 5);
+    // **左右 6 + 左列那层的 6 = 12**，与监视区/发送区卡片内容的缩进对齐
+    //（卡片 = 左列 6 + 卡片内边距 6）。原来这里是 12、且左列没有边距，
+    // 于是端口条底色比卡片外框多探出 6px（用户反馈"端口选择区与数据显示区没有对齐"）。
+    layout->setContentsMargins(6, 5, 6, 5);
     layout->setSpacing(4);
 
     // Main row: every parameter needed to connect stays on one line, no selection step.
@@ -269,8 +272,12 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
 
     auto *clientMore = makePage(m_advancedPages);
     auto *timeout = addNumber("client.timeout", 100, 60000);
-    timeout->setSuffix(tr(" ms"));
     addInlineLabel(clientMore, tr("连接超时"), timeout);
+    // 单位放在输入框外：框内后缀会在清空输入时跟着数字一起消失，读数也不干净；
+    // 框外灰调小标签与面板里其它说明文字同风格，紧贴输入框右侧。
+    auto *timeoutUnit = new QLabel(tr("ms"));
+    timeoutUnit->setObjectName("Muted");
+    clientMore->addWidget(timeoutUnit);
     clientMore->addStretch();
 
     auto *serverMore = makePage(m_advancedPages);
@@ -577,12 +584,15 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingIdle = new PortSpinBox;
     m_framingIdle->setObjectName(QStringLiteral("framingIdle"));
     m_framingIdle->setRange(10, 60000);
-    m_framingIdle->setSuffix(tr(" ms"));
     m_framingIdle->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_framingIdle->setLocale(numericLocale);
     m_framingIdle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_framingIdle->setToolTip(tr("超过该时长没有新数据，就把已缓冲的字节作为一条输出"));
     optionLayout->addWidget(m_framingIdle);
+    // 单位在框外（与"连接超时"的处理一致）：输入框只放数字，单位用灰调小标签表达。
+    m_framingIdleUnit = new QLabel(tr("ms"));
+    m_framingIdleUnit->setObjectName("Muted");
+    optionLayout->addWidget(m_framingIdleUnit);
 
     m_framingThresholdLabel = new QLabel(tr("缓冲阈值"));
     m_framingThresholdLabel->setObjectName("Muted");
@@ -590,12 +600,14 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingThreshold = new PortSpinBox;
     m_framingThreshold->setObjectName(QStringLiteral("framingThreshold"));
     m_framingThreshold->setRange(16, 65536);
-    m_framingThreshold->setSuffix(tr(" 字节"));
     m_framingThreshold->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_framingThreshold->setLocale(numericLocale);
     m_framingThreshold->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_framingThreshold->setToolTip(tr("缓冲达到该字节数即强制输出，避免无定界的数据一直滞留"));
     optionLayout->addWidget(m_framingThreshold);
+    m_framingThresholdUnit = new QLabel(tr("字节"));
+    m_framingThresholdUnit->setObjectName("Muted");
+    optionLayout->addWidget(m_framingThresholdUnit);
 
     m_framingKeepBoundary = new QCheckBox(tr("保留结束符"));
     m_framingKeepBoundary->setObjectName(QStringLiteral("framingKeepBoundary"));
@@ -644,6 +656,9 @@ void PortSelectorWidget::syncFramingControls()
     m_framingThreshold->setEnabled(splitting);
     m_framingIdleLabel->setEnabled(splitting);
     m_framingThresholdLabel->setEnabled(splitting);
+    // 单位标签紧挨数字框，跟着一起置灰：否则框与左侧说明都灰了，单位还亮着。
+    m_framingIdleUnit->setEnabled(splitting);
+    m_framingThresholdUnit->setEnabled(splitting);
 
     QString hint;
     if (delimiter)
@@ -715,9 +730,11 @@ void PortSelectorWidget::setDraft(const PortDraft &draft)
             }
         }
     }
-    m_loading = false;
     updateActionLabels();
+    // 先校验再解除载入态：载入期间的校验不算用户编辑，不能触发"校验错误自动展开
+    // 高级面板"——否则启动恢复草稿时，上次会话遗留的无效组帧配置会把高级面板顶开。
     updateValidation();
+    m_loading = false;
 }
 
 PortDraft PortSelectorWidget::draft() const
@@ -820,13 +837,20 @@ void PortSelectorWidget::updateValidation()
     m_action->setToolTip(m_open || m_validationError.isEmpty() ? QString() : m_validationError);
     // No inline marker: invalid fields carry a red border, the reason sits on each field.
     // An invalid field hidden behind the collapsed row would leave the message unreachable.
-    if (m_initialised && !m_advanced->isChecked()) {
+    // 自动展开只响应"新出现"的错误：程序化载入（setDraft / 串口扫描）会让上次会话
+    // 遗留的错误在启动阶段被反复校验到，若每次都展开，用户一启动就会看到高级面板
+    // 被顶开。记录每次的错误集合，只有用户交互让隐藏字段从有效变为无效时才展开。
+    QSet<QWidget *> invalidFields;
+    for (auto it = errors.cbegin(); it != errors.cend(); ++it)
+        invalidFields.insert(it.key());
+    if (m_initialised && !m_loading && !m_advanced->isChecked()) {
         for (auto *field : errors.keys()) {
-            if (m_advancedPanel->isAncestorOf(field)) {
+            if (m_advancedPanel->isAncestorOf(field) && !m_lastInvalid.contains(field)) {
                 m_advanced->setChecked(true);
                 break;
             }
         }
     }
+    m_lastInvalid = invalidFields;
     updateGeometry();
 }

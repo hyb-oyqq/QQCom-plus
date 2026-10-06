@@ -1,7 +1,11 @@
 <RCC>
     <qresource prefix="/">
         <file>styles/workbench.qss</file>
+        <file>styles/workbench-dark.qss</file>
         <file>icons/chevron-down.xpm</file>
+        <file>icons/check-white.svg</file>
+        <file>icons/chevron-double-left.svg</file>
+        <file>icons/chevron-double-right.svg</file>
         <file>icons/tune.svg</file>
         <file>icons/link-variant.svg</file>
         <file>icons/link-off.svg</file>
@@ -19,10 +23,14 @@
         <file>icons/information-outline.svg</file>
         <file>icons/alert-outline.svg</file>
         <file>icons/alert-circle-outline.svg</file>
+        <file>icons/app.ico</file>
         <file>icons/magnify.svg</file>
-        <file>icons/minus-circle-outline.svg</file>
+        <file>icons/minus-circle.svg</file>
         <file>icons/format-letter-case.svg</file>
         <file>icons/regex.svg</file>
         <file>icons/filter-check-outline.svg</file>
+        <file>icons/format-clear.svg</file>
+        <file>icons/numeric.svg</file>
+        <file>icons/wrap.svg</file>
     </qresource>
 </RCC>

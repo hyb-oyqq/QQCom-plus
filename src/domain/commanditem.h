@@ -1,6 +1,7 @@
 #ifndef COMMANDITEM_H
 #define COMMANDITEM_H
 
+#include <QByteArray>
 #include <QJsonObject>
 #include <QString>
 #include <QUuid>
@@ -27,7 +28,15 @@ struct CommandItem
     // 验证
     bool isValid() const { return !content.trimmed().isEmpty(); }
 
-    // 获取带结尾符的完整内容
+    // 结尾符的**原始字节**（\r / \n / \r\n；"无" 时为空）。
+    // 它是发送侧唯一该用的形态：结尾符是"字节"，不是"文本"。
+    // 早先只有 contentWithTail() 把结尾符当文本拼进内容里，HEX 指令就因此丢掉了
+    // 结尾符——"AA 55" + "\r\n" 交给 fromHex 解析时，两个控制字符不是十六进制数字，
+    // 会被静默跳过。正确顺序是"先解析内容、再追加结尾符字节"。
+    QByteArray tailBytes() const;
+
+    // 按文本形态追加结尾符。仅用于确实需要"一整段文本"的场景（如发送区预填）；
+    // 发送路径请用 tailBytes()，否则 HEX 指令会丢结尾符。
     QString contentWithTail() const;
 };
 

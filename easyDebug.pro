@@ -19,6 +19,9 @@ include(src/ui/ui.pri)
 include(src/services.pri)
 RESOURCES += resources/resources.qrc
 
+# 程序主图标：RC_ICONS 让 qmake 自动生成 .rc 并编译进 exe（资源管理器/任务栏/快捷方式用）。
+RC_ICONS = resources/icons/app.ico
+
 # You can make your code fail to compile if it uses deprecated APIs.
 # In order to do so, uncomment the following line.
 #DEFINES += QT_DISABLE_DEPRECATED_BEFORE=0x060000    # disables all the APIs deprecated before Qt 6.0.0

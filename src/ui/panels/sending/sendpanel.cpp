@@ -1,14 +1,15 @@
 #include "sendpanel.h"
+#include "ui/common/buttonmetrics.h"
 #include "ui/common/payloadcodec.h"
 #include "persistence/preferencesstore.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
-#include <QFontDatabase>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -21,15 +22,31 @@ namespace {
 constexpr int EditorPaddingPx = 3;
 constexpr int EditorDocumentMarginPx = 2;
 
+// 字节数的强调色。它与预览数据同在**一个标签**里，颜色只能由富文本给（QSS 不作用于 span），
+// 所以在这里具名——与文件里既有的预览错误色（下方 updatePreview 里的 #c44343 / #738097）
+// 是同一类做法。取一个浅底与深底上都读得清的中性蓝。
+constexpr const char *ByteCountColor = "#2563eb";
+
+// 正文行数（用户钦定）：四行足够看清常见指令（例如 AA 06 05 01 02 B2 这类带空格的 HEX），
+// 五行会让发送区白白高出一行——那行高度从数据显示区借，不值得。
+constexpr int EditorVisibleLines = 4;
+
 } // namespace
 
 SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
 {
     setAttribute(Qt::WA_StyledBackground, true);
     setObjectName("Surface");
-    auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(16, 12, 16, 12);
-    layout->setSpacing(10);
+    // 主布局是**左右两栏**（用户钦定："发送按钮放到发送框的右边，定时发送、编码选择也集成到右边"）：
+    // 正文在左，编码 / 定时 / 目标 / 发送收进右侧一列。
+    // 原来三行纵向铺开（正文 → 格式+末尾+预览 → 定时+目标+发送）要约 200px 高，
+    // 而同样的控件并进右侧三行就装下了——省下的纵向空间全部归数据显示区。
+    auto *root = new QHBoxLayout(this);
+    // **左右必须是 6**：数据区外边距 6 + 这里 6 = 12，与端口条内容、监视区内容的
+    // 左缩进对齐（用户反馈"边框距离内部元素没有对齐"）。上下 8：发送区是自适应的
+    // 卡片，贴着内容收紧即可，不必再留原来的 10。
+    root->setContentsMargins(6, 8, 6, 8);
+    root->setSpacing(10);
 
     // 目标：A / B / AB 三选一，沿用数据显示区端点开关那套可勾选按钮（QPushButton:checked 样式）。
     // 用互斥按钮组而不是独立开关：发送必须有一个目标，不留“都不选”的空状态。
@@ -53,26 +70,26 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
 
     m_editor = new QPlainTextEdit;
     m_editor->setObjectName("sendEditor");
-    auto mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    mono.setPointSize(11);
-    m_editor->setFont(mono);
+    // 字体**不在这里设**：全局 QSS 的 `QWidget { font-family: ... }` 会覆盖代码里的
+    // setFont()（实测 font().family() 拿到的仍是 QSS 的字体、pointSize 变回 -1），
+    // 写在这里等于没写、还会让人以为"已经统一成等宽了"。
+    // 字节显示的字族/字号/字重一律由 QSS 保证，用例 hexDisplayFontIsUniform 守着这条契约。
     // 占位示例与初始内容共用同一份字符串，经共享编解码渲染，不会各写一份漂移。
     const QString sample = PayloadCodec::render(QByteArray::fromHex("010300000002c40b"), PayloadCodec::Format::Hex);
     m_editor->setPlaceholderText(tr("输入待发送内容，例如：%1").arg(sample));
     m_editor->setPlainText(sample);
     m_editor->setStyleSheet(QStringLiteral("QPlainTextEdit { padding: %1px; }").arg(EditorPaddingPx));
     m_editor->document()->setDocumentMargin(EditorDocumentMarginPx);
-    // 正文固定约三行：行高取自等宽字体自身，不写死像素。输入框不再纵向伸展，
+    // 正文固定约四行：行高取自等宽字体自身，不写死像素。输入框不再纵向伸展，
     // 发送区因此贴着内容收紧，纵向空间让给数据显示区（见 MainWindow 的分隔条分配）。
-    m_editor->setFixedHeight(m_editor->fontMetrics().lineSpacing() * 3
+    m_editor->setFixedHeight(m_editor->fontMetrics().lineSpacing() * EditorVisibleLines
         + 2 * (EditorPaddingPx + EditorDocumentMarginPx + m_editor->frameWidth()));
-    layout->addWidget(m_editor);
 
-    // 格式/末尾贴在正文下方：与字节数、最终内容预览共用一行，省掉一整行的纵向开销。
+    // 下面先把右侧一列与预览行的控件**全部构造出来**，最后统一组装成左右两栏
+    // （两栏都要用到这些控件，穿插着摆放会让依赖顺序变得难读）。
+
+    // 格式/末尾：编码与行尾是"怎么发"，与正文分离后收进右栏第一行。
     // 格式列表来自 PayloadCodec，与数据显示区共用同一套编解码规则。
-    auto *options = new QHBoxLayout;
-    options->setSpacing(8);
-    options->setAlignment(Qt::AlignVCenter);
     m_format = new QComboBox;
     m_format->setObjectName("sendFormat");
     for (const auto format : PayloadCodec::formats())
@@ -82,60 +99,98 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     // 末尾文案用转义字面量（与指令面板的结尾符列同一套写法），比 CR/LF/CRLF 更直白：
     // 用户看到的就是实际会追加的字节。顺序必须与下方 lineEndings 一一对应，不能调换。
     m_suffix->addItems({tr("不追加"), QStringLiteral("+\\r"), QStringLiteral("+\\n"), QStringLiteral("+\\r\\n")});
-    options->addWidget(new QLabel(tr("格式")), 0, Qt::AlignVCenter);
-    options->addWidget(m_format, 0, Qt::AlignVCenter);
-    options->addWidget(new QLabel(tr("末尾")), 0, Qt::AlignVCenter);
-    options->addWidget(m_suffix, 0, Qt::AlignVCenter);
-    options->addSpacing(18);
-    m_length = new QLabel;
-    m_length->setObjectName("ByteCount");
+
+    // 字节数（"25B"）与预览数据**合并在同一个标签里**：它们本来是一句话的两半，拆成两个控件后
+    // 无论怎么对齐，在分数 DPR 下都可能有 1 物理像素的错位（用户反馈"没有底对齐"，并建议合并
+    // ——同一个标签里的文字共享同一条基线，从原理上不可能偏）。
+    // 这同时省掉了"两个标签高度必须一致"那类补丁（QLabel 开了可选中后 sizeHint 会高 2px）。
     m_preview = new QLabel;
     m_preview->setObjectName("payloadPreview");
     m_preview->setMinimumWidth(0);
     m_preview->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    m_preview->setTextFormat(Qt::PlainText);
+    m_preview->setTextFormat(Qt::RichText); // 字节数要着色，见 updatePreview()
     m_preview->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    options->addWidget(m_length, 0, Qt::AlignVCenter);
-    options->addWidget(m_preview, 1, Qt::AlignVCenter);
-    layout->addLayout(options);
 
-    auto *actions = new QHBoxLayout;
-    actions->setSpacing(6);
-    actions->setAlignment(Qt::AlignVCenter);
     m_repeat = new QCheckBox(tr("定时发送"));
     m_repeat->setObjectName("repeatSending");
     m_repeat->setToolTip(tr("按固定周期重复发送主输入框的内容；取消勾选即停止"));
     m_interval = new QSpinBox;
+    m_interval->setObjectName("repeatInterval"); // 用例要能定位它（"始终可输入、只收数字"）
     m_interval->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_interval->setRange(10, 3600000);
     m_interval->setValue(1000);
-    m_interval->setSuffix(" ms");
-    m_interval->setEnabled(false);
+    // 纯数字输入（用户钦定）：不加 " ms" 后缀——后缀会把框读成"值+单位"的复合体，
+    // 键盘输入时也容易被当成内容的一部分。单位改由 tooltip 交代，数字本身就够读。
+    m_interval->setToolTip(tr("发送间隔（毫秒）"));
+    // **始终可输入**（用户钦定）：勾选前就能把间隔设好，勾上即按该值跑。
+    // 它是 QSpinBox——非数字键（含粘贴的非法文本）会被它自带的校验器挡掉，不必另做处理。
     m_sendButton = new QPushButton(tr("发送"));
     m_sendButton->setObjectName("PrimaryButton");
-    m_sendButton->setMinimumWidth(90);
     m_sendButton->setEnabled(false);
     m_sendButton->setToolTip(tr("端口未连接"));
-    // 「目标」是个小标签，做成与 A/B/AB 按钮同族的浅底小徽章，而不是裸文字：
-    // 裸文字紧挨着三个圆角按钮，字号与边界都不一样，看着像没排完版（用户反馈）。
-    auto *targetLabel = new QLabel(tr("目标"));
-    targetLabel->setObjectName("TargetLabel");
+    // 目标 A/B/AB 三选一，不再带「目标」二字的小标签（用户钦定）：
+    // 三个端点字母本身已经说清了这一排是什么，标签只是重复占宽。
+    // 目标按钮 trio：三个并排按钮宽度统一（AB 比 A/B 宽，不统一的话中间那个会明显鼓出来）。
+    // 「发送」是主操作，宽度跟着这一排最宽者——既不至于被文字截断，也不会长短参差。
+    // 见 unifyActionWidths()：这里不写死像素，字体/DPI/翻译变化时重算即可。
     m_repeatTimer = new QTimer(this);
-    actions->addWidget(m_repeat, 0, Qt::AlignVCenter);
-    actions->addWidget(m_interval, 0, Qt::AlignVCenter);
-    actions->addStretch();
-    actions->addWidget(targetLabel, 0, Qt::AlignVCenter);
+
+    // ---- 组装：左栏（正文 + 预览） / 右栏（编码 / 定时 / 目标 + 发送）----
+
+    auto *leftColumn = new QVBoxLayout;
+    leftColumn->setSpacing(6);
+    leftColumn->addWidget(m_editor);
+    // 字节数与最终内容预览贴着正文下方：它们回答的是"我到底要发什么"，与正文同属
+    // "内容"一侧。预览文本长度不可控，放进右栏会把那一栏撑得比正文还高。
+    // 预览行现在只有一个标签（字节数与预览已合并，见上），不再需要"摆两个控件再对齐"。
+    auto *previewRow = new QHBoxLayout;
+    previewRow->addWidget(m_preview, 1);
+    leftColumn->addLayout(previewRow);
+
+    // 右栏三行的语义顺序：怎么发（编码/末尾）→ 发几拍（定时/间隔）→ 发给谁（目标 + 发送）。
+    // 行高与左侧四行正文相当，两栏自然齐平，不需要额外撑高。
+    auto *rightColumn = new QVBoxLayout;
+    rightColumn->setSpacing(6);
+
+    auto *encodeRow = new QHBoxLayout;
+    encodeRow->setSpacing(6);
+    encodeRow->addWidget(new QLabel(tr("格式")), 0, Qt::AlignVCenter);
+    encodeRow->addWidget(m_format, 0, Qt::AlignVCenter);
+    encodeRow->addSpacing(6);
+    encodeRow->addWidget(new QLabel(tr("末尾")), 0, Qt::AlignVCenter);
+    encodeRow->addWidget(m_suffix, 0, Qt::AlignVCenter);
+    encodeRow->addStretch();
+
+    auto *repeatRow = new QHBoxLayout;
+    repeatRow->setSpacing(6);
+    repeatRow->addWidget(m_repeat, 0, Qt::AlignVCenter);
+    repeatRow->addWidget(m_interval, 0, Qt::AlignVCenter);
+    repeatRow->addStretch();
+
+    auto *actionRow = new QHBoxLayout;
+    actionRow->setSpacing(6);
     for (auto *button : {m_targetA, m_targetB, m_targetBoth})
-        actions->addWidget(button, 0, Qt::AlignVCenter);
-    actions->addWidget(m_sendButton, 0, Qt::AlignVCenter);
-    layout->addLayout(actions);
+        actionRow->addWidget(button, 0, Qt::AlignVCenter);
+    actionRow->addWidget(m_sendButton, 0, Qt::AlignVCenter);
+
+    rightColumn->addLayout(encodeRow);
+    rightColumn->addLayout(repeatRow);
+    rightColumn->addLayout(actionRow);
+
+    // 左栏拿全部剩余宽度（正文越宽越少折行），右栏取自身内容宽度。
+    root->addLayout(leftColumn, 1);
+    root->addLayout(rightColumn, 0);
+
+    // 送进统一宽度：A/B/AB 与「发送」同属这一排，用一个宽度。必须在布局挂好之后调，
+    // 这样 sizeHint 才带得上它自己那一身 QSS（内边距/圆角），量出来的宽才是真的。
+    unifyActionWidths();
 
     // 定时发送 = 按周期持续发主输入框的内容，勾选即开始、取消即停（不再设次数上限：
     // 用户要的就是"每隔 N 毫秒发一次当前内容"，一个次数输入框只会让人误以为要填内容）。
     // 每拍与手动发送走同一条 issueSend 路径。周期用尽力调度，不承诺硬实时精度。
     m_repeatTimer->setTimerType(Qt::CoarseTimer);
     connect(m_repeat, &QCheckBox::toggled, this, [this](bool checked) {
-        m_interval->setEnabled(checked);
+        // 间隔输入框**不随勾选启用/禁用**：它随时可改（见构造处的说明）。
         if (checked) {
             issueSend(true); // 勾选立即发第一拍，之后按周期
             m_repeatTimer->start(m_interval->value());
@@ -168,6 +223,28 @@ void SendPanel::setPorts(const QList<PortDraft> &ports)
     updateTargets();
 }
 
+void SendPanel::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    // 字体 / DPI / 翻译都可能让"最宽的那个按钮"变宽，而 QSS 是把内边距算进
+    // sizeHint 的——控件在真窗口里拿到样式之后 hint 才稳定。宽度变化时重算一次，
+    // 保证 A/B/AB 与发送四个按钮始终等宽且不被文字截断。
+    unifyActionWidths();
+}
+
+void SendPanel::unifyActionWidths()
+{
+    // 先把这四个按钮的横向策略**钉成 Fixed**：unifyButtonWidths() 只设 minimumWidth，
+    // 而 minimum 策略允许被拉宽——右侧栏的宽度由"最宽的那一行"决定，多出来的空间
+    // 落到本行时按取整分给各按钮，就会出现 61/62/62/62 这种一像素参差。
+    // 钉成 Fixed 后它们的宽度恒等于 minimumWidth（= 其中最宽者），不再受行宽影响。
+    // 这不违反"不写死宽度"：宽度仍由 sizeHint 推出来，字体/DPI/翻译变化时会重算。
+    for (auto *button : {m_targetA, m_targetB, m_targetBoth, m_sendButton}) {
+        if (button) button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    }
+    unifyButtonWidths({m_targetA, m_targetB, m_targetBoth, m_sendButton});
+}
+
 void SendPanel::setEndpointOpen(int index, bool open)
 {
     if (index < 0 || index >= 2) return;
@@ -198,12 +275,23 @@ void SendPanel::updatePreview()
         lineEndings.value(m_suffix->currentIndex()));
     m_payloadValid = parsed.valid();
     m_payloadBytes = parsed.bytes;
-    m_length->setText(parsed.valid() ? tr("%1 字节").arg(parsed.bytes.size()) : tr("输入错误"));
+    // 字节数用 **ASCII 且不加空格**（"25B"）：
+    //   · ASCII —— 它就贴在 HEX 左边显示，汉字的字面框天生比数字高（实测「字节」段 16px、
+    //     纯 HEX 段 12px），同一行永远对不齐（用户反馈"字体没有统一"，并确认要 ASCII）。
+    //   · 不加空格 —— "25" 只有两个字符、后面再跟一个空格就显得 B 孤零零飘在外面
+    //     （用户反馈"B 距离 25 比较远"）。紧贴后读作一个整体，与右侧 HEX 的节奏也更接近。
+    const QString countText = parsed.valid() ? tr("%1B").arg(parsed.bytes.size()) : tr("输入错误");
     const auto text = parsed.valid() ? (parsed.bytes.isEmpty() ? tr("最终发送内容将在这里预览")
         : PayloadCodec::render(parsed.bytes.left(64), PayloadCodec::Format::Hex)
             + (parsed.bytes.size() > 64 ? " …" : "")) : parsed.error;
-    m_preview->setText(text);
-    m_preview->setToolTip(text);
+    // **字节数与预览文本拼进同一个标签**：同一份文本流共享同一条基线，不存在两个控件之间的
+    // 像素级错位。字节数着色用 span（内容级颜色，优先于标签自身的样式表）；两段之间的间隔用
+    // 两个不换行空格，宽度与原来布局的 8px 间距相当。用户文本一律 toHtmlEscaped，
+    // 免得 HEX 里恰好出现的 '<' / '&' 被当成标记。
+    m_preview->setText(QStringLiteral("<span style=\"color:%1\">%2</span>&nbsp;&nbsp;%3")
+                           .arg(QLatin1String(ByteCountColor), countText.toHtmlEscaped(),
+                                text.toHtmlEscaped()));
+    m_preview->setToolTip(QStringLiteral("%1  %2").arg(countText, text));
     // 预览的错误状态只在翻转时改一次样式表，避免每个按键都重新解析样式。
     if (m_previewError != !parsed.valid()) {
         m_previewError = !parsed.valid();
@@ -239,6 +327,13 @@ void SendPanel::issueSend(bool scheduled)
 {
     if (!m_sendButton->isEnabled()) return;
     emit sendRequested(m_payloadBytes, targetMask(), scheduled);
+}
+
+void SendPanel::deliverPayload(const QByteArray &payload)
+{
+    if (payload.isEmpty()) return;
+    // 走的是与手点「发送」完全相同的信号，所以目标、来源标记、失败记录全自动一致。
+    emit sendRequested(payload, targetMask(), false);
 }
 
 void SendPanel::setPayload(const QByteArray &bytes)

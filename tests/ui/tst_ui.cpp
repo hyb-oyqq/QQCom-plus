@@ -1,7 +1,11 @@
 #include "mainwindow.h"
+#include "app/commandmanager.h"
+#include "domain/commandset.h"
 #include "domain/receiveframing.h"
 #include "ui/common/endpointformat.h"
 #include "ui/common/payloadcodec.h"
+#include "ui/panels/commands/commandpanel.h"
+#include "ui/panels/commands/commandtablewidget.h"
 #include "ui/panels/sending/sendpanel.h"
 #include "ui/panels/traffic/filterbar.h"
 #include "ui/panels/traffic/trafficpanel.h"
@@ -17,8 +21,11 @@
 #include <QColor>
 #include <QComboBox>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
+#include <QFrame>
 #include <QFileInfo>
+#include <QHash>
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QLineEdit>
@@ -28,7 +35,9 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QRegularExpression>
 #include <QScrollBar>
+#include <QSet>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -101,6 +110,13 @@ QStringList controlsThatClipContent(QWidget *area)
     }
     return problems;
 }
+
+// 顶栏塞满之后的宽度上限。窗口最小宽度是"内容不被压缩"的代价，也是它自己的风险：
+// 一旦超过屏幕宽度，窗口就再也放不下了——那时用户看到的不是"按钮完整"，而是
+// "窗口装不进桌面"，而且他自己也没法把窗口调窄（最小宽度是硬下限）。
+// 取 1920：常见桌面的逻辑宽度，超过它就不再是"加宽窗口"而是"跑出屏幕"。
+// 这个数字是给这类回归按的闸，不是尺寸目标。
+constexpr int MaxSaneWindowWidth = 1920;
 
 // A horizontal strip must stay one row at any window width: no wrapping, no scrollbar.
 // Qt never wraps a QHBoxLayout, so the failure mode is overlap or a control pushed past the
@@ -361,13 +377,11 @@ private slots:
         options.caseSensitive = true;
         QCOMPARE(hits(options), 2); // 区分大小写后 HEARTBEAT 不再命中
 
+        // 正则支持已移除（条件一律按纯文本子串匹配）：`heart.*` 里的 `.*` 不再是通配，
+        // 整串原样去找，因此一条也命中不了——这条断言就是"没人悄悄把它加回来"的看门人。
         options.caseSensitive = false;
-        options.regex = true;
         options.keywords = {QStringLiteral("heart.*")};
-        QCOMPARE(hits(options), 2); // 合法正则按正则解释
-        // 非法正则这条条件被丢掉，等价于"没写关键词"——不是"什么都不显示"。
-        options.keywords = {QStringLiteral("heart[")};
-        QCOMPARE(hits(options), 3);
+        QCOMPARE(hits(options), 0);
     }
 
     // 形态铁律：条件条恒为一行（不因条件增多或窗口变窄而换行）、每个按钮都带字形、
@@ -390,7 +404,8 @@ private slots:
             qPrintable(QStringLiteral("过滤条高 %1 超过一行 %2").arg(bar->height()).arg(rowHeight)));
 
         // 条子上的每个按钮都必须带 Material 字形：只有文字说明的按钮在窄宽度下会先被牺牲。
-        const QStringList named{QStringLiteral("filterCaseSensitive"), QStringLiteral("filterRegex"),
+        // 正则开关已移除（条件一律按纯文本匹配），"区分大小写"是条上唯一的匹配选项。
+        const QStringList named{QStringLiteral("filterCaseSensitive"),
             QStringLiteral("filterRebuild"), QStringLiteral("filterReset")};
         for (const auto &name : named) {
             auto *button = bar->findChild<QPushButton *>(name);
@@ -399,10 +414,11 @@ private slots:
         }
         // 匹配选项是条上的按钮，不是下拉列表：既没有菜单，也没有失去"一眼可见"的入口。
         auto *caseButton = bar->findChild<QPushButton *>(QStringLiteral("filterCaseSensitive"));
-        auto *regexButton = bar->findChild<QPushButton *>(QStringLiteral("filterRegex"));
-        QVERIFY(caseButton->isCheckable() && regexButton->isCheckable());
-        QVERIFY(!caseButton->menu() && !regexButton->menu());
+        QVERIFY(caseButton && caseButton->isCheckable());
+        QVERIFY(!caseButton->menu());
         QVERIFY(!bar->findChild<QPushButton *>(QStringLiteral("filterMore")));
+        // 正则开关已整体移除：控件、菜单项、动作都不该以任何形式回来。
+        QVERIFY(!bar->findChild<QPushButton *>(QStringLiteral("filterRegex")));
         QVERIFY(!window.findChild<QAction *>(QStringLiteral("filterRegex")));
 
         // 关键词不做 chip：输入框本身就是条件唯一的样子，不产生第二份视图；
@@ -501,10 +517,13 @@ private slots:
             QVERIFY(!block.isEmpty());
     }
 
-    // 方向与事件开关常驻顶栏（用户钦定）：它们**不在**可折叠的条件条里——
-    // 条件条收起来时这排开关仍在原位，而且每个都是"图标 + 文案"，
-    // 不必悬停才知道这排按钮在做什么。代价压在顶栏这一行的宽度上，所以末尾还要量尺寸。
-    void filterFlagsStayOnTopRow()
+    // 顶栏第一行的开关组（用户钦定）：方向开关（RX / TX）与显示开关（纯数据模式 /
+    // 同时显示 HEX / 自动换行）常驻，**不在**可折叠的条件条里——条件条收起来时它们
+    // 仍在原位，而且每个都是"图标 + 文案"，不必悬停才知道自己在点的是什么。
+    // 事件开关（状态 / 警告 / 错误）让出顶栏位置，收进显示设置菜单，但仍必须找得到：
+    // 它们是"只看错误日志"的唯一入口。
+    // 代价压在顶栏这一行的宽度上，所以末尾还要把窗口压到最小宽度量一次。
+    void topRowSwitchGroupsStayPut()
     {
         clearEndpointDrafts();
         MainWindow window;
@@ -514,32 +533,103 @@ private slots:
         QTest::qWait(30);
 
         auto *flags = window.findChild<QWidget *>(QStringLiteral("filterFlags"));
+        auto *views = window.findChild<QWidget *>(QStringLiteral("viewToggles"));
         auto *bar = window.findChild<QWidget *>(QStringLiteral("filterBar"));
         auto *toggle = window.findChild<QPushButton *>(QStringLiteral("filterToggle"));
-        QVERIFY(flags && bar && toggle);
+        QVERIFY(flags && views && bar && toggle);
+        // 两组开关同住第一行：并排出现才叫"常驻顶栏"，谁被挪进第二行都会随条件条一起消失。
+        QCOMPARE(views->parentWidget(), flags->parentWidget());
 
-        const QStringList named{QStringLiteral("filterRx"), QStringLiteral("filterTx"),
-            QStringLiteral("filterState"), QStringLiteral("filterWarning"), QStringLiteral("filterError")};
-        for (const auto &name : named) {
+        const QStringList directions{QStringLiteral("filterRx"), QStringLiteral("filterTx")};
+        const QStringList viewSwitches{QStringLiteral("viewPureData"), QStringLiteral("viewHexEcho"),
+            QStringLiteral("viewLineWrap")};
+        for (const auto &name : directions) {
             auto *button = flags->findChild<QPushButton *>(name);
-            QVERIFY2(button, qPrintable(QStringLiteral("缺开关：") + name));
+            QVERIFY2(button, qPrintable(QStringLiteral("缺方向开关：") + name));
+            QVERIFY2(button->isCheckable(), qPrintable(QStringLiteral("方向开关必须是开/关：") + name));
+        }
+        for (const auto &name : viewSwitches) {
+            auto *button = views->findChild<QPushButton *>(name);
+            QVERIFY2(button, qPrintable(QStringLiteral("缺显示开关：") + name));
+            QVERIFY2(button->isCheckable(), qPrintable(QStringLiteral("显示开关必须是开/关：") + name));
             QVERIFY2(!button->icon().isNull(), qPrintable(QStringLiteral("缺字形：") + name));
             QVERIFY2(!button->text().isEmpty(), qPrintable(QStringLiteral("缺文案：") + name));
+        }
+        for (const auto &name : directions + viewSwitches) {
             // 同一个开关不能既在顶栏又在条件条里：条件分散在两个控件之间，
             // "重置一次清干净"全靠这条边界清楚。
             QVERIFY2(!bar->findChild<QPushButton *>(name),
                 qPrintable(QStringLiteral("开关不应出现在条件条里：") + name));
+            // 也不该再有第二个同名按钮藏在别处（顶栏只有一份）。
+            QCOMPARE(window.findChildren<QPushButton *>(name).size(), 1);
         }
 
-        // 收起条件条后这排开关照旧可见——它们只管"哪些行进来"，不属于被折叠的内容条件。
+        // 事件开关：顶栏上已经让位，但菜单里必须还在，且是勾选型的 QAction。
+        for (const auto &name : {QStringLiteral("filterState"), QStringLiteral("filterWarning"),
+                 QStringLiteral("filterError")}) {
+            QVERIFY2(!flags->findChild<QPushButton *>(name),
+                qPrintable(QStringLiteral("事件开关不该留在顶栏：") + name));
+            QVERIFY2(!views->findChild<QPushButton *>(name),
+                qPrintable(QStringLiteral("事件开关不该挪进显示开关组：") + name));
+        }
+        for (const auto &name : {QStringLiteral("showStates"), QStringLiteral("showWarnings"),
+                 QStringLiteral("showErrors")}) {
+            auto *action = window.findChild<QAction *>(name);
+            QVERIFY2(action && action->isCheckable(),
+                qPrintable(QStringLiteral("缺菜单里的事件开关：") + name));
+        }
+
+        // 收起条件条后这排开关照旧可见——它们管的是"哪些行进来"与"行长什么样"，
+        // 不属于被折叠的内容条件。
         toggle->setChecked(false);
         QVERIFY(!bar->isVisibleTo(&window));
-        for (const auto &name : named)
+        for (const auto &name : directions)
             QVERIFY2(flags->findChild<QPushButton *>(name)->isVisibleTo(&window),
-                qPrintable(QStringLiteral("折叠后开关应仍可见：") + name));
+                qPrintable(QStringLiteral("折叠后方向开关应仍可见：") + name));
+        for (const auto &name : viewSwitches)
+            QVERIFY2(views->findChild<QPushButton *>(name)->isVisibleTo(&window),
+                qPrintable(QStringLiteral("折叠后显示开关应仍可见：") + name));
         toggle->setChecked(true);
 
-        // "过滤 · N" 是两处的合计：只关掉 RX（条件条里一条内容条件都没有）也必须算进去。
+        // 顶栏按钮与菜单项是同一个命令的两处门面（ViewToggles::bind）：任一侧改动、
+        // 另一侧立刻跟上。两侧都不许"各记一份"，否则用户在菜单里看到的与顶栏按下的
+        // 会是两个状态。
+        auto *pure = views->findChild<QPushButton *>(QStringLiteral("viewPureData"));
+        auto *hexEcho = views->findChild<QPushButton *>(QStringLiteral("viewHexEcho"));
+        auto *lineWrap = views->findChild<QPushButton *>(QStringLiteral("viewLineWrap"));
+        auto *pureAction = window.findChild<QAction *>(QStringLiteral("pureData"));
+        auto *hexAction = window.findChild<QAction *>(QStringLiteral("showHex"));
+        auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
+        QVERIFY(pure && hexEcho && lineWrap && pureAction && hexAction && wrapAction);
+        const QList<QPair<QPushButton *, QAction *>> mirrored{
+            {pure, pureAction}, {hexEcho, hexAction}, {lineWrap, wrapAction}};
+        for (const auto &pair : mirrored) {
+            // 文案取自命令本身：菜单与顶栏说的是同一件事，不在这里另抄一份。
+            QCOMPARE(pair.first->text(), pair.second->text());
+            QCOMPARE(pair.first->isChecked(), pair.second->isChecked());
+            // 按钮 → 命令。
+            const bool flipped = !pair.second->isChecked();
+            pair.first->click();
+            QCOMPARE(pair.second->isChecked(), flipped);
+            // 命令 → 按钮（程序侧：恢复偏好、联动置灰走这条路）。
+            pair.second->setChecked(!flipped);
+            QCOMPARE(pair.first->isChecked(), !flipped);
+        }
+
+        // 纯数据模式会把"行前缀"那批开关置灰：顶栏按钮必须同步置灰，
+        // 否则留下一个"看着能点、点了一下没反应"的死开关。
+        if (pure->isChecked()) pure->click();
+        QVERIFY(!pure->isChecked());
+        auto *number = window.findChild<QAction *>(QStringLiteral("showLineNumber"));
+        QVERIFY(number && number->isEnabled() && hexEcho->isEnabled());
+        pure->click();
+        QVERIFY(pure->isChecked());
+        QCOMPARE(number->isEnabled(), false);
+        QCOMPARE(hexEcho->isEnabled(), false);
+        pure->click();
+        QVERIFY(number->isEnabled());
+
+        // '过滤 · N' 仍是两处条件的合计：只关掉 RX（条件条里一条内容条件都没有）也必须算进去。
         auto *rx = flags->findChild<QPushButton *>(QStringLiteral("filterRx"));
         // 只关掉 RX 时重置按钮必须是亮的，否则那半套条件没有回到默认的入口。
         auto *reset = bar->findChild<QPushButton *>(QStringLiteral("filterReset"));
@@ -547,28 +637,471 @@ private slots:
         rx->setChecked(false);
         QVERIFY2(toggle->text().contains(QStringLiteral("· 1")), qPrintable(toggle->text()));
         QVERIFY(reset->isEnabled());
-        // 重置一次清干净：顶栏开关与条件条内容条件一起回到不过滤。
+        // 菜单里的事件开关同样是条件：只关掉"警告"也要计数。
+        auto *warnings = window.findChild<QAction *>(QStringLiteral("showWarnings"));
+        warnings->setChecked(false);
+        QVERIFY2(toggle->text().contains(QStringLiteral("· 2")), qPrintable(toggle->text()));
+        // 重置一次清干净：顶栏方向开关、菜单事件开关、条件条内容条件一起回到不过滤。
         bar->findChild<QLineEdit *>(QStringLiteral("filterKeywords"))->setText(QStringLiteral("心跳"));
-        QVERIFY(toggle->text().contains(QStringLiteral("· 2")));
+        QVERIFY(toggle->text().contains(QStringLiteral("· 3")));
         reset->click();
         QVERIFY(rx->isChecked());
-        QVERIFY(bar->findChild<QLineEdit *>(QStringLiteral("filterKeywords"))->text().isEmpty());
+        QVERIFY(warnings->isChecked());
+        // 「清除过滤」改为**保留输入框内容、只停用过滤**（用户反馈"又得重新输入，很麻烦"）：
+        // 复位的是方向/事件开关与"生效的过滤"；条件留在框里，点「应用过滤」即可恢复。
+        QCOMPARE(bar->findChild<QLineEdit *>(QStringLiteral("filterKeywords"))->text(),
+                 QStringLiteral("心跳"));
         QVERIFY2(toggle->text().contains(QStringLiteral("过滤 ")), qPrintable(toggle->text()));
 
-        // 顶栏必须排得下：开关常驻的代价就是这一行的宽度。窗口最小宽 1120，
-        // 一行放不下的表现是控件重叠或右端控件被切掉，两种都要挡住。
-        window.resize(1120, 660);
+        // 顶栏必须排得下一行：开关常驻的代价就是这一行的宽度。窗口最小宽度不是谁算出来的，
+        // 而是**控件自己撑出来的**——行里每个控件横向策略为 Fixed（按 sizeHint 占位），
+        // 布局据此报出 minimumSizeHint，主窗口直接用它。所以这里能做的检查是：
+        // 把窗口压到它自己的最小宽度，看有没有控件被挤到重叠或探出右缘。
+        const int minWidth = window.minimumWidth();
+        auto *panel = window.findChild<TrafficPanel *>();
+        QVERIFY(panel);
+        qInfo() << "window minimum width" << minWidth << "traffic minimum"
+                << panel->minimumSizeHint().width();
+        QVERIFY2(minWidth <= MaxSaneWindowWidth,
+            qPrintable(QStringLiteral("窗口最小宽度 %1 已超出常见屏幕：顶栏该收窄了")
+                           .arg(minWidth)));
+        // 窗口最小宽度至少要装得下数据区自己报出的下限——小于它就意味着"到了最小宽度
+        // 数据区仍然放不下"，那正是控件会被挤变形的场景。
+        QVERIFY2(minWidth >= panel->minimumSizeHint().width(),
+            qPrintable(QStringLiteral("窗口最小宽度 %1 装不下数据区下限 %2")
+                           .arg(minWidth)
+                           .arg(panel->minimumSizeHint().width())));
+        window.resize(minWidth, 660);
         QTest::qWait(30);
         QWidget *row = flags->parentWidget();
         QVERIFY(row);
         for (const auto &name : {QStringLiteral("showPortA"), QStringLiteral("showPortB"),
                  QStringLiteral("trafficFormat"), QStringLiteral("filterToggle"),
-                 QStringLiteral("filterFlags"), QStringLiteral("displaySettings"),
-                 QStringLiteral("exportTraffic"), QStringLiteral("followTraffic"),
-                 QStringLiteral("clearTraffic")})
+                 QStringLiteral("filterFlags"), QStringLiteral("viewToggles"),
+                 QStringLiteral("displaySettings"), QStringLiteral("exportTraffic"),
+                 QStringLiteral("followTraffic"), QStringLiteral("clearTraffic"),
+                 QStringLiteral("commandPanelToggle")})
             QVERIFY2(row->findChild<QWidget *>(name), qPrintable(QStringLiteral("缺顶栏元素：") + name));
         const auto crowded = overlapInRow(row);
         QVERIFY2(crowded.isEmpty(), qPrintable(crowded));
+    }
+
+    // ★ 编辑一行**不得重建整表**——这是"拖拽崩 / 选结尾符崩"和"列表越用越卡"
+    // 两个用户可见问题的共同病根。
+    //
+    // 病根链条：行内控件改一下 → commandsChanged → 面板 saveCurrentSet() → 落库；
+    // 而落库用的 CommandManager::syncSet() 曾经转手调用 updateSet()，后者无条件
+    // emit setsChanged()，于是 setsChanged → 面板重建下拉框 → 表格 setCommandSet()
+    // → refreshTable() 把**正在派发信号的那个控件**一起销毁 → 回到它内部就崩。
+    // 同一件事也让每次勾选/改延时都付一次全表重建的代价。
+    //
+    // 这条用例同时钉两件事：① 编辑后行内控件必须**还是原来那些对象**；
+    // ② 编辑不得广播 setsChanged（"静默回写"必须真的静默）。
+    void editingARowKeepsItsWidgetsAndStaysSilent()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1400, 800);
+        window.show();
+        QTest::qWait(30);
+
+        auto *table = window.findChild<CommandTableWidget *>();
+        QVERIFY(table);
+
+        CommandSet set;
+        for (int i = 0; i < 3; ++i) {
+            CommandItem item;
+            item.content = QStringLiteral("+CR,%1;").arg(i);
+            item.description = QStringLiteral("指令%1").arg(i);
+            set.commands.append(item);
+        }
+        table->setCommandSet(set);
+        QTRY_COMPARE(table->rowCount(), 3);
+        QTest::qWait(20);
+
+        // 行内控件三族：结尾符下拉（每行 1）、延时框（每行 1）、勾选框（每行 2——启用 + Hex）。
+        // 它们的**对象身份**就是判据，所以下面的断言全部写成与遍历顺序无关的形式。
+        const auto tailsBefore = table->findChildren<QComboBox *>();
+        const auto checksBefore = table->findChildren<QCheckBox *>();
+        const auto delaysBefore = table->findChildren<QSpinBox *>();
+        QCOMPARE(tailsBefore.size(), 3);
+        QCOMPARE(checksBefore.size(), 6);
+        QCOMPARE(delaysBefore.size(), 3);
+
+        QSignalSpy broadcast(CommandManager::instance(), &CommandManager::setsChanged);
+
+        // 逐个编辑三类控件，覆盖三条不同的信号路径：toggled / valueChanged / activated 之外
+        // 的 index 变更。全部勾选框都点一遍：这样"哪一行"就不必推断，断言可以按整体写。
+        for (auto *box : checksBefore) box->click();
+        for (auto *spin : delaysBefore) spin->setValue(123);
+        for (auto *combo : tailsBefore) combo->setCurrentIndex(3);
+        QCoreApplication::processEvents();
+
+        // ① 行内控件必须还是原来那些对象——重建过一次就说明"编辑 → 落库 → 重建"这条
+        //    use-after-free 链条又回来了。
+        QCOMPARE(table->findChildren<QComboBox *>(), tailsBefore);
+        QCOMPARE(table->findChildren<QCheckBox *>(), checksBefore);
+        QCOMPARE(table->findChildren<QSpinBox *>(), delaysBefore);
+
+        // ② 编辑必须落到模型（"静默"不等于"不生效"）。默认 enabled=true / isHex=false，
+        //    全部点一遍之后每一行都该反过来。
+        const CommandSet stored = table->commandSet();
+        QCOMPARE(stored.commands.size(), 3);
+        for (const auto &command : stored.commands) {
+            QCOMPARE(command.enabled, false);
+            QCOMPARE(command.isHex, true);
+            QCOMPARE(command.delayMs, 123);
+            QCOMPARE(command.tail, QStringLiteral("CR+LF"));
+        }
+
+        // ③ 整段编辑不得广播一次 setsChanged——正是它把表格重建推给了"正在发信号的控件"。
+        QCOMPARE(broadcast.count(), 0);
+    }
+
+    // ★ 快捷指令的发送必须真的到达运行时。
+    //
+    // 早先 MainWindow::handleCommandSend 调的是 EndpointRuntime 的 "write" 槽，
+    // 而运行时**根本没有这个槽**——invokeMethod 找不到方法就什么也不做，
+    // 于是"快捷面板点了没反应"，且没有任何报错（静默失败）。
+    // 顺带钉住两件同源的事：目标取发送区当前选中（指令里不存目标）、
+    // 结尾符在**解析之后**按字节追加（否则 HEX 指令的结尾符会被 fromHex 静默吃掉）。
+    void quickPanelSendReachesTheRuntime()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1400, 800);
+        window.show();
+        QTest::qWait(30);
+
+        auto *table = window.findChild<CommandTableWidget *>();
+        auto *model = window.findChild<TrafficModel *>();
+        auto *sendA = window.findChild<QPushButton *>(QStringLiteral("sendTargetA"));
+        auto *sendB = window.findChild<QPushButton *>(QStringLiteral("sendTargetB"));
+        QVERIFY(table && model && sendA && sendB);
+
+        CommandSet set;
+        CommandItem text;
+        text.content = QStringLiteral("+CR,GO;");
+        text.description = QStringLiteral("文本指令");
+        text.delayMs = 0; // 用例不必等延时
+        text.tail = QStringLiteral("CR+LF");
+        CommandItem hex;
+        hex.content = QStringLiteral("AA 55");
+        hex.description = QStringLiteral("HEX指令");
+        hex.delayMs = 0;
+        hex.isHex = true;
+        hex.tail = QStringLiteral("CR+LF");
+        set.commands << text << hex;
+        table->setCommandSet(set);
+        QTRY_COMPARE(table->rowCount(), 2);
+        QTest::qWait(20);
+
+        // 行内发送按钮：靠 "row" 属性认出来（底栏那几个按钮没有这个属性）。
+        QList<QPushButton *> rowSends;
+        for (auto *button : table->findChildren<QPushButton *>())
+            if (button->property("row").isValid()) rowSends.append(button);
+        QCOMPARE(rowSends.size(), 2);
+
+        // 发送区目标：A / B / AB 三个键里选中的那个就是唯一目标来源。
+        // 默认是 A；先只留 B，验证"指令发去了发送区选的那个口"。
+        if (sendA->isChecked()) sendA->click();
+        if (!sendB->isChecked()) sendB->click();
+
+        int rowsSeen = model->rowCount();
+        rowSends.at(0)->click(); // 文本指令 → B
+        QTRY_VERIFY(model->rowCount() > rowsSeen);
+        auto sent = model->record(model->rowCount() - 1);
+        QCOMPARE(sent.direction, Traffic::Direction::Transmit);
+        QCOMPARE(sent.source.endpointIndex, 1); // 发去了 B，不是写死的 A
+        QCOMPARE(sent.raw, QByteArray("+CR,GO;\r\n")); // 结尾符必须真的在末尾
+
+        rowsSeen = model->rowCount();
+        rowSends.at(1)->click(); // HEX 指令
+        QTRY_VERIFY(model->rowCount() > rowsSeen);
+        sent = model->record(model->rowCount() - 1);
+        QCOMPARE(sent.direction, Traffic::Direction::Transmit);
+        // HEX 内容 + 结尾符字节：AA 55 0D 0A。若把结尾符当文本拼进内容再交给
+        // fromHex，那两个控制字符不是十六进制数字会被跳过，这条断言就会失败。
+        QCOMPARE(sent.raw, QByteArray::fromHex("AA550D0A"));
+    }
+
+    // ★ 源码里引用的每一个 :/icons/... 都必须真的在资源里。
+    //
+    // 这个类别的错**不报错、不崩溃**，只是图标变成空白或纯色块——本次的
+    // `image: url(:/icons/check-white.svg)` 与 `chevron-double-*.svg` 就是这样：
+    // 文件躺在 resources/icons/ 里，但没登记进 resources.qrc，于是
+    // ① QSS 的 image 静默失败 → 勾选态只剩一块蓝底、看不到白勾；
+    // ② 图标引擎只留下一条 QWARN，跑测试时混在几十行警告里没人看。
+    //
+    // 判据取"源码里出现过这个路径"而不是手抄一份清单：手抄的清单会和源码一起过期，
+    // 那正是 bug 的成因。扫描根目录由 __FILE__ 推出（编译期绝对路径）。
+    void everyReferencedIconIsBundled()
+    {
+        // 项目根从 exe 所在目录逐级向上找：同时含 `src/ui/ui.pri` 与 `resources/resources.qrc`
+        // 的那一级就是根。**不靠 __FILE__、也不靠工作目录**——编译器给的 __FILE__ 是相对
+        // 路径，而相对谁取决于构建方式，配出来的绝对路径会指到 build/ 而不是项目根。
+        QDir probe(QCoreApplication::applicationDirPath());
+        QString rootPath;
+        while (!probe.isRoot()) {
+            if (probe.exists(QStringLiteral("src/ui/ui.pri"))
+                && probe.exists(QStringLiteral("resources/resources.qrc"))) {
+                rootPath = probe.absolutePath();
+                break;
+            }
+            probe.cdUp();
+        }
+        QVERIFY2(!rootPath.isEmpty(),
+            qPrintable(QStringLiteral("从 %1 向上找不到项目根").arg(QCoreApplication::applicationDirPath())));
+        const QDir root(rootPath);
+
+        // 只扫代码与样式表——文档里提到图标名不代表运行时要加载它。
+        const QStringList filters{"*.cpp", "*.h", "*.qss"};
+        // 必须带扩展名：不加这一条，本文件里那行模式字符串自身的字面量 ":/icons/"
+        // 会被当成一个图标引用（`...` 被 [A-Za-z0-9_.-]+ 吃掉），报出一堆假缺失。
+        // 真实引用一律带 .svg / .xpm / .png。
+        static const QRegularExpression pattern(
+            QStringLiteral(":/icons/[A-Za-z0-9_-]+\\.[A-Za-z0-9]+"));
+        QSet<QString> referenced;
+        QDirIterator it(rootPath, filters, QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString path = it.next();
+            // 构建产物（build*/）里是生成物与拷贝件，不是"源码引用了什么"的依据。
+            // Windows 下 QDir 遍历给原生反斜杠，两种分隔符都要排除——
+            // 只查 "/build" 的话，build/ 下生成物里的旧图标引用会误报"被源码引用"。
+            if (QDir::fromNativeSeparators(path).contains(QStringLiteral("/build"))) continue;
+            // rcc 生成物（qrc_*.cpp）内嵌的是打包时刻的资源引用，不是"源码引用了什么"；
+            // 源码树里早期 qmake 散落的 release/ 目录因此被扫到过，统一跳过生成物。
+            if (QFileInfo(path).fileName().startsWith(QStringLiteral("qrc_"))) continue;
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+            const QString text = QString::fromUtf8(file.readAll());
+            auto match = pattern.globalMatch(text);
+            while (match.hasNext()) referenced.insert(match.next().captured());
+        }
+        QVERIFY2(referenced.size() > 10,
+            qPrintable(QStringLiteral("在 %1 下只扫到 %2 个图标引用，扫描范围大概不对")
+                           .arg(rootPath).arg(referenced.size())));
+
+        QStringList missing;
+        for (const auto &path : referenced) {
+            QFile icon(path);
+            if (!icon.exists()) missing << path;
+        }
+        missing.sort();
+        QVERIFY2(missing.isEmpty(),
+            qPrintable(QStringLiteral("这些图标被源码引用但不在资源里（补进 resources.qrc）：\n  ")
+                + missing.join(QStringLiteral("\n  "))));
+    }
+
+    // ★ 批量发送要有进度标识（用户钦定）：正在发的那一条勾选框转琥珀，
+    // 这一轮发过的留绿色，一眼看出"发到哪条了"。
+    void batchSendMarksProgressOnRows()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1400, 800);
+        window.show();
+        QTest::qWait(30);
+
+        auto *table = window.findChild<CommandTableWidget *>();
+        // 批量发送按钮的 objectName 是 primaryButton（QSS 按它画强调底，见实现里的说明）。
+        auto *batch = window.findChild<QPushButton *>(QStringLiteral("primaryButton"));
+        QVERIFY(table && batch);
+
+        CommandSet set;
+        for (int i = 0; i < 3; ++i) {
+            CommandItem item;
+            item.content = QStringLiteral("+CR,%1;").arg(i);
+            item.description = QStringLiteral("指令%1").arg(i);
+            item.delayMs = 0; // 用例不等延时，只验进度标识
+            set.commands.append(item);
+        }
+        table->setCommandSet(set);
+        QTRY_COMPARE(table->rowCount(), 3);
+        QTest::qWait(20);
+
+        // 起点干净：没有任何行带着发送痕迹。
+        for (int row = 0; row < 3; ++row) QVERIFY(table->sendStateOf(row).isEmpty());
+
+        // 光验属性还不够——属性对了、QSS 没覆盖到（选择器写错、被更具体的规则压掉、
+        // 动态属性改了但没重新 polish）都是一样的白干，而屏幕上就是没变色。
+        // 所以这里**真的把它画出来看**：临时装上应用样式表，取勾选框指示器的像素。
+        // （测试进程默认不带样式表，因为 QSS 是 main.cpp 装的。）
+        QFile qss(QStringLiteral(":/styles/workbench.qss"));
+        QVERIFY(qss.open(QIODevice::ReadOnly));
+        const QString previousStyle = qApp->styleSheet();
+        qApp->setStyleSheet(QString::fromUtf8(qss.readAll()));
+
+        // 指示器在勾选框左侧 16×16；按"这个区域里最饱和的那个像素"取色，
+        // 比盯死某个坐标稳（不同 DPI 下居中留白会变）。
+        const auto indicatorColor = [&table](int row) {
+            const QString state = table->sendStateOf(row);
+            if (state.isEmpty()) return QColor();
+            // 走公开接口拿不到控件，按"动态属性值对得上"定位（每行至多一个带标记的勾选框）。
+            QCheckBox *target = nullptr;
+            for (auto *box : table->findChildren<QCheckBox *>())
+                if (box->property("sendState").toString() == state) { target = box; break; }
+            if (!target) return QColor();
+            const QImage shot = target->grab().toImage();
+            QColor best;
+            int bestScore = -1;
+            for (int y = 0; y < qMin(18, shot.height()); ++y) {
+                for (int x = 0; x < qMin(18, shot.width()); ++x) {
+                    const QColor c = shot.pixelColor(x, y);
+                    const int score = qMax(qMax(c.red(), c.green()), c.blue())
+                        - qMin(qMin(c.red(), c.green()), c.blue());
+                    if (score > bestScore) { bestScore = score; best = c; }
+                }
+            }
+            return best;
+        };
+
+        table->beginSendRun();
+        table->setSendCursor(0);
+        QTest::qWait(20);
+        const QColor sending = indicatorColor(0);
+        table->setSendCursor(1); // 0 号转为"已发送"
+        QTest::qWait(20);
+        const QColor sent = indicatorColor(0);
+        table->clearSendRun();
+        QTest::qWait(20);
+
+        qApp->setStyleSheet(previousStyle); // 复原，别影响其他用例
+
+        // 琥珀（正在发）：红高、绿中、蓝很低。绿（已发）：绿最高、红最低。
+        QVERIFY2(sending.isValid() && sending.red() > 190 && sending.green() > 110
+                && sending.green() < 210 && sending.blue() < 90,
+            qPrintable(QStringLiteral("正在发送的勾选框应为琥珀色，实测 rgb(%1,%2,%3)")
+                           .arg(sending.red()).arg(sending.green()).arg(sending.blue())));
+        QVERIFY2(sent.isValid() && sent.green() > 110 && sent.red() < 90,
+            qPrintable(QStringLiteral("已发送的勾选框应为绿色，实测 rgb(%1,%2,%3)")
+                           .arg(sent.red()).arg(sent.green()).arg(sent.blue())));
+
+        // 游标语义单独验一遍（批量发送跑得快，中间态不适合抢时间窗去抓）。
+        table->beginSendRun();
+        table->setSendCursor(1);
+        QCOMPARE(table->sendStateOf(1), QStringLiteral("sending"));
+        QVERIFY(table->sendStateOf(0).isEmpty());
+        table->setSendCursor(2); // 游标前移：1 变成"已发送"
+        QCOMPARE(table->sendStateOf(1), QStringLiteral("sent"));
+        QCOMPARE(table->sendStateOf(2), QStringLiteral("sending"));
+        table->endSendRun();
+        QCOMPARE(table->sendStateOf(2), QStringLiteral("sent"));
+        QVERIFY(table->sendStateOf(0).isEmpty());
+        table->clearSendRun();
+        for (int row = 0; row < 3; ++row) QVERIFY(table->sendStateOf(row).isEmpty());
+
+        // 端到端：勾选 → 点「按序发送勾选项」→ 三条最终都留下"已发送"标记。
+        // 整条链（表格取行号 → 面板排时序 → 回写进度 → 收尾）一次跑通。
+        //
+        // 等待要盯**收尾完成**这个条件本身（最后一行由 sending 转 sent），不能只等
+        // 第一行变 sent 就往下断言：游标是逐条推进的，第一行早早就是 sent 了，
+        // 而最后一行还停在 sending —— 那时断言等于在抢时间窗。
+        for (auto *box : table->findChildren<QCheckBox *>()) box->setChecked(true);
+        batch->click();
+        QTRY_COMPARE_WITH_TIMEOUT(table->sendStateOf(2), QStringLiteral("sent"), 3000);
+        QCOMPARE(table->sendStateOf(0), QStringLiteral("sent"));
+        QCOMPARE(table->sendStateOf(1), QStringLiteral("sent"));
+
+        // 重建表格必须把痕迹清干净：行号会被重排，留着高亮只会指到别的指令上。
+        table->setCommandSet(set);
+        for (int row = 0; row < 3; ++row) QVERIFY(table->sendStateOf(row).isEmpty());
+    }
+
+    // ★ 展开/收起指令面板时，**数据区宽度原地不动、窗口宽度跟着变**（用户钦定）。
+    //
+    // 早先的行为是"收起就把空出来的宽度全给数据区"，于是收起那一下监视区突然变宽、
+    // 展开又缩回去——折行位置与列宽跟着跳，正看着的内容会整屏重排。
+    // 这条用例把"数据区宽度是锚点"钉死：两种切换下数据区都必须原地不动，
+    // 而窗口宽度必须**恰好**增减面板那一段（只验"变了"是不够的）。
+    void togglingPanelKeepsDataAreaWidth()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1600, 900);
+        window.show();
+        QTest::qWait(50);
+
+        auto *splitter = window.findChild<QSplitter *>(QStringLiteral("horizontalSplitter"));
+        auto *toggle = window.findChild<QPushButton *>(QStringLiteral("commandPanelToggle"));
+        QVERIFY(splitter && toggle);
+        QCOMPARE(splitter->count(), 2);
+
+        const int expandedData = splitter->widget(0)->width();
+        const int expandedPanel = splitter->widget(1)->width();
+        const int expandedWindow = window.width();
+        qInfo() << "EXPANDED data" << expandedData << "panel" << expandedPanel
+                << "window" << expandedWindow << "splitter" << splitter->width()
+                << "handle" << splitter->handleWidth();
+        QVERIFY2(expandedData > 0 && expandedPanel > 0,
+            qPrintable(QStringLiteral("展开态几何不对：数据区 %1 面板 %2")
+                           .arg(expandedData).arg(expandedPanel)));
+
+        // ★ 端口条必须**止步于分栏线**，不许横贯到指令面板下方。
+        //
+        // 用户反馈："点击扩展时端口设置区域跟着拉长"。根因是端口条原本挂在**根布局**里
+        // 横贯全宽：面板展开把窗口加宽，横贯的端口条就跟着被拉长了。端口条改为左侧列的
+        // 成员之后，它的右边缘应当不超过面板的左边缘——这条断言直接编码用户的诉求
+        //（"让快捷面板占据整个右侧"），比只验宽度更有意义。
+        auto *endpointBar = window.findChild<QFrame *>(QStringLiteral("EndpointBar"));
+        QVERIFY(endpointBar);
+        const int expandedBarWidth = endpointBar->width();
+        const int barRight = endpointBar->mapTo(&window, QPoint()).x() + expandedBarWidth;
+        const int panelLeft = splitter->widget(1)->mapTo(&window, QPoint()).x();
+        QVERIFY2(barRight <= panelLeft,
+            qPrintable(QStringLiteral("端口条越过了分栏线（应止步于指令面板左侧）："
+                                      "右缘 %1 vs 面板左缘 %2")
+                           .arg(barRight).arg(panelLeft)));
+
+        // 收起：数据区原地不动，面板归零，窗口宽度恰好减去面板那一段。
+        toggle->setChecked(false);
+        QTest::qWait(50);
+        const int collapsedData = splitter->widget(0)->width();
+        const int collapsedWindow = window.width();
+        qInfo() << "COLLAPSED data" << collapsedData << "window" << collapsedWindow
+                << "splitter" << splitter->width() << "shrunk" << (expandedWindow - collapsedWindow);
+        // 数据区是锚点：两种状态下的宽度必须**逐像素相等**。
+        QCOMPARE(collapsedData, expandedData);
+        QCOMPARE(splitter->widget(1)->width(), 0);
+        // 端口条同理：它在左列里，左列宽度不变，它就不该变——这是用户报的
+        // "端口设置区域跟着拉长"的直接反面。
+        QCOMPARE(endpointBar->width(), expandedBarWidth);
+        QVERIFY2(collapsedWindow < expandedWindow,
+            qPrintable(QStringLiteral("收起后窗口应变窄：%1 → %2")
+                           .arg(expandedWindow).arg(collapsedWindow)));
+        // 窗口收窄量应当约等于面板宽度（那一段还给了桌面）。给一点余量：
+        // 分栏对手柄怎么记账是 Qt 的实现细节（手柄在收起时归谁、QSS 画多宽），
+        // 钉死几像素只会让用例在无关改动上红——**关键不变式是上面那条"数据区逐像素不变"**。
+        const int shrunk = expandedWindow - collapsedWindow;
+        QVERIFY2(qAbs(shrunk - expandedPanel) <= 12,
+            qPrintable(QStringLiteral("窗口收窄 %1px，应约等于面板宽度 %2px")
+                           .arg(shrunk).arg(expandedPanel)));
+
+        // 展开：数据区仍然原地不动（核心不变式），面板重新出现，窗口加宽回去。
+        toggle->setChecked(true);
+        QTest::qWait(50);
+        QCOMPARE(splitter->widget(0)->width(), expandedData);
+        QVERIFY2(splitter->widget(1)->width() > 0, qPrintable(QStringLiteral("面板应重新出现")));
+        const int onceExpandedWindow = window.width();
+        QVERIFY2(onceExpandedWindow > collapsedWindow,
+            qPrintable(QStringLiteral("展开后窗口应变宽：%1 → %2")
+                           .arg(collapsedWindow).arg(onceExpandedWindow)));
+
+        // ★ 幂等：再收起再展开一轮，几何必须与上一轮**完全相同**。
+        // 这条比"回到最初那个数字"更有意义——最初那个宽度是初始布局给的（面板拿到的
+        // 实际宽度可能略小于它自己的最小宽度），把它当基准会钉在一个偶然值上。
+        // 而"反复切换不漂移"才是用户真正会遇到的：连点几次扩展，窗口不该越点越宽。
+        toggle->setChecked(false);
+        QTest::qWait(50);
+        QCOMPARE(splitter->widget(0)->width(), expandedData);
+        QCOMPARE(window.width(), collapsedWindow);
+        toggle->setChecked(true);
+        QTest::qWait(50);
+        QCOMPARE(splitter->widget(0)->width(), expandedData);
+        QCOMPARE(window.width(), onceExpandedWindow);
     }
 
     void messagesCarryStructuredFacts()
@@ -685,7 +1218,20 @@ private slots:
         PreferencesStore sweep(nullptr, ini);
         for (const auto *key : {"filter/keywords", "filter/excludes", "filter/regex",
                  "filter/caseSensitive", "filter/rx", "filter/tx", "filter/states",
-                 "filter/warnings", "filter/errors", "filter/expanded"})
+                 "filter/warnings", "filter/errors", "filter/expanded",
+                 // 显示开关同样会落盘：某个用例把"同时显示 HEX"打开后不关，
+                 // 下一个用例就会在"行数多一倍"的前提下断言——与过滤条件同一类串扰。
+                 "traffic/pure", "traffic/hex", "traffic/wrap",
+                 // 编码格式与发送格式也会落盘，且后果最隐蔽：某个用例把发送格式切成
+                 // GBK/UTF-8 后不切回来，下一个用例就会在"输入按文本编码"的前提下断言——
+                 // 实测 `sendPreviewRejectsInvalidInput` 因此间歇失败，报的是
+                 // `"01 GG"` 被解析成 7 字节（5 字符 + CRLF）而不是"输入错误"。
+                 // 这类用例大多**显式设置** format，不依赖残留值，所以清掉是安全的。
+                 "traffic/format", "send/format", "send/suffix",
+                 // 窗口几何与指令面板展开状态同样会落盘，而且后果最直接：某个用例把面板
+                 // 收起 / 把窗口拖小之后不还原，下一个用例就在"面板已收起"的前提下断言。
+                 // （commandPanel/expanded 由 CommandPanel::savePreferences 写入，属既有遗漏。）
+                 "window/geometry", "commandPanel/expanded"})
             sweep.remove(QString::fromLatin1(key));
     }
 
@@ -1444,9 +1990,12 @@ private slots:
         delete notice; // 立刻收掉，别让去重窗口（3s）在等待 deleteLater 期间白白流逝
         QTRY_VERIFY(window.findChildren<QMessageBox *>().isEmpty()); // WA_DeleteOnClose 生效
 
-        // 状态栏短消息同样带端点标识。
-        QVERIFY2(window.statusBar()->currentMessage().contains(QStringLiteral("B · TCP")),
-            qPrintable(window.statusBar()->currentMessage()));
+        // 状态栏短消息同样带端点标识——读状态栏右端的临时提示格 StatusNote，
+        // 不再是 statusBar()->currentMessage()：后者（showMessage）会隐藏 addWidget
+        // 挂的统计行，已按项目铁律改用 MainWindow::showStatusNote（见其说明）。
+        auto *note = window.findChild<QLabel *>(QStringLiteral("StatusNote"));
+        QVERIFY(note);
+        QVERIFY2(note->text().contains(QStringLiteral("B · TCP")), qPrintable(note->text()));
 
         // 防轰炸：3 秒内同端点同类错误再失败一次，不再弹新窗。
         action->click();
@@ -1517,10 +2066,11 @@ private slots:
             qPrintable(text->toPlainText()));
         QVERIFY2(text->toPlainText().contains(QStringLiteral("B · TCP 服务器")),
             qPrintable(QStringLiteral("Error 行应带端点标识：") + text->toPlainText()));
-        QTRY_VERIFY2(window.statusBar()->currentMessage().contains(QStringLiteral("连接异常断开")),
-            qPrintable(window.statusBar()->currentMessage()));
-        QVERIFY2(window.statusBar()->currentMessage().contains(QStringLiteral("B · TCP")),
-            qPrintable(window.statusBar()->currentMessage()));
+        // 与"打开失败"路径同理：读临时提示格 StatusNote，而不是 statusBar()->currentMessage()。
+        auto *note = window.findChild<QLabel *>(QStringLiteral("StatusNote"));
+        QVERIFY(note);
+        QTRY_VERIFY2(note->text().contains(QStringLiteral("连接异常断开")), qPrintable(note->text()));
+        QVERIFY2(note->text().contains(QStringLiteral("B · TCP")), qPrintable(note->text()));
         // 运行中异常断开不弹窗（与"打开失败"路径的分野）。
         QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
 
@@ -1655,8 +2205,7 @@ private slots:
         clearEndpointDrafts();
         MainWindow window;
         auto *editor = window.findChild<QPlainTextEdit *>("sendEditor");
-        auto *length = window.findChild<QLabel *>("ByteCount");
-        QVERIFY(editor && length);
+        QVERIFY(editor);
         // 存为命令随快捷命令页一起撤下：命令列表回归前，发送区不留没有落点的按钮。
         QVERIFY(!window.findChild<QPushButton *>("saveCommand"));
         // 预览阶段发送按钮恒为禁用（尚未连接端口），与输入合法性无关。
@@ -1664,20 +2213,24 @@ private slots:
             QVERIFY(!button->isEnabled());
         auto *preview = window.findChild<QLabel *>("payloadPreview");
         QVERIFY(preview);
+        // 字节数与预览数据**已合并进同一个标签**（富文本），所以都从 preview->text() 上看；
+        // 字节数在 span 里，用 ">2B<" 这种带标记边界的写法定位，避免误命中 HEX 里恰好出现的 "2B"。
         editor->setPlainText("01 GG");
-        QCOMPARE(length->text(), QStringLiteral("输入错误"));
+        QVERIFY2(preview->text().contains(QStringLiteral("输入错误")),
+            qPrintable(QStringLiteral("非法输入应显示字节数为「输入错误」：") + preview->text()));
         QVERIFY(preview->text().contains(QStringLiteral("无效 HEX"))); // 错误原因展示在预览位置
         editor->setPlainText("00 FF");
-        QCOMPARE(length->text(), QStringLiteral("2 字节"));
-        QCOMPARE(preview->text(), QStringLiteral("00 FF"));
+        QVERIFY2(preview->text().contains(QStringLiteral(">2B<")),
+            qPrintable(QStringLiteral("字节数应为 2B：") + preview->text()));
+        QVERIFY(preview->text().contains(QStringLiteral("00 FF")));
         // 格式/末尾切换的接线：预览字节数必须跟随变化。
         editor->setPlainText("01 03 00 00 00 02 C4 0B");
-        QCOMPARE(length->text(), QStringLiteral("8 字节"));
+        QVERIFY2(preview->text().contains(QStringLiteral(">8B<")), qPrintable(preview->text()));
         window.findChild<QComboBox *>("sendSuffix")->setCurrentIndex(3); // CRLF
-        QCOMPARE(length->text(), QStringLiteral("10 字节"));
+        QVERIFY2(preview->text().contains(QStringLiteral(">10B<")), qPrintable(preview->text()));
         window.findChild<QComboBox *>("sendSuffix")->setCurrentIndex(0);
         window.findChild<QComboBox *>("sendFormat")->setCurrentIndex(3); // UTF-8：正文按文本编码
-        QCOMPARE(length->text(), QStringLiteral("23 字节"));
+        QVERIFY2(preview->text().contains(QStringLiteral(">23B<")), qPrintable(preview->text()));
         window.findChild<QComboBox *>("sendFormat")->setCurrentIndex(0); // 恢复默认，不留跨用例状态
     }
 
@@ -1725,29 +2278,43 @@ private slots:
         int checked = 0;
         for (auto *button : targets) checked += button->isChecked() ? 1 : 0;
         QCOMPARE(checked, 1);
-        // 格式/末尾贴在正文下方，正文上方不再有任何一行。
+        // 新布局（用户钦定"发送按钮放到发送框的右边，定时发送、编码选择也集成到右边"）：
+        // 编码 / 定时 / 目标 / 发送全部落在正文**右侧一列**，不再铺在正文下方。
         auto *editor = window.findChild<QPlainTextEdit *>("sendEditor");
         QVERIFY(editor);
-        const int editorTop = editor->mapTo(&window, QPoint()).y();
-        const int editorBottom = editorTop + editor->height();
+        const int editorRight = editor->mapTo(&window, QPoint()).x() + editor->width();
         for (const QString &name : {"sendFormat", "sendSuffix"}) {
             auto *box = window.findChild<QComboBox *>(name);
             QVERIFY2(box && box->isVisibleTo(&window), qPrintable(name));
-            QVERIFY2(box->mapTo(&window, QPoint()).y() >= editorBottom, qPrintable(name));
+            QVERIFY2(box->mapTo(&window, QPoint()).x() >= editorRight,
+                qPrintable(QStringLiteral("%1 应落在正文右侧：x=%2，正文右缘=%3")
+                               .arg(name)
+                               .arg(box->mapTo(&window, QPoint()).x())
+                               .arg(editorRight)));
         }
-        // 目标按钮在发送按钮旁边：同一行、位于其左侧，且整体落到正文下方。
+        // 定时发送同属右侧列。
+        auto *repeat = window.findChild<QCheckBox *>("repeatSending");
+        QVERIFY(repeat);
+        QVERIFY2(repeat->mapTo(&window, QPoint()).x() >= editorRight,
+            qPrintable(QStringLiteral("定时发送应在正文右侧：x=%1，正文右缘=%2")
+                           .arg(repeat->mapTo(&window, QPoint()).x())
+                           .arg(editorRight)));
+        // 发送按钮在正文右侧；目标 A/B/AB 与它**同一行**、且位于它左侧
+        //（这一排的语义就是"发给谁 + 发出去"，拆行会读不出关系）。
         auto *send = window.findChild<QPushButton *>("PrimaryButton");
         QVERIFY(send);
+        QVERIFY2(send->mapTo(&window, QPoint()).x() >= editorRight,
+            qPrintable(QStringLiteral("发送按钮应在正文右侧：x=%1，正文右缘=%2")
+                           .arg(send->mapTo(&window, QPoint()).x())
+                           .arg(editorRight)));
+        const int sendMid = send->mapTo(&window, QPoint()).y() + send->height() / 2;
         const int targetMid = targets.at(0)->mapTo(&window, QPoint()).y() + targets.at(0)->height() / 2;
-        const int sendTop = send->mapTo(&window, QPoint()).y();
-        QVERIFY2(targetMid >= editorBottom,
-                 qPrintable(QString("target mid %1 vs editor bottom %2").arg(targetMid).arg(editorBottom)));
-        QVERIFY2(targetMid >= sendTop && targetMid <= sendTop + send->height(),
-                 qPrintable(QString("target mid %1 vs send row %2..%3")
-                                .arg(targetMid).arg(sendTop).arg(sendTop + send->height())));
+        QVERIFY2(qAbs(targetMid - sendMid) <= 2,
+                 qPrintable(QStringLiteral("目标与发送应在同一行：目标中心 %1 vs 发送中心 %2")
+                                .arg(targetMid).arg(sendMid)));
         QVERIFY2(targets.at(2)->mapTo(&window, QPoint()).x() + targets.at(2)->width()
                      <= send->mapTo(&window, QPoint()).x(),
-                 qPrintable(QString("AB right edge %1 vs send left %2")
+                 qPrintable(QStringLiteral("AB right edge %1 vs send left %2")
                                 .arg(targets.at(2)->mapTo(&window, QPoint()).x() + targets.at(2)->width())
                                 .arg(send->mapTo(&window, QPoint()).x())));
         const auto artifactDir = qEnvironmentVariable("EASYDEBUG_UI_ARTIFACT_DIR");
@@ -1755,6 +2322,476 @@ private slots:
             QDir().mkpath(artifactDir);
             QVERIFY(window.grab().save(artifactDir + "/send-panel.png"));
         }
+    }
+
+    // 发送区四个按钮（目标 A/B/AB + 发送）宽度必须取齐，且都不能把文字截断（用户反馈）：
+    // 并排按钮一长一短很难看，"发送"被压到只剩两个字更糟。这里量实际几何而不是读
+    // minimumWidth——布局是否真的按最小宽度铺开，只有几何说了算。
+    void sendActionButtonsShareOneWidth()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        const QList<QPushButton *> row{window.findChild<QPushButton *>("sendTargetA"),
+                                       window.findChild<QPushButton *>("sendTargetB"),
+                                       window.findChild<QPushButton *>("sendTargetAB"),
+                                       window.findChild<QPushButton *>("PrimaryButton")};
+        int width = -1;
+        for (auto *button : row) {
+            QVERIFY2(button && button->isVisibleTo(&window), "发送区按钮缺失");
+            if (width < 0) width = button->width();
+            QCOMPARE(button->width(), width);
+            // 宽度必须撑得下完整文字：QPushButton 放不下会在文字中间插省略号，
+            // 用 sizeHint()（含图标/内边距的完整需求）当判据。
+            QVERIFY2(button->width() >= button->sizeHint().width(),
+                qPrintable(QStringLiteral("按钮文字被截断：%1 需要 %2，实得 %3")
+                               .arg(button->text())
+                               .arg(button->sizeHint().width())
+                               .arg(button->width())));
+        }
+        // 正文必须够高：五行才能把常见的中等长度指令（带空格的 HEX）完整摆在眼前。
+        auto *editor = window.findChild<QPlainTextEdit *>("sendEditor");
+        QVERIFY(editor);
+        const int lineSpacing = editor->fontMetrics().lineSpacing();
+        QVERIFY2(editor->height() >= lineSpacing * 4,
+            qPrintable(QStringLiteral("正文只有 %1 行").arg(editor->height() / qMax(1, lineSpacing))));
+    }
+
+    // 展开右侧指令面板**不能**把数据区的头两行压变形（用户反馈：展开后过滤栏按钮
+    // 被过度挤压）。约束是双向的：过滤条上的按钮保持自己的最小宽度，数据区不被压到
+    // 它的宽度下限之下。这里在最小窗宽下量几何。
+    // ★ 发送区的「发送」必须真的把内容发出去（用户反馈："实现发送区的发送功能"）。
+    //
+    // 这条链上曾断过一环：发送按钮的可用性取决于 `SendPanel::m_openFlags`，而唯一能
+    // 喂它的 `SendPanel::setEndpointOpen()` **全项目没有任何调用点** —— 于是
+    // m_openFlags 恒为 false、按钮永远禁用，「发送」看上去就是个摆设。
+    //
+    // 所以用例刻意**从 MainWindow 的真实路径走**（点端点的动作按钮让它真的监听），
+    // 而不是直接调 `setEndpointOpen()`：直接调的话，接线又断了也照样绿。
+    void sendPanelSendsThroughRealEndpointState()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        auto *send = window.findChild<QPushButton *>(QStringLiteral("PrimaryButton"));
+        auto *editor = window.findChild<QPlainTextEdit *>(QStringLiteral("sendEditor"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *targetB = window.findChild<QPushButton *>(QStringLiteral("sendTargetB"));
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        auto *repeat = window.findChild<QCheckBox *>(QStringLiteral("repeatSending"));
+        QVERIFY(send && editor && model && targetB && b && repeat);
+
+        // 没有端点连上时按钮必须是禁用的——"可用性"是双向契约，
+        // 修 bug 时很容易顺手改成无条件启用，那等于把"能不能发"变成"点了才知道"。
+        QVERIFY2(!send->isEnabled(), "未连接端点时发送按钮不该可用");
+
+        // 目标是"发送区选中的那个口"。默认是 A（串口），这里切到 B（TCP 服务器，
+        // 不需要真实硬件），顺带验证目标切换会刷新可用性。
+        targetB->click();
+        QVERIFY(targetB->isChecked());
+
+        // 打开 B：走端点动作按钮，与用户操作同一条路 → runtime 监听 → 状态回传。
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(action);
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("停止"));
+
+        // ★ 核心断言：端点打开后发送按钮必须启用。这一条正是"接线缺失"的探测器。
+        QTRY_VERIFY2(send->isEnabled(),
+            "端点已监听，但发送按钮仍禁用——检查 handleEndpointState 是否把状态喂给了 SendPanel");
+
+        // 内容与末尾都显式设定，不依赖共享 preferences 的残留（用例间会串扰）。
+        editor->setPlainText(QStringLiteral("+CR,GO;"));
+        auto *format = window.findChild<QComboBox *>(QStringLiteral("sendFormat"));
+        auto *suffix = window.findChild<QComboBox *>(QStringLiteral("sendSuffix"));
+        QVERIFY(format && suffix);
+        format->setCurrentText(QStringLiteral("UTF-8"));
+        suffix->setCurrentIndex(3); // +CR+LF
+        QTRY_VERIFY(send->isEnabled());
+
+        // 手动发送：消息必须真的进模型（TCP 服务器暂无客户端，写入可能失败，
+        // 但"发出了一条 TX"这件事必须成立——失败也要留下可见记录）。
+        const int rowsBefore = model->rowCount();
+        send->click();
+        QTRY_VERIFY(model->rowCount() > rowsBefore);
+        auto sent = model->record(model->rowCount() - 1);
+        QCOMPARE(sent.direction, Traffic::Direction::Transmit);
+        QCOMPARE(sent.source.endpointIndex, 1);       // 发去了选中的 B，不是默认的 A
+        QCOMPARE(sent.origin, Traffic::Origin::Manual); // 手点 = 手动
+        QCOMPARE(sent.raw, QByteArray("+CR,GO;\r\n")); // 末尾真的追加在字节末尾
+
+        // 定时发送：勾选即发第一拍，且**来源标记必须是 Scheduled**。
+        // 这个参数以前在 sendRequested 的 lambda 里被丢掉了（形参只声明了两个），
+        // 于是每一拍都被记成"手动"，屏幕上显示 `TX·手动` 而不是 `TX·定时`。
+        const int rowsBeforeTick = model->rowCount();
+        repeat->setChecked(true);
+        QTRY_VERIFY(model->rowCount() > rowsBeforeTick);
+        bool sawScheduled = false;
+        for (int row = model->rowCount() - 1; row >= rowsBeforeTick; --row) {
+            if (model->record(row).origin == Traffic::Origin::Scheduled) { sawScheduled = true; break; }
+        }
+        repeat->setChecked(false); // 立刻停，别让定时器继续往模型里灌
+        QVERIFY2(sawScheduled, "定时发送的报文来源标记应为 Scheduled（界面显示 TX·定时）");
+
+        // 关闭端点后按钮必须回到禁用：可用性跟着连接状态走，不是一次性的。
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("监听"));
+        QTRY_VERIFY2(!send->isEnabled(), "端点已关闭，发送按钮应回到禁用");
+    }
+
+    // ★ 打开/关闭必须在监视区留下**读得出结果**的迁移记录，且不能顶掉状态栏统计。
+    //
+    // 两个用户可见问题的回归守卫：
+    // ① 状态行正文曾经直接取传输层的 detail（`COM2 @115200`），只有端口参数、
+    //    没有"已打开/已关闭"这个状态词——屏幕上根本读不出连接成没成。
+    // ② 统计行是用 `addWidget()` 挂的**普通**部件，而 `QStatusBar::showMessage()`
+    //    会隐藏所有普通部件：打开端点时那句参数摘要一出现，RX/TX/条数/桥接整行
+    //    就消失，5 秒后才回来；反复连接每次都重置那个计时器，看起来就是
+    //    "统计数据不显示了、很久才恢复"。
+    void endpointTransitionsAreLoggedAndKeepStatsVisible()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(text && b);
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(action);
+
+        const auto lastLine = [text] { return text->document()->lastBlock().text(); };
+
+        // 打开：状态行必须同时含"状态"与"已打开"两个要素——
+        // 只有端口参数（旧行为）就说明状态词没拼上。
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("停止"));
+        QTRY_VERIFY(lastLine().contains(QStringLiteral("已打开")));
+        QVERIFY2(lastLine().contains(QStringLiteral("状态")),
+            qPrintable(QStringLiteral("状态行应带方向词：") + lastLine()));
+        const QString openedLine = lastLine();
+
+        // ★ 打开之后统计行必须**仍然可见**。旧实现里 showMessage 会把它整行藏掉，
+        //   所以这条断言正是那个 bug 的探测器。
+        for (const auto *name : {"RxStatus", "TxStatus", "TrafficStatus", "RouteStatus"}) {
+            auto *label = window.findChild<QLabel *>(QString::fromLatin1(name));
+            QVERIFY2(label && label->isVisibleTo(&window),
+                qPrintable(QStringLiteral("打开端点后统计标签被隐藏：%1").arg(name)));
+        }
+
+        // 关闭：同样要留下迁移记录，且统计行照旧可见。
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("监听"));
+        QTRY_VERIFY(lastLine().contains(QStringLiteral("已关闭")));
+        QVERIFY2(lastLine() != openedLine,
+            qPrintable(QStringLiteral("关闭后状态行没更新：") + lastLine()));
+        // 关闭来源必须写进正文：用户主动停止与对端断开/设备错误是不同事件，
+        // 一条没有来源的"已关闭"让人无从判断是谁关的（用户反馈"不知道谁关闭了"）。
+        QVERIFY2(lastLine().contains(QStringLiteral("用户停止")),
+            qPrintable(QStringLiteral("关闭来源应写进正文：") + lastLine()));
+        // 而且必须说清**是哪个端口**关了：只说"已关闭 · 用户停止"仍然答不全是 A 还是 B、
+        // 是哪个口（用户反馈"需要清晰表明是那个端口关闭"）。身份取草稿的真实配置——
+        // 这条用例里 B 是 TCP 服务器，身份形如 "B · 127.0.0.1:<端口>"。
+        const QString identity = QStringLiteral("B · 127.0.0.1:%1")
+            .arg(b->findChild<QSpinBox *>(QStringLiteral("server.port"))->value());
+        QVERIFY2(lastLine().contains(identity),
+            qPrintable(QStringLiteral("关闭行应带端点身份「%1」：%2").arg(identity, lastLine())));
+        // 把渲染出来的关闭行原样记进测试日志：这里的**文案本身就是契约**
+        //（用户要求"清晰表明是那个端口关闭"），出问题时能直接看到实际长什么样，
+        // 不必反推。与 SPLITPROBE / window minimum width 那几条诊断同一用途。
+        qInfo("CLOSEROW %s", qPrintable(lastLine()));
+        for (const auto *name : {"RxStatus", "TxStatus", "TrafficStatus"}) {
+            auto *label = window.findChild<QLabel *>(QString::fromLatin1(name));
+            QVERIFY2(label && label->isVisibleTo(&window),
+                qPrintable(QStringLiteral("关闭端点后统计标签被隐藏：%1").arg(name)));
+        }
+    }
+
+    // 一次失败只留**一条**日志（用户反馈"错误跟状态感觉重复了"）。传输层对失败成对
+    // 发出 errorOccurred + stateChanged(Closed)（两条都是底层真实事件，core 测试亦依赖），
+    // 合并发生在 EndpointRuntime：错误行保留完整原因，紧随的 Closed 不再单独成 State 行。
+    // 用 TCP 服务器监听一个已被占用的端口制造同步失败（不依赖网络栈超时，确定性最强）。
+    void endpointFailureLeavesExactlyOneLogLine()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+        auto *model = window.findChild<TrafficModel *>();
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(model && b); // B 默认 TCP 服务器
+        QTcpServer blocker;  // 占住端口的"另一个进程"：保持监听直到本用例结束
+        QVERIFY(blocker.listen(QHostAddress::LocalHost, 0));
+        b->findChild<QSpinBox *>(QStringLiteral("server.port"))->setValue(blocker.serverPort());
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(action);
+
+        action->click(); // 监听一个已被占用的端口 → listen() 同步失败
+        QTRY_COMPARE(model->rowCount(), 1);
+        QCOMPARE(model->record(0).direction, Traffic::Direction::Error);
+        // 那条唯一的日志必须能读出失败原因（而不是零信息的"打开失败"）。
+        QVERIFY2(model->record(0).statusText.contains(QStringLiteral("失败")),
+            qPrintable(QStringLiteral("错误行正文应含原因：") + model->record(0).statusText));
+        // 同一次失败不再另成一条 State 行——这正是"感觉重复了"的根源。
+        int stateRows = 0;
+        for (int i = 0; i < model->rowCount(); ++i)
+            if (model->record(i).direction == Traffic::Direction::State) ++stateRows;
+        QCOMPARE(stateRows, 0);
+    }
+
+    // 失败播报必须走 showStatusNote，**不得**用 QStatusBar::showMessage——后者会隐藏所有
+    // addWidget 挂的普通部件，把 RX/TX/条数统计整行顶掉 5 秒。旧实现两处残留的 showMessage
+    // 正是这么干的，偏偏"打开失败常常连续发生"，用户于是看到统计行反复消失。
+    //
+    // 为什么必须**独立成例**：同类的端口断言分别住在 portOpenFailureSurfacesErrorRowAndNonModalPopup
+    // 与 runtimeDisconnectReportsErrorRowWithoutPopup 里，而这两条用例在本机因**预存失败**
+    // （断言要求日志行带端点名前缀，属过时用例）会提前中止——挂在它们后面的 StatusNote /
+    // 统计行断言**永远执行不到**。独立用例才真正跑到。
+    //
+    // 两个断言必须**同一次失败、同一时刻**成立：
+    //   B（核心）统计行未被顶掉——旧 showMessage 会让 RxStatus/TxStatus/TrafficStatus 不可见；
+    //   A（信息不丢）失败原因仍被播报——m_statusNote 文本含"失败"。
+    // 把 B 放在前：这样一旦有人把 showStatusNote 改回 showMessage，本用例会**先**在 B 变红，
+    // 明确指向"统计行被顶掉"这个回归点，而不是被 A 的连锁失败掩盖。
+    void errorBroadcastKeepsStatsVisible()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+        auto *model = window.findChild<TrafficModel *>();
+        auto *note = window.findChild<QLabel *>(QStringLiteral("StatusNote"));
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(model && note && b); // B 默认 TCP 服务器
+        QTcpServer blocker;          // 占住端口的"另一个进程"：保持监听直到本用例结束
+        QVERIFY(blocker.listen(QHostAddress::LocalHost, 0));
+        b->findChild<QSpinBox *>(QStringLiteral("server.port"))->setValue(blocker.serverPort());
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(action);
+
+        action->click(); // 监听一个已被占用的端口 → listen() 同步失败（确定性，不依赖超时）
+        // 等这次失败处理完毕：模型里出现那条 Error 行，且播报已落到 StatusNote。
+        QTRY_COMPARE(model->rowCount(), 1);
+        QCOMPARE(model->record(0).direction, Traffic::Direction::Error);
+
+        // —— 断言 B（本次补修的核心）——
+        // 用 addWidget 挂的统计行必须**仍然可见**。旧 showMessage 会把它整行隐藏 5 秒。
+        for (const auto *name : {"RxStatus", "TxStatus", "TrafficStatus"}) {
+            auto *label = window.findChild<QLabel *>(QString::fromLatin1(name));
+            QVERIFY2(label && label->isVisibleTo(&window),
+                qPrintable(QStringLiteral("失败播报把统计行顶掉了：%1 不可见").arg(name)));
+        }
+        // —— 断言 A（信息不丢）——
+        // 改走 showStatusNote 后，失败原因仍必须被播报出来。
+        QVERIFY2(note->text().contains(QStringLiteral("失败")),
+            qPrintable(QStringLiteral("失败播报丢失：StatusNote 文本不含失败原因：") + note->text()));
+    }
+
+    // 正向锁定（QA 补充）：失败合并的**边界**。合并锚点 m_pendingFailureGeneration 会一直挂到
+    // 下一次 stateChanged 才被消费，所以必须证明它不会"残留到下一代"或"该合却没合"：
+    //   C1 连续两次失败（用户连点）——每次各自恰好一条 Error 行，且不残留任何 State 行；
+    //   C4 失败后再点连接＝换代——openEndpoint 清锚点，第二次失败仍恰好一条；
+    //   A  失败信息不能丢——端点必须仍被上报回 Closed（动作按钮回到"监听"，不是卡在"停止"）；
+    //   C2 打开成功后再主动停止——这次关闭必须留行，且能读出"已关闭 · 用户停止"。
+    // 若把 endpointruntime.cpp 的合并判断改回"从不合并"，本用例会在 C1/C4 处变红。
+    void endpointFailureMergeIsSingleLineAcrossConsecutiveFailures()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+        window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        auto *model = window.findChild<TrafficModel *>();
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(model && b); // B 默认 TCP 服务器
+        auto *portBox = b->findChild<QSpinBox *>(QStringLiteral("server.port"));
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(portBox && action);
+
+        const auto countRows = [model](Traffic::Direction direction) {
+            int n = 0;
+            for (int i = 0; i < model->rowCount(); ++i)
+                if (model->record(i).direction == direction) ++n;
+            return n;
+        };
+
+        // C1 + C4：连点两次都命中"监听一个已被占用端口"的确定性同步失败。
+        QTcpServer blocker;
+        QVERIFY(blocker.listen(QHostAddress::LocalHost, 0));
+        portBox->setValue(blocker.serverPort());
+
+        action->click(); // 失败 #1
+        QTRY_COMPARE(countRows(Traffic::Direction::Error), 1);
+        // A：端点最终回到 Closed 这件事不能丢——动作按钮必须回到"监听"。
+        QTRY_COMPARE(action->text(), QStringLiteral("监听"));
+        // 一次失败只留一条日志：不得出现零信息的 State 行。
+        QCOMPARE(countRows(Traffic::Direction::State), 0);
+
+        action->click(); // C4：失败后再点连接（换代）→ 仍恰好一条 Error
+        QTRY_COMPARE(countRows(Traffic::Direction::Error), 2);
+        QTRY_COMPARE(action->text(), QStringLiteral("监听"));
+        // ★ 锚点若残留，第二次失败会多出一条 State 行，这里就会红。
+        QCOMPARE(countRows(Traffic::Direction::State), 0);
+        // 每条失败都读得出原因（错误行正文非空）。
+        for (int i = 0; i < model->rowCount(); ++i)
+            if (model->record(i).direction == Traffic::Direction::Error)
+                QVERIFY2(!model->record(i).statusText.isEmpty(),
+                    qPrintable(QStringLiteral("错误行丢失了原因：") + model->record(i).statusText));
+
+        // 收掉失败弹窗，别让它干扰后续路径。
+        for (auto *box : window.findChildren<QMessageBox *>())
+            box->close();
+        QTest::qWait(30);
+
+        // C2：换到空闲端口打开成功，再主动停止——这次关闭必须留行，且读出"用户停止"。
+        blocker.close();
+        QTcpServer probe;
+        QVERIFY(probe.listen(QHostAddress::LocalHost, 0));
+        const quint16 freePort = probe.serverPort();
+        probe.close();
+        portBox->setValue(freePort);
+
+        action->click(); // 打开成功 → 留下一条"已打开" State 行，并消费掉可能残留的锚点
+        QTRY_COMPARE(action->text(), QStringLiteral("停止"));
+        // 用 QTRY 而不是"读到即断言"：按钮文案与状态行是**两条独立路径**（前者由
+        // handleEndpointState 更新，后者经模型通知视图重投影），先后没有保证。
+        // 全量跑（机器负载高）时状态行会晚一拍，此刻读到的还是上一行（实测偶发失败）。
+        QTRY_VERIFY2(countRows(Traffic::Direction::State) >= 1,
+            qPrintable(QStringLiteral("打开成功应留下状态行，实际 ")
+                + QString::number(countRows(Traffic::Direction::State))));
+
+        action->click(); // 用户主动停止
+        QTRY_COMPARE(action->text(), QStringLiteral("监听"));
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        QVERIFY(text);
+        // 同上：等**关闭行真的落到视图里**再断言，不去赌按钮与状态行同拍。
+        QTRY_VERIFY2(text->document()->lastBlock().text().contains(QStringLiteral("已关闭 · 用户停止")),
+            qPrintable(QStringLiteral("关闭行应读出用户停止：")
+                + text->document()->lastBlock().text()));
+    }
+
+    // C3（QA 补充）：打开成功 → 运行中**对端断开** = errorOccurred + stateChanged(Closed)
+    // 成对路径，必须合并成一条，且留下的那条读得出是什么错。走 TCP 客户端真实路径：
+    // 连上本地监听、再让对端 abort，客户端应只多出一条 Error 行（含"断开"），且不多出 State 行。
+    // 若把合并判断改回"从不合并"，State 行会多出 1 条 → 变红。
+    void endpointRuntimeDisconnectAlsoCollapsesToOneLogLine()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+        window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        auto *model = window.findChild<TrafficModel *>();
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(model && b);
+        auto *type = b->findChild<QComboBox *>(QStringLiteral("portType"));
+        QVERIFY(type);
+        type->setCurrentIndex(PortDraft::TcpClient); // 0 串口 / 1 TCP 客户端 / 2 TCP 服务器 / 3 UDP
+        QTest::qWait(20);
+
+        const auto countRows = [model](Traffic::Direction direction) {
+            int n = 0;
+            for (int i = 0; i < model->rowCount(); ++i)
+                if (model->record(i).direction == direction) ++n;
+            return n;
+        };
+
+        QTcpServer listener;
+        QVERIFY(listener.listen(QHostAddress::LocalHost, 0));
+        auto *host = b->findChild<QComboBox *>(QStringLiteral("client.host"));
+        auto *port = b->findChild<QSpinBox *>(QStringLiteral("client.port"));
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(host && port && action);
+        host->setCurrentText(QStringLiteral("127.0.0.1"));
+        port->setValue(listener.serverPort());
+
+        action->click(); // 连接
+        QTRY_COMPARE(action->text(), QStringLiteral("断开")); // TCP 客户端打开态文案
+        QTRY_VERIFY2(listener.hasPendingConnections(), "客户端应已连上本地监听");
+        auto *peer = listener.nextPendingConnection();
+        QVERIFY(peer);
+
+        const int errorsBefore = countRows(Traffic::Direction::Error);
+        const int statesBefore = countRows(Traffic::Direction::State);
+
+        peer->abort(); // 模拟对端异常掉线（运行中出错关闭）
+
+        QTRY_COMPARE(countRows(Traffic::Direction::Error), errorsBefore + 1);
+        // ★ 成对的 Closed 被并进那条 Error：不得再多出一条 State 行。
+        QCOMPARE(countRows(Traffic::Direction::State), statesBefore);
+        // 留下的一条读得出是什么错。
+        QString lastError;
+        for (int i = 0; i < model->rowCount(); ++i)
+            if (model->record(i).direction == Traffic::Direction::Error)
+                lastError = model->record(i).statusText;
+        QVERIFY2(lastError.contains(QStringLiteral("断开")),
+            qPrintable(QStringLiteral("错误行应读出断开原因：") + lastError));
+        // 端点回到 Closed：动作按钮可再次"连接"。
+        QTRY_COMPARE(action->text(), QStringLiteral("连接"));
+        for (auto *box : window.findChildren<QMessageBox *>())
+            box->close();
+    }
+
+    void expandingCommandPanelKeepsFilterRowIntact()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        auto *bar = window.findChild<QWidget *>(QStringLiteral("filterBar"));
+        auto *toggleExpand = window.findChild<QPushButton *>("commandPanelToggle");
+        auto *commandPanel = window.findChild<CommandPanel *>();
+        QVERIFY(bar && toggleExpand && commandPanel);
+
+        // 每条按钮记录"它自己声明的最小宽度"，展开后不许跌破。
+        // 图标按钮（重置）没有文字，尺寸由 iconSize + QSS 内边距决定。
+        QList<QPushButton *> barButtons = bar->findChildren<QPushButton *>();
+        QVERIFY(!barButtons.isEmpty());
+        QHash<QPushButton *, int> minimums;
+        for (auto *button : barButtons) minimums.insert(button, button->minimumSizeHint().width());
+
+        // 指令面板已默认展开；先收起再展开，走一遍完整的状态切换。
+        toggleExpand->setChecked(false);
+        QTest::qWait(30);
+        QVERIFY2(!bar->findChild<QPushButton *>("filterRebuild")->isVisibleTo(&window) == false,
+            "过滤条本身不随指令面板收起");
+        toggleExpand->setChecked(true);
+        QTest::qWait(30);
+        QVERIFY2(commandPanel->isVisibleTo(&window), "指令面板应展开");
+
+        // 展开后：过滤条按钮不能被压到最小宽度以下。
+        for (auto *button : barButtons) {
+            QVERIFY2(button->width() >= minimums.value(button),
+                qPrintable(QStringLiteral("过滤条按钮被挤压：%1 宽 %2 < 最小 %3")
+                               .arg(button->objectName())
+                               .arg(button->width())
+                               .arg(minimums.value(button))));
+        }
+        // 第二行仍必须一行排得下（不重叠、不越右缘）——展开不该破坏这条铁律。
+        const auto problem = overlapInRow(bar);
+        QVERIFY2(problem.isEmpty(), qPrintable(problem));
     }
 
     void bridgeUsesOneFixedPair()
@@ -2426,13 +3463,14 @@ private slots:
         QVERIFY2(baseline.endsWith(QStringLiteral("data")), // 不再是 HEX 的 …64 61 74 61
             qPrintable(QStringLiteral("切格式后基线行应已变 UTF-8：") + baseline));
         // 关闭错误日志：错误事件进模型不进显示，数据行纹丝不动。
-        window.findChild<QPushButton *>(QStringLiteral("filterError"))->setChecked(false);
+        // 事件开关住在显示设置菜单里（QAction），不在顶栏。
+        window.findChild<QAction *>(QStringLiteral("showErrors"))->setChecked(false);
         panel->appendMessages({makeMessage(2, Traffic::Direction::Error, "boom")});
         QTRY_COMPARE(model->rowCount(), 2);
         QCOMPARE(text->lineCount(), 1);
         QCOMPARE(text->document()->lastBlock().text(), baseline);
         // 重新开启：后续错误事件恢复显示。
-        window.findChild<QPushButton *>(QStringLiteral("filterError"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("showErrors"))->setChecked(true);
         panel->appendMessages({makeMessage(3, Traffic::Direction::Error, "boom2")});
         QTRY_COMPARE(text->lineCount(), 2);
         QVERIFY2(text->document()->lastBlock().text().endsWith(QStringLiteral("boom2")),
@@ -2442,6 +3480,325 @@ private slots:
 
     // 外观重投影不得改变"哪些行在屏幕上"（设计稿 §5 决策表）：改显示设置 / 编码格式只换
     // 每行长什么样，未点「应用过滤」的关键词绝不能被顺手套到历史行上——否则屏幕会莫名变少、
+    // 过滤输入框支持回车应用（用户钦定）：焦点在关键词/排除框里按 Enter，等同于点
+    // 「应用过滤」。两条入口必须指向同一个出口——按钮禁用时回车同样无效、
+    // 待应用记号与"重复重放"的判断都只在一处维护，否则两条路会各自漂移。
+    void filterInputAppliesOnReturn()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *panel = window.findChild<TrafficPanel *>();
+        panel->setPreferences(nullptr);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *keywords = window.findChild<QLineEdit *>(QStringLiteral("filterKeywords"));
+        auto *excludes = window.findChild<QLineEdit *>(QStringLiteral("filterExcludes"));
+        auto *apply = window.findChild<QPushButton *>(QStringLiteral("filterRebuild"));
+        QVERIFY(text && model && keywords && excludes && apply);
+        // 提示文案（用户要求"给出回车生效的提示"）：placeholder 与 tooltip 都要提到回车。
+        // 两者覆盖不同时机——placeholder 在空框时可见（输入后消失），tooltip 在悬停时可见；
+        // 用断言锁住，免得以后调文案时把这条提示弄丢。
+        for (auto *input : {keywords, excludes}) {
+            QVERIFY2(input->placeholderText().contains(QStringLiteral("回车")),
+                qPrintable(QStringLiteral("placeholder 应提示回车：") + input->placeholderText()));
+            QVERIFY2(input->toolTip().contains(QStringLiteral("回车")),
+                qPrintable(QStringLiteral("tooltip 应提示回车：") + input->toolTip()));
+        }
+        // 注意断言对象是**视图行数**不是模型行数：过滤是"投影"，模型始终保留全部记录，
+        // 过滤只决定哪些行进视图（见 r5 契约）。拿 model->rowCount() 去断言会永远看到 6。
+        const auto visibleRows = [text] { return text->lineCount(); };
+
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        const auto makeMessage = [endpointId](quint64 id, const char *hex) {
+            Traffic::Message message;
+            message.id = id;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = Traffic::Direction::Receive;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray::fromHex(hex);
+            message.rawLength = message.raw.size();
+            return message;
+        };
+        QList<Traffic::Message> batch;
+        for (quint64 i = 0; i < 3; ++i) {
+            batch.append(makeMessage(i * 2 + 1, "AABB"));
+            batch.append(makeMessage(i * 2 + 2, "CCDD"));
+        }
+        panel->appendMessages(batch);
+        QTRY_COMPARE(visibleRows(), 6);
+
+        // 打上关键词但**不按回车**：视图不动（"条件不自动回溯"的既有契约仍然成立）。
+        keywords->setText(QStringLiteral("aa bb"));
+        QCOMPARE(visibleRows(), 6);
+
+        // ★ 回车 = 应用：只有命中的 3 条留下。
+        QTest::keyClick(keywords, Qt::Key_Return);
+        QTRY_COMPARE(visibleRows(), 3);
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤")); // 应用后待应用记号消失
+
+        // ★ 排除框同样支持回车，且排除优先于关键词：两个条件都命中同一批 → 全部隐藏
+        //（全隐藏时视图仍是保底的一个空块，所以是 1 而不是 0）。
+        excludes->setText(QStringLiteral("aa bb"));
+        QCOMPARE(visibleRows(), 3); // 未回车前不动
+        QTest::keyClick(excludes, Qt::Key_Return);
+        QTRY_COMPARE(visibleRows(), 1);
+
+        // 按钮禁用时（清空后无记录）回车也必须无效——两条入口行为一致，不能一条绕开。
+        keywords->clear();
+        excludes->clear();
+        window.findChild<QPushButton *>(QStringLiteral("clearTraffic"))->click();
+        QTRY_COMPARE(model->rowCount(), 0);
+        QTRY_VERIFY(!apply->isEnabled());
+        keywords->setText(QStringLiteral("aa"));
+        QTest::keyClick(keywords, Qt::Key_Return);
+        QTest::qWait(30); // 给可能被误触发的重放留出窗口
+        QCOMPARE(visibleRows(), 1); // 仍是保底空块，没有被"凭空"重放出内容
+    }
+
+    // 窗口几何与「扩展」按钮状态都要记忆（用户钦定）：退出时落盘，下次启动恢复。
+    // 两者必须**自洽**——上次是"面板收起 + 窄窗口"，重开就不能是"面板收起 + 宽窗口"。
+    void windowGeometryAndPanelStateAreRemembered()
+    {
+        int savedWidth = 0;
+        int savedHeight = 0;
+        {
+            MainWindow window;
+            window.setAttribute(Qt::WA_DontShowOnScreen);
+            window.resize(1320, 800);
+            window.show();
+            QTest::qWait(30);
+            auto *toggle = window.findChild<QPushButton *>(QStringLiteral("commandPanelToggle"));
+            QVERIFY(toggle);
+            toggle->setChecked(false); // 收起指令面板（会顺带把窗口就地收窄）
+            QTest::qWait(50);
+            savedWidth = window.width();
+            savedHeight = window.height();
+            QVERIFY(savedWidth > 0 && savedHeight > 0);
+            window.close(); // 触发 closeEvent → 几何落盘
+            QTest::qWait(30);
+        }
+
+        // 新建窗口：应当恢复上次的几何，并保持"收起"这个状态。
+        MainWindow again;
+        again.setAttribute(Qt::WA_DontShowOnScreen);
+        again.show();
+        QTest::qWait(50);
+        auto *toggle = again.findChild<QPushButton *>(QStringLiteral("commandPanelToggle"));
+        auto *panel = again.findChild<CommandPanel *>();
+        QVERIFY(toggle && panel);
+        QVERIFY2(!panel->isExpanded(),
+            qPrintable(QStringLiteral("上次是收起状态，重开应仍是收起；实际 expanded=")
+                + QString::number(panel->isExpanded())));
+        QVERIFY(!toggle->isChecked());
+        // 窗口最小尺寸是构造时的 900×720，默认尺寸是 1440×920；恢复后必须贴近"上次"，
+        // 而不是退回默认——这是本用例要守的东西。
+        //
+        // 容差不一致是**故意的**：宽度逐像素（实测只差 2px），高度给 ±32。
+        // 原因是离屏窗口（WA_DontShowOnScreen）没有真实标题栏：saveGeometry 保存时框架高度
+        // 算作 0，restoreGeometry 恢复时却按"有标题栏"折算，于是客户区差出约 26px
+        //（实测 800 → 774，正是标题栏那一段）。这是测试环境的固有换算差异，不是功能缺陷
+        // ——同一份几何用 saveGeometry 再存一遍，只有 1px 出入（1222/798 vs 1223/799）。
+        // 默认值 920 与 774 差 146，这个容差不会把"根本没恢复"放过去。
+        QVERIFY2(qAbs(again.width() - savedWidth) <= 4,
+            qPrintable(QStringLiteral("窗口宽度应恢复到上次：实际 %1，上次 %2")
+                           .arg(again.width()).arg(savedWidth)));
+        QVERIFY2(qAbs(again.height() - savedHeight) <= 32,
+            qPrintable(QStringLiteral("窗口高度应恢复到上次：实际 %1，上次 %2")
+                           .arg(again.height()).arg(savedHeight)));
+    }
+
+    // 三条用户反馈的契约：
+    //   ① 定时发送的间隔框**始终可输入**（不必先勾选），且**只收数字**；
+    //   ② 「清除过滤」按钮**带文案**（不再是个只有图标的按钮）；
+    //   ③ 「清除过滤」只**停用过滤**、不丢用户敲的条件 —— 输入框内容保留并被持久化，
+    //      下次启动还在（用户反馈"关键词过滤与排除是否可以记忆……又得重新输入，很麻烦"）。
+    void filterResetKeepsConditionsAndTimerAcceptsInput()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        // ---------- ① 定时间隔框 ----------
+        auto *repeat = window.findChild<QCheckBox *>(QStringLiteral("repeatSending"));
+        auto *interval = window.findChild<QSpinBox *>(QStringLiteral("repeatInterval"));
+        QVERIFY(repeat && interval);
+        QVERIFY2(!repeat->isChecked(), "默认不勾选定时发送");
+        QVERIFY2(interval->isEnabled(),
+            "未勾选定时发送时间隔框也必须可输入（用户钦定：方便先设好再勾）");
+        // 只收数字：它是 QSpinBox，非数字键会被自带校验器挡掉。
+        // （键盘事件直接发给 spinbox —— 它内部的 lineEdit 是 protected，测试拿不到。）
+        interval->clear();
+        QTest::keyClicks(interval, QStringLiteral("abc"));
+        for (const QChar &ch : interval->text()) {
+            QVERIFY2(ch.isDigit(),
+                qPrintable(QStringLiteral("间隔框只应含数字，实际是「%1」").arg(interval->text())));
+        }
+        interval->clear();
+        QTest::keyClicks(interval, QStringLiteral("250"));
+        QVERIFY2(interval->value() == 250,
+            qPrintable(QStringLiteral("数字应能输入进去：value=%1 text=%2")
+                           .arg(interval->value()).arg(interval->text())));
+        // 勾上之后**不**改成禁用（这正是用户抱怨的那一点）。
+        repeat->setChecked(true);
+        QVERIFY2(interval->isEnabled(), "勾选定时发送后间隔框不应被禁用");
+        repeat->setChecked(false);
+
+        // ---------- ② 清除按钮带文案 ----------
+        auto *reset = window.findChild<QPushButton *>(QStringLiteral("filterReset"));
+        QVERIFY(reset);
+        QVERIFY2(!reset->text().isEmpty(), "「清除过滤」按钮必须有文案（用户要求）");
+
+        // ---------- ③ 清除过滤只停用、不丢条件 ----------
+        auto *panel = window.findChild<TrafficPanel *>();
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *keywords = window.findChild<QLineEdit *>(QStringLiteral("filterKeywords"));
+        auto *excludes = window.findChild<QLineEdit *>(QStringLiteral("filterExcludes"));
+        auto *apply = window.findChild<QPushButton *>(QStringLiteral("filterRebuild"));
+        QVERIFY(panel && text && keywords && excludes && apply);
+        panel->setPreferences(nullptr); // 不碰共享 ini
+
+        const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
+                                     ->property("endpoint").toUuid();
+        const auto makeMessage = [endpointId](quint64 id, const char *hex) {
+            Traffic::Message message;
+            message.id = id;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = Traffic::Direction::Receive;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray::fromHex(hex);
+            message.rawLength = message.raw.size();
+            return message;
+        };
+        QList<Traffic::Message> batch;
+        for (quint64 i = 0; i < 3; ++i) {
+            batch.append(makeMessage(i * 2 + 1, "AABB"));
+            batch.append(makeMessage(i * 2 + 2, "CCDD"));
+        }
+        panel->appendMessages(batch);
+        QTRY_COMPARE(text->lineCount(), 6);
+
+        keywords->setText(QStringLiteral("aa bb"));
+        apply->click(); // 应用过滤 → 只剩命中的 3 条
+        QTRY_COMPARE(text->lineCount(), 3);
+
+        reset->click(); // 清除过滤
+        QTRY_COMPARE(text->lineCount(), 6); // 过滤停用、显示全部
+        // ★ 条件**原样保留**：用户不用重新敲。
+        QCOMPARE(keywords->text(), QStringLiteral("aa bb"));
+        // 而且没被丢掉——再点「应用过滤」立刻回到 3 条（若被清空，这里会是 6）。
+        apply->click();
+        QTRY_COMPARE(text->lineCount(), 3);
+    }
+
+    // 状态栏里所有文字必须**同一个字号**（用户反馈"底部状态栏文字大小似乎没有统一"）：
+    // 原来只有右侧提示行（StatusNote）写了 12px、其余标签（RX/TX/条数/桥接）继承默认字号，
+    // 并排看就是大小不一。这里直接量每个标签的 font().pixelSize()——QSS 用 px 写 font-size 时
+    // 它就等于那个值；若某个标签没有明确字号，会是与 12px 不同的值。
+    void statusBarTextSizeIsUniform()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        auto *bar = window.findChild<QStatusBar *>();
+        QVERIFY(bar);
+        const auto labels = bar->findChildren<QLabel *>();
+        QVERIFY2(labels.size() >= 4,
+            qPrintable(QStringLiteral("状态栏应有多个标签，实际 ") + QString::number(labels.size())));
+
+        int expected = -1;
+        for (auto *label : labels) {
+            const int px = label->font().pixelSize();
+            if (expected < 0) expected = px;
+            QVERIFY2(px == expected,
+                qPrintable(QStringLiteral("状态栏字号不一致：%1 是 %2px，其余是 %3px（应为同一条 QSS 规则）")
+                               .arg(label->objectName()).arg(px).arg(expected)));
+        }
+        // 字族也要一致：RX/TX 原来硬写了 `font-family: "Segoe UI"`，换系统字体或切换语言时
+        // 会与旁边标签不一路，同样是"看着没统一"的来源。
+        const QString family = labels.first()->font().family();
+        for (auto *label : labels) {
+            QVERIFY2(label->font().family() == family,
+                qPrintable(QStringLiteral("状态栏字族不一致：%1 是 %2，其余是 %3")
+                               .arg(label->objectName(), label->font().family(), family)));
+        }
+    }
+
+    // HEX / 字节数据的显示字体必须统一（用户反馈"hex 数据显示的字体似乎没有统一"）：
+    // 全局 QSS 给的是比例字体（Microsoft YaHei UI），而监视区、发送区正文各自设了等宽；
+    // **发送区预览行漏设**，于是同一串字节在两处写法不同、宽窄也对不齐。
+    // 这里锁住"字节显示一律等宽"：同一面板内三处必须完全一致，跨面板必须同族。
+    void hexDisplayFontIsUniform()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        auto *editor = window.findChild<QPlainTextEdit *>(QStringLiteral("sendEditor"));
+        auto *preview = window.findChild<QLabel *>(QStringLiteral("payloadPreview"));
+        auto *trafficText = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        QVERIFY(editor && preview && trafficText);
+        // 字节数与预览**合成一个标签**之后，"ByteCount" 这个控件不该再存在
+        //（曾是两个控件，底边在分数 DPR 下会错开 1 物理像素）。
+        QVERIFY2(!window.findChild<QLabel *>(QStringLiteral("ByteCount")),
+            "字节数应与预览合并在同一个标签里，不该再有独立的 ByteCount 控件");
+
+        // 四个控件（发送区正文 / 字节数 / 预览、监视区）的字体必须**完全一致**：
+        // 字族、像素大小、字重三者都比。
+        // ★ 不能只比 family：全局 QSS 会把所有控件的 family 都设成同一个值，那样"同族"是
+        //   恒真的、什么也守不住。真正的差异（也是用户看到的）在**字重**——字节数曾是
+        //   DemiBold，与同一行的 HEX 挨着显示就像两种字体。
+        const QFont ref = editor->font();
+        for (auto *w : {static_cast<QWidget *>(editor), static_cast<QWidget *>(preview),
+                 static_cast<QWidget *>(trafficText)}) {
+            QVERIFY2(w->font().family() == ref.family(),
+                qPrintable(QStringLiteral("字体族不一致：%1 是 %2，基准是 %3")
+                               .arg(w->objectName(), w->font().family(), ref.family())));
+            QCOMPARE(w->font().pixelSize(), ref.pixelSize());
+            QVERIFY2(w->font().weight() == ref.weight(),
+                qPrintable(QStringLiteral("字重不一致：%1 是 %2，基准是 %3")
+                               .arg(w->objectName())
+                               .arg(int(w->font().weight()))
+                               .arg(int(ref.weight()))));
+        }
+        // 而且这些控件确实**用上了字体**：pixelSize 有效（不是 -1 那种"没设"的中间态）。
+        QVERIFY2(ref.pixelSize() > 0,
+            qPrintable(QStringLiteral("字节显示控件的字号应当有确定值，实际 pixelSize=%1")
+                           .arg(ref.pixelSize())));
+
+        // 字节数（标签文本里 span 内那一段）必须是**纯 ASCII、且不加空格**（形如 "25B"）：
+        //   · ASCII —— 汉字的字面框天生比数字高（实测「字节」段 16px、纯 HEX 段 12px），
+        //     与同一行的 HEX 永远对不齐；
+        //   · 无空格 —— "25" 只有两个字符，后面再跟空格会让 B 显得孤零零飘在外面。
+        const QString html = preview->text();
+        const int s0 = html.indexOf(QLatin1Char('>')) + 1;
+        const int s1 = html.indexOf(QStringLiteral("</span>"));
+        QVERIFY2(s0 > 0 && s1 > s0,
+            qPrintable(QStringLiteral("预览标签应含字节数 span：") + html));
+        const QString countText = html.mid(s0, s1 - s0);
+        QVERIFY2(!countText.isEmpty(), qPrintable(QStringLiteral("字节数不应为空：") + html));
+        for (const QChar &ch : countText) {
+            QVERIFY2(ch.unicode() < 128,
+                qPrintable(QStringLiteral("字节数应为纯 ASCII，实际是「%1」").arg(countText)));
+        }
+        QVERIFY2(!countText.contains(QLatin1Char(' ')),
+            qPrintable(QStringLiteral("字节数不应含空格（B 要紧贴数字）：「%1」").arg(countText)));
+    }
+
     // 待应用提示同时消失。这条用例把该契约钉死。
     void appearanceReprojectKeepsRowSetAndPendingHint()
     {

@@ -14,6 +14,7 @@
 
 class FilterBar;
 class FilterFlags;
+class ViewToggles;
 struct FilterFlagsState;
 class QAction;
 class QComboBox;
@@ -155,6 +156,10 @@ public:
     // 组合根注入的偏好存储；为空时全部显示选项不落盘（示例预览等场景）。
     void setPreferences(PreferencesStore *store);
     void setCommandPanelToggle(bool expanded);
+    // 头两行（顶栏 + 过滤条）"最少要多宽"没有独立的访问器：行里的控件各自声明下限
+    // （见 `ui/common/rowmetrics.h`），布局据此算出 minimumSizeHint，主窗口直接用它。
+    // 早先这里有个 filterRowWidthHint() 做逐项求和，已删除——那种手工账目漏掉一项
+    // （面板自己的内边距）就会少几个像素，症状是顶栏最右的按钮探出右缘。
 signals:
     // 会话累计条数与一次性提示（导出结果、日志写失败）都从这根信号出，
     // 由主窗口放进底部状态栏——面板内部不再为摘要保留一行 UI。
@@ -201,6 +206,9 @@ private:
     // 折叠按钮的文字：状态 + 生效条件数，收起时也能一眼看出"当前在过滤"。
     void refreshFilterToggle();
     int activeFlagCount() const;
+    // 过滤开关的完整汇总：方向两项来自顶栏 FilterFlags，事件三项来自显示设置菜单的
+    // QAction。两项分住两处是"顶栏腾位置"的结果，汇总只此一处——其余代码一律读它，
+    // 不再各自记"哪项在哪"。
     FilterFlagsState filterFlagsState() const;
     void updatePortVisibility();
     void updateSummary();
@@ -241,10 +249,12 @@ private:
     TrafficTextView *m_text = nullptr; // 唯一显示视图：JCom 式文本框逐行追加
     QLabel *m_empty = nullptr;
     QComboBox *m_format;
-    // 过滤入口：顶栏的折叠按钮（原搜索框的位置）+ 紧挨着它的方向/事件开关。
-    // 开关常驻顶栏（不进可折叠的第二行）：调频次高于关键词，收起条件条时也要能点。
+    // 过滤入口：顶栏的折叠按钮（原搜索框的位置）+ 紧挨着它的方向开关与显示开关。
+    // 三类开关常驻顶栏（不进可折叠的第二行）：它们的调频次都高于关键词，收起条件条
+    // 时也要能点。分工不同——方向管"哪些行进来"，显示开关管"每行长什么样"。
     QPushButton *m_filterToggle;
     FilterFlags *m_flags;
+    ViewToggles *m_viewToggles = nullptr; // 纯数据模式 / 同时显示 HEX / 自动换行
     FilterBar *m_filterBar;
     // 过滤标志开关
     QAction *m_stateAction;
@@ -259,7 +269,8 @@ private:
     QPushButton *m_portAButton;
     QPushButton *m_portBButton;
     // 行内容开关：全部在到达时生效（控制台语义），纯数据模式下被忽略。
-    // 方向与事件开关不在其中——它们管的是"哪些行进来"，已迁到顶栏（见 §7.4）。
+    // 方向与事件开关不在其中——它们管的是"哪些行进来"，不随行内容一起变：
+    // 方向常驻顶栏、事件在显示设置菜单（见 filterFlagsState）。
     QAction *m_numberAction;    // 行号（会话内绝对计数）
     QAction *m_timestampAction;
     QAction *m_directionAction;

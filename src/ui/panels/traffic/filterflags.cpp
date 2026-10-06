@@ -1,4 +1,5 @@
 #include "filterflags.h"
+#include "ui/common/rowmetrics.h"
 #include "ui/common/tintedicon.h"
 
 #include <QHBoxLayout>
@@ -22,14 +23,11 @@ FilterFlags::FilterFlags(QWidget *parent) : QWidget(parent)
         tr("RX"), tr("显示接收 RX"));
     m_tx = makeFlag(QStringLiteral("filterTx"), QStringLiteral(":/icons/arrow-up-bold.svg"),
         tr("TX"), tr("显示发送 TX"));
-    m_state = makeFlag(QStringLiteral("filterState"), QStringLiteral(":/icons/information-outline.svg"),
-        tr("状态"), tr("显示状态迁移（端口打开 / 关闭 / 重连）"));
-    m_warning = makeFlag(QStringLiteral("filterWarning"), QStringLiteral(":/icons/alert-outline.svg"),
-        tr("警告"), tr("显示警告日志"));
-    m_error = makeFlag(QStringLiteral("filterError"), QStringLiteral(":/icons/alert-circle-outline.svg"),
-        tr("错误"), tr("显示错误日志"));
 
-    for (auto *button : {m_rx, m_tx, m_state, m_warning, m_error}) row->addWidget(button);
+    for (auto *button : {m_rx, m_tx}) row->addWidget(button);
+    // 两个方向开关都按自己的 sizeHint 占位：顶栏那一行的下限因此不需要外部求和
+    // （见 rowmetrics.h）。
+    pinRowToContents(row);
 }
 
 QPushButton *FilterFlags::makeFlag(const QString &objectName, const QString &iconPath,
@@ -49,32 +47,18 @@ QPushButton *FilterFlags::makeFlag(const QString &objectName, const QString &ico
     return button;
 }
 
-FilterFlagsState FilterFlags::state() const
+DirectionFlags FilterFlags::directions() const
 {
-    FilterFlagsState state;
+    DirectionFlags state;
     state.rx = m_rx->isChecked();
     state.tx = m_tx->isChecked();
-    state.states = m_state->isChecked();
-    state.warnings = m_warning->isChecked();
-    state.errors = m_error->isChecked();
     return state;
 }
 
-int FilterFlags::activeCount() const
-{
-    // 默认全开：关掉任何一个都算"在过滤"。
-    const auto current = state();
-    return (current.rx ? 0 : 1) + (current.tx ? 0 : 1) + (current.states ? 0 : 1)
-        + (current.warnings ? 0 : 1) + (current.errors ? 0 : 1);
-}
-
-void FilterFlags::restore(const FilterFlagsState &state)
+void FilterFlags::restore(const DirectionFlags &state)
 {
     m_restoring = true;
     m_rx->setChecked(state.rx);
     m_tx->setChecked(state.tx);
-    m_state->setChecked(state.states);
-    m_warning->setChecked(state.warnings);
-    m_error->setChecked(state.errors);
     m_restoring = false;
 }

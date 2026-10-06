@@ -62,8 +62,10 @@ private:
     QComboBox *m_framingMode = nullptr;
     QLineEdit *m_framingDelimiter = nullptr;
     QLabel *m_framingIdleLabel = nullptr;
+    QLabel *m_framingIdleUnit = nullptr; // "ms" 单位标签：单位在框外，输入框只放数字
     QSpinBox *m_framingIdle = nullptr;
     QLabel *m_framingThresholdLabel = nullptr;
+    QLabel *m_framingThresholdUnit = nullptr; // "字节" 单位标签：同上，跟随兜底设置一起置灰
     QSpinBox *m_framingThreshold = nullptr;
     QCheckBox *m_framingKeepBoundary = nullptr;
     QCheckBox *m_framingLogHints = nullptr;
@@ -82,6 +84,8 @@ private:
     QPushButton *m_action;
     bool m_open = false;
     QString m_validationError;
+    // 上次校验的错误字段：自动展开只响应"新出现"的错误，程序化载入的遗留错误不展开。
+    QSet<QWidget *> m_lastInvalid;
     QMap<QString, QWidget *> m_fields;
     QComboBox *m_serialPorts;
     QList<SerialPortDescriptor> m_availablePorts;

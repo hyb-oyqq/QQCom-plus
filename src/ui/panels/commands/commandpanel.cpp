@@ -75,6 +75,21 @@ void CommandPanel::setupUi()
     topBar->addWidget(m_importButton);
     topBar->addWidget(m_exportButton);
 
+    // 顶栏这一行必须整体放得下（用户反馈：窗口不够宽时右侧面板的"分组"下拉被压没了、
+    // 按钮也只剩半个）。QHBoxLayout 不会换行，宽度不够时它只能压缩子控件——所以给顶栏
+    // 容器一个"内容铺开所需宽度"的最小宽度，把压力顶回给上层（外侧分栏/窗口）。
+    // 不写死像素：逐个控件取 sizeHint + 实际间距算出来，字体/DPI/翻译变化自动跟随。
+    {
+        int wanted = topBar->spacing() * (topBar->count() - 1);
+        for (int i = 0; i < topBar->count(); ++i) {
+            if (auto *item = topBar->itemAt(i)) {
+                if (item->spacerItem()) continue; // 弹性空档不占最小宽度
+                if (auto *widget = item->widget()) wanted += widget->sizeHint().width();
+            }
+        }
+        m_topBarWidget->setMinimumWidth(wanted);
+        m_topBarMinimumWidth = wanted;
+    }
     m_mainLayout->addWidget(m_topBarWidget);
 
     // 指令表格：只有一份列表，周期发送与协议解析页已移除
@@ -113,7 +128,19 @@ void CommandPanel::applyExpandedState()
     if (m_commandTable) m_commandTable->setVisible(m_expanded);
 
     if (m_expanded) {
-        setMinimumWidth(520);
+        // 展开时的最小宽度 = max(表格内容所需宽度, 顶栏铺开所需宽度) + 左右内边距。
+        // 之前写死 520：窗口窄的时候分栏仍会把面板压到 520 以下，顶栏的"分组"下拉与
+        // 表格末尾的「≡」手柄列就被压没了（用户反馈）。改成从内容算出来的宽度，
+        // 并把内边距加回去，才顶得住挤压。
+        if (m_commandTable) {
+            m_commandTable->refreshColumnWidths();
+            m_commandTableMinimumWidth = m_commandTable->minimumContentWidth();
+        }
+        const int side = m_mainLayout->contentsMargins().left()
+            + m_mainLayout->contentsMargins().right();
+        const int wanted = qMax(m_commandTableMinimumWidth, m_topBarMinimumWidth) + side;
+        m_expandedMinimumWidth = qMax(wanted, 520); // 520 只当下限兜底，不再是唯一真源
+        setMinimumWidth(m_expandedMinimumWidth);
         setMaximumWidth(QWIDGETSIZE_MAX);
     } else {
         setMinimumWidth(0);
@@ -296,28 +323,39 @@ void CommandPanel::onCommandsChanged()
     savePreferences();
 }
 
-void CommandPanel::onSendCommand(const CommandItem &cmd, int targetEndpoint)
+void CommandPanel::onSendCommand(const CommandItem &cmd)
 {
-    // 结尾符在这里附加，MainWindow 的发送接口只认 content + isHex。
-    // targetEndpoint 作为兼容参数继续透传，但 MainWindow 一律以发送区选中的目标为准
-    // （用户钦定：快捷面板单击发送要发到发送区选中的端口），此处的取值不再影响去向。
-    const QString payload = cmd.contentWithTail();
-    QTimer::singleShot(cmd.delayMs, this, [this, payload, isHex = cmd.isHex, targetEndpoint] {
-        emit sendCommand(payload, isHex, targetEndpoint);
-    });
+    // 只负责"按用户填的延时等一拍再发"，怎么发、发去哪由组合根决定：
+    // 编码与结尾符在 MainWindow::handleCommandSend 里按统一规则处理，目标取发送区
+    // 当前选择。命令面板不碰字节、不碰目标——它是"内容与时机"的来源，仅此而已。
+    QTimer::singleShot(cmd.delayMs, this, [this, cmd] { emit sendCommand(cmd); });
 }
 
-void CommandPanel::onBatchSendRequested(const QList<CommandItem> &commands, int targetEndpoint)
+void CommandPanel::onBatchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands)
 {
-    // 批量发送，累加延时；目标同样以发送区选中的端点为准。
+    // 批量发送，累加延时（第 n 条在第 n 条之前所有延时之和后发出）。
+    //
+    // **进度与发送在同一拍里推进**：定时器回调里先点亮该行的游标，再发出去。
+    // 这是唯一的时序来源——若让表格另起一套定时器去"猜"进度，两套时钟迟早错开，
+    // 而高亮跟实际发送不同步比没有高亮更让人困惑。
+    constexpr int RunTailHoldMs = 700; // 最后一拍发完后再留一会儿，让收尾可见
+
+    m_commandTable->beginSendRun();
+
     int totalDelay = 0;
-    for (const auto &cmd : commands) {
-        totalDelay += cmd.delayMs;
-        const QString payload = cmd.contentWithTail();
-        QTimer::singleShot(totalDelay, this, [this, payload, isHex = cmd.isHex, targetEndpoint] {
-            emit sendCommand(payload, isHex, targetEndpoint);
+    for (int i = 0; i < commands.size(); ++i) {
+        totalDelay += commands.at(i).delayMs;
+        const int row = rows.value(i, -1);
+        QTimer::singleShot(totalDelay, this, [this, command = commands.at(i), row] {
+            m_commandTable->setSendCursor(row);
+            emit sendCommand(command);
         });
     }
+
+    // 一轮结束：收掉游标，但**保留已发送的绿色勾**——用户要能一眼看出这一轮覆盖了
+    // 哪几条（这正是"表示目前发送到哪条指令了"的另一半）。
+    QTimer::singleShot(totalDelay + RunTailHoldMs, this,
+        [this] { m_commandTable->endSendRun(); });
 }
 
 void CommandPanel::refreshSetComboBox()
@@ -381,8 +419,13 @@ void CommandPanel::saveCurrentSet()
     set.name = oldSet.name;
     set.notes = oldSet.notes;
 
-    // 静默回写：不压撤销快照、不广播 setsChanged。广播会触发下拉框/表格重建，
-    // 重建又产生 currentIndexChanged → saveCurrentSet，是之前栈溢出的直接来源。
+    // 静默回写：只改内存、不压撤销快照、不广播 setsChanged。
+    //
+    // 这条路径每一次行内编辑都会走到（勾选 / 改延时 / 选结尾符 / 改内容），所以
+    // "静默"是硬要求而不是优化：一旦广播，命令面板会重建下拉框 → 表格 setCommandSet
+    // → refreshTable 销毁行内控件，而其中就有**正在派发这次信号的那个控件**——
+    // 用户报告的"拖拽崩""选结尾符崩"正是这条链的 use-after-free。
+    // 表格是模型的镜像，值由这里的 set 主动推过去，模型不反向通知。
     CommandManager::instance()->syncSet(m_currentSetId, set);
 }
 

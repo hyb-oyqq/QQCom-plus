@@ -80,6 +80,10 @@ CMakeLists.txt.user*
 .rcc/
 .uic/
 /build*/
+# 早期 qmake 曾在源码树里散落构建产物（release/、debug/）：里面是 moc_predefs.h、
+# 生成的 qrc 等中间文件，跟踪它们会污染源码扫描（例如图标引用检查会读到旧引用）。
+/release*/
+/debug*/
 
 # Local IDE state and runtime output
 /.qtcreator/

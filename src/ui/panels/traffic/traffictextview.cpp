@@ -2,7 +2,6 @@
 
 #include <QChar>
 #include <QColor>
-#include <QFontDatabase>
 #include <QScrollBar>
 #include <QTextBlock>
 #include <QTextCursor>
@@ -150,9 +149,8 @@ TrafficTextView::TrafficTextView(QWidget *parent) : QPlainTextEdit(parent)
     // 长报文水平滚动查看；自动换行是显示设置里的显式开关。
     setLineWrapMode(QPlainTextEdit::NoWrap);
     // 整行等宽，行号、时间、载荷才能上下对齐，看起来才是命令行而不是比例字体的表格。
-    QFont console = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    console.setPointSize(10);
-    setFont(console);
+    // 字体**不在代码里设**：全局 QSS 的 font-family 会覆盖 setFont()（实测），
+    // 统一由 QSS 保证——与发送区正文/预览同一套，见用例 hexDisplayFontIsUniform。
 }
 
 void TrafficTextView::setLineWrapping(bool enabled)

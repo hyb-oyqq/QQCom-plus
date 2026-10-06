@@ -10,6 +10,7 @@ class QLabel;
 class QPlainTextEdit;
 class PreferencesStore;
 class QPushButton;
+class QResizeEvent;
 class QSpinBox;
 class QTimer;
 
@@ -28,6 +29,19 @@ public:
     // 组合根注入的偏好存储：编码格式与行尾在会话间保持用户上次的选择。
     void setPreferences(PreferencesStore *store);
 
+    // 发送目标的**唯一来源**：位 1 = A，位 2 = B（都选中 = 3）。
+    // 旁路发送（指令面板的单点 / 批量发送）必须取它，不得自己另定一套目标规则——
+    // 否则会出现"同一条指令，手点「发送」能到 B，快捷按钮却发去了 A"。
+    int targetMask() const;
+    // 旁路发送入口：把一段**已经准备好的原始字节**按发送区当前选中的目标发出去。
+    // 存在意义是让指令面板与手点「发送」共用同一条路（同一个 sendRequested 信号、
+    // 同一套目标规则、同一个发送来源标记），而不是自己也去调一次 runtime——
+    // 早先指令面板直接 invokeMethod(runtime, "write")，而 EndpointRuntime **没有
+    // write 这个槽**，于是"快捷面板点了没反应"，且没有任何报错。
+    // 不做"按钮可用"这道 UI 闸：目标端口没开时应当产生一条可见的失败记录，
+    // 而不是静默什么都不做（反馈比沉默重要）。
+    void deliverPayload(const QByteArray &payload);
+
 signals:
     // payload 已按当前格式/末尾解析为原始字节；targetMask 位 1/2 表示 A/B。
     // 定时发送的每一拍也走同一个信号，路径与手动发送完全一致。
@@ -38,10 +52,15 @@ private:
     void updatePreview();
     void updateTargets();
     void updateSendAvailability();
+    // 目标 A/B/AB 与「发送」四个按钮取同一个宽度（跟随其中 sizeHint 最宽者）。
+    // 不写死像素：字体/DPI/翻译变化时重算即可自动跟随（见 buttonmetrics.h）。
+    void unifyActionWidths();
     void issueSend(bool scheduled = false);
-    int targetMask() const;
     void loadPreferences();
     void savePreferences();
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
 
     QList<PortDraft> m_ports;
     QPushButton *m_targetA;
@@ -52,7 +71,6 @@ private:
     QPlainTextEdit *m_editor;
     QLabel *m_preview;
     bool m_previewError = false;
-    QLabel *m_length;
     QPushButton *m_sendButton;
     QLabel *m_connectionHint;
     QCheckBox *m_repeat;

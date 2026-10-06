@@ -81,7 +81,9 @@ int main(int argc, char *argv[])
     a.setOrganizationName("easyDebug");
     a.setApplicationVersion(QStringLiteral(EASYDEBUG_VERSION_STR));
     a.setStyle("Fusion");
-    a.setWindowIcon(QIcon(":/icons/app-logo.svg"));
+    // 程序主图标（用户钦定 ActionResponse.ico）：exe 内嵌资源（RC_ICONS）管资源管理器，
+    // 这行管运行中的窗口与任务栏——两处必须指向同一个图标，否则对不上。
+    a.setWindowIcon(QIcon(":/icons/app.ico"));
     QFile stylesheet(":/styles/workbench.qss");
     if (stylesheet.open(QIODevice::ReadOnly))
         a.setStyleSheet(QString::fromUtf8(stylesheet.readAll()));
@@ -100,6 +102,7 @@ int main(int argc, char *argv[])
         "Open endpoint A from the command line (test-only). Syntax: "
         "tcp-server:<port> | udp:<port> | tcp-client:<host>:<port> | serial:<name>.", "endpoint"});
     parser.process(a);
+    // 程序主图标：exe 内嵌资源（RC_ICONS）管资源管理器，这里管运行中的窗口与任务栏。
 
     QTranslator translator;
     const QStringList uiLanguages = QLocale::system().uiLanguages();

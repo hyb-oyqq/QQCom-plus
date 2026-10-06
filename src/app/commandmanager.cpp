@@ -193,6 +193,22 @@ void CommandManager::redo()
 
 void CommandManager::syncSet(const QUuid &id, const CommandSet &set)
 {
-    // 静默更新，不触发撤销栈
-    updateSet(id, set, false);
+    // 静默更新：只改内存里的那一份，不压快照、**不广播 setsChanged**。
+    //
+    // 这里必须彻底静默，不能转手调用 updateSet()——后者无条件 emit setsChanged()，
+    // 而调用方 CommandPanel::saveCurrentSet() 位于"表格编辑 → 落库"这条**最高频**的
+    // 路径上（勾选、改延时、选结尾符、改内容都会走到）。广播的实际后果是：
+    //   setsChanged → CommandPanel::refreshSetComboBox() → CommandTableWidget::setCommandSet()
+    //   → refreshTable() → 销毁整表行内控件，
+    // 而此刻正在派发信号的，恰恰就是其中一个控件（例如用户刚点选的结尾符下拉框）。
+    // 两个用户可复现的崩溃——"拖动崩"与"选择换行符崩"——都出在这条链的末尾
+    // （use-after-free），"快捷指令列表越用越卡"也出在这里（每次编辑都全表重建）。
+    // 表格是模型的镜像：编辑后的值由 saveCurrentSet 主动推给模型，模型不需要
+    // 再反过来通知一次"你改了"。
+    for (auto &existing : m_sets) {
+        if (existing.id == id) {
+            existing = set;
+            return;
+        }
+    }
 }
