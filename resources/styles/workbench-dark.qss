@@ -1,4 +1,4 @@
-/* easyDebug 暗色主题样式表 */
+/* QQCom 暗色主题样式表 */
 /* 与浅色版本保持相同的结构，只调整颜色值以适配暗色环境 */
 
 QWidget {
@@ -7,7 +7,7 @@ QWidget {
     color: #e8ecf1;
 }
 QMainWindow, QWidget#centralwidget { background: #1a1f2e; }
-QLabel#Muted, QLabel#StatusNote { color: #8b95a8; font-size: 12px; }
+QLabel#Muted, QLabel#udpPeerHint, QLabel#StatusNote { color: #8b95a8; font-size: 12px; }
 /* 字节数的颜色**不在这里**：它与预览文本合并在同一个 QLabel 里、用富文本 span 着色
    （见 sendpanel.cpp 的 ByteCountColor）。QSS 不作用于 span，所以那个值必须写在代码里。 */
 QLabel#EmptyState { background: #1e2433; color: #7a8599; border: 1px dashed #3d4758; border-radius: 5px; }
@@ -57,6 +57,8 @@ QToolButton#advancedToggle:hover { color: #5b9eff; background: transparent; }
 QToolButton#advancedToggle:checked { color: #5b9eff; background: transparent; }
 QWidget#advancedPanel { background: #1e2433; border-top: 1px solid #2f3749; }
 QLineEdit, QComboBox, QSpinBox { background: #1e2433; border: 1px solid #434d64; border-radius: 5px; padding: 4px 7px; min-height: 18px; selection-background-color: #1d4ed8; selection-color: #ffffff; color: #e8ecf1; }
+/* 内嵌编辑框使用外层 QComboBox 的编辑区，不能再叠加通用输入框的边框和内边距。 */
+QComboBox QLineEdit { background: transparent; border: none; border-radius: 0; padding: 0; min-height: 0; }
 QLineEdit:hover, QComboBox:hover, QSpinBox:hover { border-color: #5a6885; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus { border-color: #5b9eff; }
 QLineEdit[invalid="true"], QComboBox[invalid="true"], QSpinBox[invalid="true"] { border-color: #c0392b; background: #2d1e1e; }

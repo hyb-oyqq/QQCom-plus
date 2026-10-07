@@ -1,2 +1,0 @@
-﻿PID=30184  C:\Users\qinjm\.workbuddy\binaries\python\envs\default\Scripts\python.exe tests/stress/qa/run_tier.py --proto tcp --port 9402 --rate 1000 --size 256 --duration 15 --probe tests/stress/qa/fmt_utf8_1000.txt
-PID=21148  C:\Users\qinjm\.workbuddy\binaries\python\envs\default\Scripts\python.exe tests/stress/qa/run_tier.py --proto tcp --port 9402 --rate 1000 --size 256 --duration 15 --probe tests/stress/qa/fmt_utf8_1000.txt

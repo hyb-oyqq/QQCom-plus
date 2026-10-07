@@ -40,17 +40,6 @@ namespace {
 // 顶栏与过滤条的字形尺寸，与动作按钮一致；两行并排出现，尺寸必须一样。
 constexpr int BarIconSize = 16;
 
-// 单条消息最多保留的预览字节数。原始长度另存于 rawLength，显示的是"本条实际有多大"，
-// 而不是"我们留下了多少"——两者不等即说明发生了截断。
-constexpr int PreviewLimit = 4096;
-
-// 上限见 TrafficModel::kSafetyByteBudget / kSafetyRowBudget——它们是**内存安全阀**
-// 而不是历史策略：默认值按"几十小时压测也碰不到"来定，碰到就说明这台机器快撑不住了。
-// 早先的 16 MiB / 5 万条是"重投影还能点一下就有"的性能取舍，代价是压测一万多条
-// 就开始丢最早的记录（用户拿 JCom 一比就发现丢了）。重投影仍然与缓冲线性相关
-// （实测约 6.9 µs/条，tests/perf），所以真跑到安全阀附近的会话，一次重投影会是
-// 秒级——这是"不丢数据"明码标出的代价，不是可以悄悄省掉的开销。
-
 // 重投影的防抖窗口。连点开关、连续切换只做一次重投影；50 ms 短于人能察觉的
 // "卡一下"，又足够把同一轮操作里的多次变化合成一次。
 constexpr int ReprojectDebounceMs = 50;
@@ -70,208 +59,7 @@ constexpr int PerfTickMs = 250;
 // over100 判据同一口径：不是帧率洁癖，而是"人开始觉得顿"的那条线。
 constexpr qint64 PerfJankWarnMs = 100;
 
-// 丢弃最旧记录直到回到预算内。逐条移除而不是整体截断，保留最新的连续上下文。
-// 字节与条数两个上限先到者为准；返回丢弃的条数，由调用方播报给用户。
-int trimToBudget(QList<Traffic::Message> &records, qint64 &bytes, qint64 byteBudget, int rowBudget)
-{
-    int dropped = 0;
-    while (!records.isEmpty() && (bytes > byteBudget || records.size() > rowBudget)) {
-        bytes -= records.first().raw.size();
-        records.removeFirst();
-        ++dropped;
-    }
-    return dropped;
-}
-
-int enforceBudget(QList<Traffic::Message> &records, qint64 byteBudget, int rowBudget)
-{
-    qint64 bytes = 0;
-    for (const auto &record : records)
-        bytes += record.raw.size();
-    return trimToBudget(records, bytes, byteBudget, rowBudget);
-}
-
-// 保留预览长度，并把 rawLength 修正为真实长度。
-void applyPreviewLimit(Traffic::Message &record)
-{
-    record.rawLength = record.rawLength > 0 ? record.rawLength : record.raw.size();
-    if (record.raw.size() > PreviewLimit) {
-        record.raw.truncate(PreviewLimit);
-        record.truncated = true;
-    } else if (record.rawLength > record.raw.size()) {
-        record.truncated = true;
-    }
-}
-
 } // namespace
-
-TrafficModel::TrafficModel(QObject *parent) : QObject(parent) {}
-int TrafficModel::rowCount() const { return m_records.size(); }
-const Traffic::Message &TrafficModel::record(int row) const { return m_records.at(row); }
-
-void TrafficModel::setBudget(qint64 bytes, int rows)
-{
-    m_byteBudget = qMax<qint64>(1, bytes);
-    m_rowBudget = qMax(1, rows);
-    // 收紧预算要立刻生效：缓冲里已有的记录也按新上限裁一遍，否则"改了上限却没变化"
-    // 会让人以为设置没生效。裁掉的条数由调用方在下次播报里一并说清（这里不静默吞）。
-    enforceBudget(m_records, m_byteBudget, m_rowBudget);
-    m_rawBytes = 0;
-    for (const auto &r : m_records)
-        m_rawBytes += r.raw.size();
-}
-
-void TrafficModel::replaceRecords(QList<Traffic::Message> records)
-{
-    // This preview model has a hard cap; live batching belongs to the I/O milestone.
-    if (records.size() > 2000) records = records.last(2000);
-    for (auto &r : records)
-        applyPreviewLimit(r);
-    enforceBudget(records, m_byteBudget, m_rowBudget);
-    m_records = std::move(records);
-    m_rawBytes = 0;
-    for (const auto &r : m_records)
-        m_rawBytes += r.raw.size();
-}
-
-int TrafficModel::appendRecords(QList<Traffic::Message> records)
-{
-    if (records.isEmpty()) return 0;
-    for (auto &r : records)
-        applyPreviewLimit(r);
-    const int added = records.size();
-
-    qint64 incomingBytes = 0;
-    for (const auto &r : records)
-        incomingBytes += r.raw.size();
-
-    // 先把本批计入总量，再算出"包含本批在内"要淘汰多少条。反过来（先裁后插）
-    // 会让上限超出整整一批，把硬约束变成软约束。
-    int drop = 0;
-    qint64 keptBytes = m_rawBytes;
-    while (drop < m_records.size()
-           && (keptBytes + incomingBytes > m_byteBudget
-               || (m_records.size() - drop) + added > m_rowBudget)) {
-        keptBytes -= m_records.at(drop).raw.size();
-        ++drop;
-    }
-
-    if (drop > 0) m_records.remove(0, drop);
-    m_rawBytes = keptBytes + incomingBytes;
-    m_records += records;
-    return drop;
-}
-
-TrafficFilter::TextCondition::TextCondition(const QString &literal, Qt::CaseSensitivity sensitivity)
-    : m_literal(literal.trimmed()), m_sensitivity(sensitivity)
-{
-}
-
-bool TrafficFilter::TextCondition::isEmpty() const
-{
-    return m_literal.isEmpty();
-}
-
-bool TrafficFilter::TextCondition::matches(const QString &text) const
-{
-    return !m_literal.isEmpty() && text.contains(m_literal, m_sensitivity);
-}
-
-TrafficFilter::Matcher::Matcher(const Options &options, PayloadCodec::Format format)
-    : m_options(options), m_format(format)
-{
-    // 条件的解释只在这里发生一次：词表 → 预编译条件，热路径不再碰字符串表。
-    const auto sensitivity = options.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
-    for (const auto &keyword : options.keywords) {
-        TextCondition condition(keyword, sensitivity);
-        if (!condition.isEmpty()) m_keywords.append(condition);
-    }
-    for (const auto &exclude : options.excludes) {
-        TextCondition condition(exclude, sensitivity);
-        if (!condition.isEmpty()) m_excludes.append(condition);
-    }
-}
-
-bool TrafficFilter::Matcher::accepts(const Traffic::Message &r) const
-{
-    // 端点与方向是消息自带的事实字段，直接按结构判等，不解析显示文本。
-    if (m_options.endpoints.isEmpty() || !m_options.endpoints.contains(r.source.endpointId)) return false;
-    switch (r.direction) {
-    case Traffic::Direction::Receive:
-        if (!m_options.rx) return false;
-        break;
-    case Traffic::Direction::Transmit:
-        if (!m_options.tx) return false;
-        break;
-    case Traffic::Direction::State:
-        if (!m_options.states) return false;
-        break;
-    case Traffic::Direction::Warning:
-        if (!m_options.warnings) return false;
-        break;
-    case Traffic::Direction::Error:
-        if (!m_options.errors) return false;
-        break;
-    }
-    if (m_keywords.isEmpty() && m_excludes.isEmpty()) return true;
-
-    enum Verdict { KeepLooking, Decided, Rejected };
-    bool keywordHit = m_keywords.isEmpty(); // 没写关键词 = 这一维不限
-    bool rejected = false;
-    const auto scan = [this, &keywordHit](const QString &text) {
-        // 排除词优先于关键词：命中任一即否决，不再往下找。
-        for (const auto &exclude : m_excludes)
-            if (exclude.matches(text)) return Rejected;
-        if (!keywordHit) {
-            for (const auto &keyword : m_keywords) {
-                if (keyword.matches(text)) {
-                    keywordHit = true;
-                    break;
-                }
-            }
-        }
-        // 关键词已满足、且没有排除词要继续查：后面更贵的视图（含两条 HEX 串）不必再构造。
-        return keywordHit && m_excludes.isEmpty() ? Decided : KeepLooking;
-    };
-    // 返回 true 表示"已有结论"，调用方立即返回；scan 内部已经短路，
-    // 这里不重算任何一遍匹配。
-    const auto settled = [&scan, &rejected](const QString &text) {
-        switch (scan(text)) {
-        case KeepLooking:
-            return false;
-        case Decided:
-            return true;
-        default:
-            rejected = true;
-            return true;
-        }
-    };
-
-    // 候选文本按"便宜 → 昂贵"排序，逐项短路。结构化字段与渲染文本先上，
-    // 只有它们全都没给结论时才构造 HEX 串——常见关键词（"心跳"、对端地址）
-    // 在到达时就命中，最贵的两条 HEX 根本不构造。
-    if (settled(r.source.peerAddress)) return !rejected;
-    if (settled(r.source.endpointName)) return !rejected;
-    if (settled(r.statusText)) return !rejected;
-    if (settled(r.detail)) return !rejected;
-    const QString rendered = PayloadCodec::render(r.raw, m_format);
-    if (settled(rendered)) return !rejected;
-    if (m_format != PayloadCodec::Format::Utf8
-        && settled(PayloadCodec::render(r.raw, PayloadCodec::Format::Utf8)))
-        return !rejected;
-    // 两种 HEX 写法都算所见即可搜：紧凑写法与带空格写法。
-    if (settled(QString::fromLatin1(r.raw.toHex()))) return !rejected;
-    if (settled(QString::fromLatin1(r.raw.toHex(' ')))) return !rejected;
-    // 全部视图扫完仍没命中关键词：淘汰。
-    return !rejected && keywordHit;
-}
-
-bool TrafficFilter::accepts(const Traffic::Message &r, const Options &options, PayloadCodec::Format format)
-{
-    // 一次性判定：等价于构造一次 Matcher 再判一条。热路径（消息到达）必须自己
-    // 持有 Matcher，否则每条消息都要重新预编译一遍正则。
-    return Matcher(options, format).accepts(r);
-}
 
 TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
 {
@@ -604,13 +392,14 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         if (follow) m_text->scrollToBottom();
         savePreferences();
     });
-    // 用户向上翻阅（拖动滑块、滚轮、翻页键）时自动取消跟随。
-    // 使用 sliderMoved 而不是 valueChanged：sliderMoved 只在用户拖动滑块时触发，
-    // appendMessages/clearAll 等程序内部修改不会触发，完全避免误判。
-    // 滚轮和键盘也会间接触发 sliderMoved（Qt 内部将它们转为滑块移动）。
+    // 用户拖动和滚动动作取消跟随；程序追加导致的 valueChanged 不影响跟随。
     connect(m_text->verticalScrollBar(), &QScrollBar::sliderMoved, this, [this](int position) {
         if (position < m_text->verticalScrollBar()->maximum())
             m_follow->setChecked(false);
+    });
+    connect(m_text->verticalScrollBar(), &QScrollBar::actionTriggered, this, [this](int) {
+        const auto *scroll = m_text->verticalScrollBar();
+        if (scroll->sliderPosition() < scroll->maximum()) m_follow->setChecked(false);
     });
     updateSummary();
     // 文本视图按到达时的过滤条件收流，条件在这里做第一次汇聚；
@@ -692,7 +481,7 @@ void TrafficPanel::flushPending()
     QElapsedTimer work;
     work.start();
     // 模型从头部释放的条数要累加播报：安全阀触顶是"历史被裁了"的唯一证据，
-    // 静默丢数据会让用户以为是自己看错了（PLAN.md：允许裁剪，但必须提示）。
+    // 缓冲区裁剪必须提示，避免用户把显示遗漏误认为设备丢数据。
     m_releasedRecords += static_cast<quint64>(m_model->appendRecords(batch));
     writeLog(batch); // 记录与显示同流：进模型的批次才落日志
     // 日志大小在写完这批后读一次（O(1)）：摘要里的"日志 X MB"由此刷新，
@@ -735,7 +524,7 @@ void TrafficPanel::toggleLogRecording(bool enabled)
         // 首次开启才选模板路径；之后重开沿用同一模板（目录+基名+扩展名），
         // 模板本身不带时间戳——存的是"选定过的位置"，不是某一次的文件名。
         m_logPath = StyleDialogs::getSaveFileName(this, tr("选择日志文件"),
-            QStringLiteral("easyDebug-log.txt"), tr("文本文件 (*.txt *.log *.tsv)"));
+            QStringLiteral("QQCom-log.txt"), tr("文本文件 (*.txt *.log *.tsv)"));
         if (m_logPath.isEmpty()) {
             // 用户取消 = 不开启；阻断信号复位勾选，避免显示与实际状态不一致。
             const QSignalBlocker blocker(m_recordAction);
@@ -757,13 +546,13 @@ bool TrafficPanel::openNewLogFile()
     QString templatePath = m_logPath;
     if (templatePath.isEmpty()) {
         const QString dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-        templatePath = QDir(dir).filePath(QStringLiteral("easyDebug-log.txt"));
+        templatePath = QDir(dir).filePath(QStringLiteral("QQCom-log.txt"));
     }
     // 只取模板的"目录 + 基名 + 扩展名"，实际文件名 = 基名 + -yyyyMMdd-HHmmss + 扩展名。
     // 无扩展名的模板按约定补 .txt。
     const QFileInfo info(templatePath);
     const QString dir = info.absolutePath();
-    const QString base = info.completeBaseName().isEmpty() ? QStringLiteral("easyDebug-log")
+    const QString base = info.completeBaseName().isEmpty() ? QStringLiteral("QQCom-log")
                                                            : info.completeBaseName();
     const QString suffix = info.suffix().isEmpty() ? QStringLiteral("txt") : info.suffix();
     const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
@@ -786,10 +575,11 @@ bool TrafficPanel::openNewLogFile()
     m_logFilePath = path;
     // 每个新文件都先写一行元信息头：日期时间 + 当前显示格式。数据行本身不带格式，
     // 有这行，事后翻日志才知道"这是哪一次会话、按什么格式记的"。
-    writeLogText(tr("# easyDebug %1 格式=%2")
-                     .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
-                         PayloadCodec::formatName(currentDisplayFormat()))
-                 + QLatin1Char('\n'));
+    writeLogText(tr("# QQCom %1 格式=%2")
+                      .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
+                          PayloadCodec::formatName(currentDisplayFormat()))
+                  + QLatin1Char('\n')
+                  + QStringLiteral("# Time\tPort\tPeer\tDirection\tData\n"));
     refreshRecordTooltip();
     return true;
 }
@@ -971,6 +761,7 @@ void TrafficPanel::savePreferences()
 
 TrafficPanel::~TrafficPanel()
 {
+    writeLog(m_pending); // 退出时不能丢掉尚未到 16 ms 刷新周期的最后一批。
     savePreferences();
     closeLogFile();
 }
@@ -1285,11 +1076,11 @@ void TrafficPanel::reportSummary(const QString &text)
 void TrafficPanel::exportVisible()
 {
     if (!m_model->rowCount()) { reportSummary(tr("当前没有可导出的记录")); return; }
-    const auto path = StyleDialogs::getSaveFileName(this, tr("导出记录"), "easyDebug-preview.tsv", tr("制表符文件 (*.tsv)"));
+    const auto path = StyleDialogs::getSaveFileName(this, tr("导出记录"), "QQCom-preview.tsv", tr("制表符文件 (*.tsv)"));
     if (path.isEmpty()) return;
     // 导出列与显示列解耦：导出的是完整的结构化事实。
     // 时间用 ISO 格式带毫秒，方向/边界/来源用稳定名称，HEX 用大写无分隔。
-    QByteArray output("# easyDebug UI preview - sample data only\n"
+    QByteArray output("# QQCom traffic preview\n"
                       "Time\tPort\tPeer\tDirection\tOrigin\tFraming\tState\tBytes\tTruncated\tHEX\n");
     for (int i = 0; i < m_model->rowCount(); ++i) {
         const auto &r = m_model->record(i);

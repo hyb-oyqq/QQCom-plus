@@ -12,8 +12,9 @@
 // 空闲输出由调用方（EndpointRuntime 的定时器）触发 flush，缓冲阈值输出在 feed 里
 // 就地完成。这样它可以在 core 测试里被完整驱动，不需要线程与事件循环。
 //
-// 三种判定（与 ReceiveFraming::Mode 一一对应）：
-//   Passthrough        收到什么出什么，只做兜底（UDP/数据报也不经过它）；
+// 四种判定（与 ReceiveFraming::Mode 一一对应）：
+//   Passthrough        收到什么出什么，不缓冲（UDP/数据报也不经过它）；
+//   IdleTimeout        连续空闲达到配置值时输出缓冲；
 //   Delimiter          遇到结束符即出一帧，其后字节作为下一帧继续缓冲；
 //   LengthPrefixU16LE  帧头 2 字节小端 = 后续字节数，收够即出一帧。
 //
@@ -39,7 +40,7 @@ public:
         QByteArray bytes;
         bool complete = true; // true=Framing::Message；false=兜底片段
         Trigger trigger = Boundary;
-        QString hint;        // 提示日志文本；为空表示无需提示
+        QString hint;        // 仅 logHints 开启时生成兜底提示
     };
 
     explicit ReceiveFramer(const ReceiveFraming &config = {});
@@ -62,6 +63,7 @@ private:
 
     ReceiveFraming m_config;
     QByteArray m_buffer;
+    qsizetype m_scanFrom = 0; // 结束符跨片段搜索只回看可能重叠的尾部。
 };
 
 #endif

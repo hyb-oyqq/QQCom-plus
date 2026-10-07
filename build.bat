@@ -1,20 +1,28 @@
 @echo off
-REM Set up MSVC environment
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-
-REM Add Qt to PATH
-set PATH=C:\MyProgram\Qt\6.10.1\msvc2022_64\bin;%PATH%
-
-REM Clean previous build
-if exist Makefile del Makefile
-if exist Makefile.Debug del Makefile.Debug
-if exist Makefile.Release del Makefile.Release
-
-REM Run qmake
-qmake easyDebug.pro
-
-REM Build
-nmake
-
-echo.
-echo Build finished!
+setlocal
+if not defined QT_BIN set "QT_BIN=C:\MyProgram\Qt\6.10.1\msvc2022_64\bin"
+if not defined VCVARS64 set "VCVARS64=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+if not exist "%QT_BIN%\qmake.exe" (
+    echo Qt not found. Set QT_BIN to the matching MSVC kit's bin directory.
+    exit /b 1
+)
+if not exist "%VCVARS64%" (
+    echo MSVC not found. Set VCVARS64 to vcvars64.bat.
+    exit /b 1
+)
+call "%VCVARS64%"
+if errorlevel 1 exit /b 1
+set "PATH=%QT_BIN%;%PATH%"
+if not exist "%~dp0build\release" mkdir "%~dp0build\release"
+pushd "%~dp0build\release"
+if errorlevel 1 exit /b 1
+qmake "%~dp0QQCom.pro" -spec win32-msvc "CONFIG+=release" "CONFIG-=debug"
+if errorlevel 1 goto failed
+nmake /nologo release
+if errorlevel 1 goto failed
+echo Built: %~dp0build\release\release\QQCom.exe
+popd
+exit /b 0
+:failed
+popd
+exit /b 1

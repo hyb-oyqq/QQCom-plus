@@ -91,6 +91,8 @@ CMakeLists.txt.user*
 /logs/
 /captures/
 /config-local/
+/tests/stress/qa/
+__pycache__/
 
 # Generated version header (scripts/update_version.ps1)
 /version/version.h

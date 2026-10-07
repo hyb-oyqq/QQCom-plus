@@ -8,7 +8,7 @@
 // 改法：标签表与列宽在 refreshTable 开头算一次（见 commandtablewidget.cpp）。
 //
 // 本探针量化"刷新一屏"的成本随行数的缩放关系，用来证明改动后不再随行数线性走高。
-// 用法：easyDebug_command_refresh_perf.exe [行数]（默认 2000，重复 5 轮取中位数）
+// 用法：QQCom_command_refresh_perf.exe [行数]（默认 2000，重复 5 轮取中位数）
 #include <QApplication>
 #include <QCoreApplication>
 #include <QCheckBox>
@@ -118,7 +118,7 @@ int main(int argc, char **argv)
 
     // Windows GUI 子系统吞 stdout，写文件最可靠。
     {
-        FILE *f = fopen("D:/easyDebug_cmdrefresh_out.txt", "a");
+        FILE *f = fopen("QQCom_cmdrefresh_out.txt", "a");
         if (f) {
             fprintf(f, "%s\n", line.toUtf8().constData());
             fflush(f);

@@ -6,22 +6,26 @@
 #include "ui/common/tintedicon.h"
 
 #include <QCheckBox>
+#include <QAbstractSocket>
 #include <QComboBox>
 #include <QAbstractItemView>
 #include <QColor>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QNetworkInterface>
 #include <QPushButton>
 #include <QRegularExpressionValidator>
 #include <QSpinBox>
 #include <QSignalBlocker>
 #include <QStackedWidget>
 #include <QStyle>
+#include <QStyleOptionComboBox>
 #include <QStyleOptionSpinBox>
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <limits>
 
 namespace {
@@ -50,6 +54,29 @@ public:
         if (!ok || value > std::numeric_limits<qint32>::max()) return Invalid;
         return value > 0 ? Acceptable : Intermediate;
     }
+};
+
+// QSS 的箭头和边框可能使默认 sizeHint 少算文本空间，按实际编辑区补足宽度。
+class BindAddressComboBox final : public QComboBox
+{
+public:
+    using QComboBox::QComboBox;
+
+    QSize sizeHint() const override
+    {
+        const QSize base = QComboBox::sizeHint();
+        QStyleOptionComboBox option;
+        initStyleOption(&option);
+        option.rect = QRect(QPoint(), base);
+        const QRect field = style()->subControlRect(
+            QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxEditField, this);
+        int widest = 0;
+        for (int i = 0; i < count(); ++i)
+            widest = qMax(widest, fontMetrics().horizontalAdvance(itemText(i)));
+        return QSize(qMax(base.width(), widest + base.width() - field.width()), base.height());
+    }
+
+    QSize minimumSizeHint() const override { return sizeHint(); }
 };
 
 // QAbstractSpinBox::sizeHint() counts the range text and the padding but not the stylesheet's
@@ -117,7 +144,7 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     m_type = new QComboBox;
     m_type->setObjectName("portType");
     // 类型身份绑定到 itemData 的枚举值，而不是条目位置：排序、翻译或插入
-    // 分组都不会改变已保存配置的含义（ARCHITECTURE §6.4 的映射规则）。
+    // 分组都不会改变已保存配置的含义。
     for (int kind = PortDraft::Serial; kind <= PortDraft::Udp; ++kind)
         m_type->addItem(portKindName(kind), kind);
     fitComboToItems(m_type);
@@ -168,11 +195,16 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     m_serialPorts->setMinimumWidth(200);
     addInlineLabel(serial, tr("串口"), m_serialPorts, Lead);
     // 刷新按钮已移除：扫描由组合根的定时器周期驱动，设备插拔自动出现在列表里。
-    auto *baud = addChoice("serial.baud", {"9600", "38400", "115200", "230400", "921600"}, true);
+    auto *baud = addChoice("serial.baud",
+        {"9600", "38400", "115200", "230400", "921600", "2000000"}, true);
     baud->setValidator(new BaudRateValidator(baud));
     baud->lineEdit()->setMaxLength(10);
     baud->lineEdit()->setInputMethodHints(Qt::ImhDigitsOnly);
-    // Editable, so it sizes itself from the preset rates instead of a frozen pixel width.
+    // The validator accepts the full signed-32-bit positive range, so reserve the width of
+    // its longest legal value as well as the current preset items.  AdjustToContents alone
+    // only sees the five presets and leaves the embedded editor too narrow for a typed value.
+    baud->setMinimumContentsLength(10);
+    // Editable, so it sizes itself from the presets and the minimum legal content length.
     baud->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     addInlineLabel(serial, tr("波特率"), baud, Trail);
 
@@ -184,23 +216,27 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     addInlineLabel(client, tr("端口"), addNumber("client.port", 1, 65535), Trail);
 
     auto *server = makePage(m_pages);
-    auto *bind = addAddress("server.address");
-    bind->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    bind->setMinimumWidth(200);
-    addInlineLabel(server, tr("本地地址"), bind, Lead);
+    auto *bind = addBindAddress("server.address");
+    bind->setProperty("helpToolTip", tr("选择 TCP 服务端监听的本机 IPv4 网卡；通常选择所有网卡。"));
+    addInlineLabel(server, tr("监听网卡"), bind, Lead);
     addInlineLabel(server, tr("监听端口"), addNumber("server.port", 0, 65535), Trail);
 
     auto *udp = makePage(m_pages);
-    auto *udpBind = addAddress("udp.address");
-    udpBind->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    udpBind->setMinimumWidth(130);
-    addInlineLabel(udp, tr("本地地址"), udpBind, Lead);
-    addInlineLabel(udp, tr(":"), addNumber("udp.port", 0, 65535), Plain);
+    auto *udpBind = addBindAddress("udp.address");
+    udpBind->setProperty("helpToolTip", tr("选择接收 UDP 数据报的本机 IPv4 网卡；通常选择所有网卡。"));
+    addInlineLabel(udp, tr("监听网卡"), udpBind, Lead);
+    auto *udpPort = addNumber("udp.port", 0, 65535);
+    udpPort->setProperty("helpToolTip", tr("本地监听端口；设为 0 时由系统自动分配，打开后会在日志中显示实际端口。"));
+    addInlineLabel(udp, tr(":"), udpPort, Plain);
     auto *udpTarget = addAddress("udp.target");
     udpTarget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     udpTarget->setMinimumWidth(130);
-    addInlineLabel(udp, tr("目标地址"), udpTarget, Lead);
-    addInlineLabel(udp, tr(":"), addNumber("udp.targetPort", 1, 65535), Plain);
+    udpTarget->lineEdit()->setPlaceholderText(tr("可选；留空仅接收"));
+    udpTarget->setProperty("helpToolTip", tr("手动发送的固定目的地址；留空时仅接收，不会自动回复最后一个发送方。"));
+    addInlineLabel(udp, tr("发送目标"), udpTarget, Lead);
+    auto *udpTargetPort = addNumber("udp.targetPort", 1, 65535);
+    udpTargetPort->setProperty("helpToolTip", tr("固定发送目标的 UDP 端口。"));
+    addInlineLabel(udp, tr(":"), udpTargetPort, Plain);
 
     const auto widestLabel = [](QList<QLabel *> &labels) {
         int width = 0;
@@ -288,9 +324,15 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     serverMore->addStretch();
 
     auto *udpMore = makePage(m_advancedPages);
-    auto *udpHint = new QLabel(tr("目标地址可留空，表示只接收；UDP 保留数据报边界。"));
+    auto *udpHint = new QLabel(tr("端口为 0 时自动分配；目标留空仅接收，不会建立连接或自动回复最后的发送方。"));
     udpHint->setObjectName("Muted");
+    udpHint->setToolTip(tr("UDP 没有 TCP 式连接。若要发送，请填写固定发送目标。"));
     udpMore->addWidget(udpHint);
+    m_udpPeerHint = new QLabel(tr("尚未收到 UDP 数据报；UDP 没有连接状态。"));
+    m_udpPeerHint->setObjectName("udpPeerHint");
+    m_udpPeerHint->setToolTip(tr("这里只显示实际收到数据报的来源。来源不会自动成为发送目标。"));
+    m_udpPeerHint->setWordWrap(true);
+    udpMore->addWidget(m_udpPeerHint);
     udpMore->addStretch();
 
     // 接收组帧与端点类型无关（数据报端点不经过它），因此作为通用行挂在
@@ -411,20 +453,70 @@ QComboBox *PortSelectorWidget::addAddress(const QString &key, bool allowHostName
     return field;
 }
 
+QComboBox *PortSelectorWidget::addBindAddress(const QString &key)
+{
+    auto *field = new BindAddressComboBox;
+    field->setObjectName(key);
+    m_fields.insert(key, field);
+    connect(field, &QComboBox::currentTextChanged, this, &PortSelectorWidget::notifyChange);
+    field->setMaxVisibleItems(10);
+    // 网卡名与地址始终完整显示，宽度随最长选项、字体和 DPI 自动调整。
+    field->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    field->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
+    field->view()->setTextElideMode(Qt::ElideNone);
+    field->addItem(tr("所有 IPv4 网卡（0.0.0.0）"), QStringLiteral("0.0.0.0"));
+    field->setItemData(0, tr("网卡：所有 IPv4 网卡\nIPv4：0.0.0.0"), Qt::ToolTipRole);
+
+    struct InterfaceAddress
+    {
+        QString address;
+        QString interfaceName;
+    };
+    QList<InterfaceAddress> addresses;
+    QSet<QString> seen;
+    for (const auto &interface : QNetworkInterface::allInterfaces()) {
+        if (!interface.flags().testFlag(QNetworkInterface::IsUp)) continue;
+        const QString interfaceName = interface.humanReadableName().isEmpty()
+            ? interface.name() : interface.humanReadableName();
+        for (const auto &entry : interface.addressEntries()) {
+            const auto address = entry.ip();
+            if (address.protocol() != QAbstractSocket::IPv4Protocol
+                || address == QHostAddress::AnyIPv4 || address.isNull())
+                continue;
+            const auto text = address.toString();
+            if (seen.contains(text)) continue;
+            seen.insert(text);
+            addresses.append({text, interfaceName});
+        }
+    }
+    std::sort(addresses.begin(), addresses.end(), [](const InterfaceAddress &left,
+                                                       const InterfaceAddress &right) {
+        return left.address < right.address;
+    });
+    for (const auto &entry : addresses) {
+        field->addItem(tr("%1 · %2").arg(entry.interfaceName, entry.address), entry.address);
+        field->setItemData(field->count() - 1,
+            tr("网卡：%1\nIPv4：%2").arg(entry.interfaceName, entry.address), Qt::ToolTipRole);
+    }
+    connect(field, QOverload<int>::of(&QComboBox::currentIndexChanged), field, [field](int index) {
+        field->setToolTip(index >= 0 ? field->itemData(index, Qt::ToolTipRole).toString() : QString());
+    });
+    return field;
+}
+
 void PortSelectorWidget::setAddressHistory(const QStringList &remote, const QStringList &local)
 {
-    for (const auto &key : {QStringLiteral("client.host"), QStringLiteral("server.address"),
-                            QStringLiteral("udp.address"), QStringLiteral("udp.target")}) {
+    Q_UNUSED(local);
+    for (const auto &key : {QStringLiteral("client.host"), QStringLiteral("udp.target")}) {
         auto *combo = qobject_cast<QComboBox *>(m_fields.value(key));
         const QSignalBlocker comboBlocker(combo), editBlocker(combo->lineEdit());
         const auto text = combo->currentText();
         const auto cursor = combo->lineEdit()->cursorPosition();
-        const bool localAddress = key == "server.address" || key == "udp.address";
         QStringList choices;
-        for (const auto &address : (localAddress ? local : remote))
+        for (const auto &address : remote)
             if (isValidNetworkAddress(address, key == "client.host") && !choices.contains(address))
                 choices.append(address);
-        for (const auto &address : (localAddress ? QStringList{"127.0.0.1", "0.0.0.0"} : QStringList{"127.0.0.1"}))
+        for (const auto &address : QStringList{"127.0.0.1"})
             if (!choices.contains(address)) choices.append(address);
         combo->clear();
         combo->addItems(choices);
@@ -452,6 +544,18 @@ void PortSelectorWidget::commitAddressHistory()
 
 void PortSelectorWidget::setPeerList(const QStringList &peers)
 {
+    if (m_draft.kind == PortDraft::Udp) {
+        if (!m_udpPeerHint) return;
+        if (peers.isEmpty()) {
+            m_udpPeerHint->setText(tr("尚未收到 UDP 数据报；UDP 没有连接状态。"));
+            m_udpPeerHint->setToolTip(tr("这里只显示实际收到数据报的来源。来源不会自动成为发送目标。"));
+            return;
+        }
+        m_udpPeerHint->setText(tr("本次已收到来自 %1 个来源的数据报").arg(peers.size()));
+        m_udpPeerHint->setToolTip(peers.join('\n'));
+        return;
+    }
+
     if (!m_peerHint) return;
     if (peers.isEmpty()) {
         m_peerHint->setText(tr("暂无客户端；启动监听后在此管理连接与发送目标。"));
@@ -492,6 +596,13 @@ void PortSelectorWidget::selectSerialPort(const QString &portName)
     m_serialPorts->setToolTip(m_serialPorts->currentText());
 }
 
+void PortSelectorWidget::selectBindAddress(const QString &key, const QString &address)
+{
+    auto *field = qobject_cast<QComboBox *>(m_fields.value(key));
+    if (!field) return;
+    field->setCurrentIndex(field->findData(address));
+}
+
 void PortSelectorWidget::setSerialPorts(const QList<SerialPortDescriptor> &ports)
 {
     const auto selected = m_serialPorts->currentData().toString();
@@ -528,59 +639,77 @@ QSpinBox *PortSelectorWidget::addNumber(const QString &key, int minimum, int max
 QWidget *PortSelectorWidget::buildFramingRow()
 {
     auto *row = new QWidget;
+    row->setObjectName(QStringLiteral("framingPanel"));
     auto *column = new QVBoxLayout(row);
-    column->setContentsMargins(0, 0, 0, 0);
-    column->setSpacing(4);
+    column->setContentsMargins(0, 5, 0, 2);
+    column->setSpacing(2);
 
-    // 第一行：怎么切（模式 + 结束符）。放一行是因为这两个是"互斥选择"的一组。
-    auto *modeRow = new QWidget;
-    auto *modeLayout = new QHBoxLayout(modeRow);
-    modeLayout->setContentsMargins(0, 0, 0, 0);
-    modeLayout->setSpacing(8);
+    const auto makeLine = [row] {
+        auto *line = new QWidget(row);
+        auto *layout = new QHBoxLayout(line);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(8);
+        return qMakePair(line, layout);
+    };
 
-    auto *label = new QLabel(tr("接收组帧"));
+    // 参考 BLE 调试助手，把最重要的两个开关放在设置区顶部，避免用户把
+    // “不拆分”误解成组帧功能没有生效。
+    auto [switchLine, switchLayout] = makeLine();
+    m_framingEnabled = new QCheckBox(tr("启用接收组帧"));
+    m_framingEnabled->setObjectName(QStringLiteral("framingEnabled"));
+    m_framingEnabled->setToolTip(tr("启用后，串口和 TCP 字节流会按下面的完整帧判定规则组帧；UDP 数据报自带边界，不经过组帧。"));
+    switchLayout->addWidget(m_framingEnabled);
+    m_framingLogHints = new QCheckBox(tr("记录组帧提示日志"));
+    m_framingLogHints->setObjectName(QStringLiteral("framingLogHints"));
+    m_framingLogHints->setToolTip(tr("兜底输出（空闲超时、缓冲阈值、关闭收尾）时向监视区发一条提示事件"));
+    switchLayout->addWidget(m_framingLogHints);
+    switchLayout->addStretch();
+    column->addWidget(switchLine);
+
+    // 第二行：完整帧判定。结束符输入和边界保留开关只在对应模式显示。
+    auto [modeLine, modeLayout] = makeLine();
+    auto *label = new QLabel(tr("完整帧判定"));
     label->setObjectName("Muted");
+    label->setMinimumWidth(92);
     modeLayout->addWidget(label);
 
-    // 三种模式的命名直说"怎么切"，不使用"兜底输出"这类内部术语：
-    // 用户关心的是"数据按什么规则分成一条条"，不是实现上的后备路径；
-    // 括号里的补充说明由下方说明行承担，这里保持短语，避免下拉框过宽。
     m_framingMode = new QComboBox;
     m_framingMode->setObjectName(QStringLiteral("framingMode"));
     m_framingMode->addItem(tr("不拆分"), int(ReceiveFraming::Passthrough));
+    m_framingMode->addItem(tr("按空闲超时拆分"), int(ReceiveFraming::IdleTimeout));
     m_framingMode->addItem(tr("按结束符拆分"), int(ReceiveFraming::Delimiter));
     m_framingMode->addItem(tr("按长度前缀拆分"), int(ReceiveFraming::LengthPrefixU16LE));
     m_framingMode->setToolTip(tr("决定字节流怎样切分成一条条记录；UDP 数据报自带边界，不经过组帧。"));
     // 非编辑型下拉框一律按内容定宽（AdjustToContents+Fixed），否则 QSS 的箭头内边距
     // 会把最宽项截掉——tests/ui 的 portControlsShowTheirOwnContent 就是这条底线。
     fitComboToItems(m_framingMode);
-    modeLayout->addWidget(m_framingMode);
+    modeLayout->addWidget(m_framingMode, 0, Qt::AlignLeft);
 
     // 结束符按 HEX 输入（0D 0A / 0D0A 均可）：不可见字节必须能被精确表达。
     m_framingDelimiter = new QLineEdit;
     m_framingDelimiter->setObjectName(QStringLiteral("framingDelimiter"));
     m_framingDelimiter->setPlaceholderText(tr("结束符 HEX，如 0D 0A"));
     m_framingDelimiter->setToolTip(tr("结束符按 HEX 输入，可多字节（如 0D 0A、7E）"));
-    m_framingDelimiter->setMaximumWidth(170);
-    modeLayout->addWidget(m_framingDelimiter);
-    modeLayout->addStretch();
-    column->addWidget(modeRow);
-
-    // 第二行：兜底设置与边界保留。两个数字框各带短标签——光看数字猜不出含义，
-    // 这正是原先"不够直观"的根源。
-    auto *optionRow = new QWidget;
-    auto *optionLayout = new QHBoxLayout(optionRow);
-    optionLayout->setContentsMargins(0, 0, 0, 0);
-    optionLayout->setSpacing(8);
+    m_framingDelimiter->setMaximumWidth(190);
+    modeLayout->addWidget(m_framingDelimiter, 1);
 
     // 用 PortSpinBox（sizeHint 覆盖量程两端）：写死宽度会让最大值显示不全，
     // tests/ui 的 portControlsShowTheirOwnContent 就是这条底线。
     auto numericLocale = QLocale::c();
     numericLocale.setNumberOptions(QLocale::RejectGroupSeparator);
 
-    m_framingIdleLabel = new QLabel(tr("空闲超时"));
+    m_framingKeepBoundary = new QCheckBox(tr("保留结束符"));
+    m_framingKeepBoundary->setObjectName(QStringLiteral("framingKeepBoundary"));
+    modeLayout->addWidget(m_framingKeepBoundary);
+    modeLayout->addStretch();
+    column->addWidget(modeLine);
+
+    // 第三、四行：兜底设置独立成行，数字和单位在窄窗口下也不会互相挤压。
+    auto [idleLine, idleLayout] = makeLine();
+    m_framingIdleLabel = new QLabel(tr("空闲输出超时"));
     m_framingIdleLabel->setObjectName("Muted");
-    optionLayout->addWidget(m_framingIdleLabel);
+    m_framingIdleLabel->setMinimumWidth(140);
+    idleLayout->addWidget(m_framingIdleLabel);
     m_framingIdle = new PortSpinBox;
     m_framingIdle->setObjectName(QStringLiteral("framingIdle"));
     m_framingIdle->setRange(10, 60000);
@@ -588,15 +717,19 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingIdle->setLocale(numericLocale);
     m_framingIdle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_framingIdle->setToolTip(tr("超过该时长没有新数据，就把已缓冲的字节作为一条输出"));
-    optionLayout->addWidget(m_framingIdle);
+    idleLayout->addWidget(m_framingIdle);
     // 单位在框外（与"连接超时"的处理一致）：输入框只放数字，单位用灰调小标签表达。
     m_framingIdleUnit = new QLabel(tr("ms"));
     m_framingIdleUnit->setObjectName("Muted");
-    optionLayout->addWidget(m_framingIdleUnit);
+    idleLayout->addWidget(m_framingIdleUnit);
+    idleLayout->addStretch();
+    column->addWidget(idleLine);
 
-    m_framingThresholdLabel = new QLabel(tr("缓冲阈值"));
+    auto [thresholdLine, thresholdLayout] = makeLine();
+    m_framingThresholdLabel = new QLabel(tr("缓冲输出阈值"));
     m_framingThresholdLabel->setObjectName("Muted");
-    optionLayout->addWidget(m_framingThresholdLabel);
+    m_framingThresholdLabel->setMinimumWidth(140);
+    thresholdLayout->addWidget(m_framingThresholdLabel);
     m_framingThreshold = new PortSpinBox;
     m_framingThreshold->setObjectName(QStringLiteral("framingThreshold"));
     m_framingThreshold->setRange(16, 65536);
@@ -604,31 +737,49 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingThreshold->setLocale(numericLocale);
     m_framingThreshold->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_framingThreshold->setToolTip(tr("缓冲达到该字节数即强制输出，避免无定界的数据一直滞留"));
-    optionLayout->addWidget(m_framingThreshold);
+    thresholdLayout->addWidget(m_framingThreshold);
     m_framingThresholdUnit = new QLabel(tr("字节"));
     m_framingThresholdUnit->setObjectName("Muted");
-    optionLayout->addWidget(m_framingThresholdUnit);
+    thresholdLayout->addWidget(m_framingThresholdUnit);
+    thresholdLayout->addStretch();
+    column->addWidget(thresholdLine);
 
-    m_framingKeepBoundary = new QCheckBox(tr("保留结束符"));
-    m_framingKeepBoundary->setObjectName(QStringLiteral("framingKeepBoundary"));
-    optionLayout->addWidget(m_framingKeepBoundary);
-
-    m_framingLogHints = new QCheckBox(tr("记录组帧提示日志"));
-    m_framingLogHints->setObjectName(QStringLiteral("framingLogHints"));
-    m_framingLogHints->setToolTip(tr("兜底输出（空闲超时、缓冲阈值、关闭收尾）时向监视区发一条警告事件"));
-    optionLayout->addWidget(m_framingLogHints);
-    optionLayout->addStretch();
-    column->addWidget(optionRow);
-
-    // 第三行：白话说明，跟随模式切换，讲清"这条规则怎么工作"以及
-    // 两个兜底设置在什么情况下介入。
+    // 说明区对应参考图的“工作机制”，但使用可读的多行文本，不把实现术语
+    // 塞进控件标签。模式切换后只更新说明，不改变已经保存的字段含义。
+    m_framingMechanismTitle = new QLabel(tr("工作机制"));
+    m_framingMechanismTitle->setObjectName("Muted");
+    QFont mechanismFont = m_framingMechanismTitle->font();
+    mechanismFont.setBold(true);
+    m_framingMechanismTitle->setFont(mechanismFont);
+    column->addWidget(m_framingMechanismTitle);
     m_framingHint = new QLabel;
     m_framingHint->setObjectName("Muted");
     m_framingHint->setWordWrap(true);
+    m_framingHint->setIndent(8);
     column->addWidget(m_framingHint);
 
     const auto changed = [this] { notifyChange(); };
     connect(m_framingMode, &QComboBox::currentIndexChanged, this, [this] {
+        const auto mode = ReceiveFraming::Mode(m_framingMode->currentData().toInt());
+        if (mode != ReceiveFraming::Passthrough)
+            m_framingRememberedMode = mode;
+        const QSignalBlocker blocker(m_framingEnabled);
+        m_framingEnabled->setChecked(mode != ReceiveFraming::Passthrough);
+        syncFramingControls();
+        notifyChange();
+    });
+    connect(m_framingEnabled, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (!enabled) {
+            const auto current = ReceiveFraming::Mode(m_framingMode->currentData().toInt());
+            if (current != ReceiveFraming::Passthrough)
+                m_framingRememberedMode = current;
+            const QSignalBlocker blocker(m_framingMode);
+            m_framingMode->setCurrentIndex(m_framingMode->findData(int(ReceiveFraming::Passthrough)));
+        } else if (ReceiveFraming::Mode(m_framingMode->currentData().toInt())
+                   == ReceiveFraming::Passthrough) {
+            const QSignalBlocker blocker(m_framingMode);
+            m_framingMode->setCurrentIndex(m_framingMode->findData(int(m_framingRememberedMode)));
+        }
         syncFramingControls();
         notifyChange();
     });
@@ -637,20 +788,28 @@ QWidget *PortSelectorWidget::buildFramingRow()
     connect(m_framingThreshold, &QSpinBox::valueChanged, this, changed);
     connect(m_framingKeepBoundary, &QCheckBox::toggled, this, changed);
     connect(m_framingLogHints, &QCheckBox::toggled, this, changed);
+    m_framingEnabled->setChecked(false);
     return row;
 }
 
 void PortSelectorWidget::syncFramingControls()
 {
     const auto mode = ReceiveFraming::Mode(m_framingMode->currentData().toInt());
+    const bool enabled = m_framingEnabled->isChecked();
+    const bool idleTimeout = mode == ReceiveFraming::IdleTimeout;
     const bool delimiter = mode == ReceiveFraming::Delimiter;
     const bool length = mode == ReceiveFraming::LengthPrefixU16LE;
-    const bool splitting = delimiter || length; // 只有拆分模式才缓冲，兜底设置才有效
-    m_framingDelimiter->setVisible(delimiter);
-    m_framingKeepBoundary->setVisible(splitting);
+    const bool splitting = enabled && (idleTimeout || delimiter || length); // 只有组帧模式才缓冲
+    m_framingMode->setEnabled(enabled);
+    m_framingMode->setToolTip(enabled
+        ? tr("选择字节流如何组成完整帧")
+        : tr("接收组帧未启用；收到的数据将原样输出"));
+    m_framingDelimiter->setVisible(enabled && delimiter);
     // 同一个开关在两种模式下语义不同：结束符模式下是"保留结束符"，
     // 长度前缀模式下是"保留长度帧头"。
     m_framingKeepBoundary->setText(delimiter ? tr("保留结束符") : tr("保留长度帧头"));
+    m_framingKeepBoundary->setVisible(enabled && (delimiter || length));
+    m_framingKeepBoundary->setEnabled(enabled);
     // 不拆分模式收到即输出、不做缓冲：两个兜底设置在该模式下没有作用，置灰避免误解。
     m_framingIdle->setEnabled(splitting);
     m_framingThreshold->setEnabled(splitting);
@@ -661,23 +820,29 @@ void PortSelectorWidget::syncFramingControls()
     m_framingThresholdUnit->setEnabled(splitting);
 
     QString hint;
-    if (delimiter)
+    if (!enabled)
+        hint = tr("未启用接收组帧：收到的数据原样作为一条输出，不做缓冲或拆分。启用后可按结束符、长度前缀或空闲超时组帧。 ");
+    else if (idleTimeout)
+        hint = tr("每次收到数据后，连续空闲达到“空闲超时”就输出当前缓冲；缓冲达到“缓冲阈值”时提前输出，防止数据滞留。\n"
+                  "关闭端口时，缓冲区中的最后数据也会输出。 ");
+    else if (delimiter)
         hint = tr("每遇到结束符就切出一条完整帧；结束符之后的剩余字节继续缓冲，等待下一帧。");
     else if (length)
         hint = tr("帧头 2 字节（小端）表示其后数据的字节数，凑满即输出一条完整帧。");
     else
         hint = tr("收到的数据原样作为一条输出（可能一次收到半帧或多帧），不拆分也不缓冲；"
                   "适合协议自带边界、或不需要按帧查看的场景。");
-    if (splitting)
-        hint += tr(" 兜底：等待超过“空闲超时”、或缓冲达到“缓冲阈值”时，即使还没等到定界也会把已有字节输出，"
+    if (splitting && !idleTimeout)
+        hint += tr(" 兜底：最近一次收到数据后连续空闲达到“空闲超时”、或缓冲达到“缓冲阈值”时，即使还没等到定界也会把已有字节输出，"
                    "保证数据不会一直滞留在缓冲里。");
     m_framingHint->setText(hint);
 }
 
 void PortSelectorWidget::applyFramingToDraft(PortDraft &draft) const
 {
-    const auto mode = ReceiveFraming::Mode(m_framingMode->currentData().toInt());
-    draft.framing.mode = mode;
+    draft.framing.mode = m_framingEnabled->isChecked()
+        ? ReceiveFraming::Mode(m_framingMode->currentData().toInt())
+        : ReceiveFraming::Passthrough;
     draft.framing.idleTimeoutMs = m_framingIdle->value();
     draft.framing.bufferThresholdBytes = m_framingThreshold->value();
     draft.framing.includeDelimiter = m_framingKeepBoundary->isChecked();
@@ -693,7 +858,16 @@ void PortSelectorWidget::setDraft(const PortDraft &draft)
     commitAddressHistory();
     m_loading = true;
     m_draft = draft;
-    m_framingMode->setCurrentIndex(m_framingMode->findData(int(draft.framing.mode)));
+    const auto framingMode = draft.framing.mode;
+    m_framingRememberedMode = framingMode == ReceiveFraming::Passthrough
+        ? ReceiveFraming::IdleTimeout : framingMode;
+    {
+        const QSignalBlocker modeBlocker(m_framingMode);
+        const QSignalBlocker enabledBlocker(m_framingEnabled);
+        m_framingMode->setCurrentIndex(m_framingMode->findData(int(
+            framingMode == ReceiveFraming::Passthrough ? ReceiveFraming::Passthrough : framingMode)));
+        m_framingEnabled->setChecked(framingMode != ReceiveFraming::Passthrough);
+    }
     m_framingDelimiter->setText(QString::fromLatin1(draft.framing.delimiter.toHex(' ').toUpper()));
     m_framingIdle->setValue(draft.framing.idleTimeoutMs);
     m_framingThreshold->setValue(draft.framing.bufferThresholdBytes);
@@ -707,15 +881,22 @@ void PortSelectorWidget::setDraft(const PortDraft &draft)
     const QVariantMap defaults{{"serial.port", ""}, {"serial.baud", "115200"},
         {"serial.bits", "8"}, {"serial.parity", "None"}, {"serial.stop", "1"}, {"serial.flow", "None"},
         {"client.host", "127.0.0.1"}, {"client.port", 9000}, {"client.timeout", 5000},
-        {"server.address", "127.0.0.1"}, {"server.port", 9000}, {"server.clients", 64},
-        {"udp.address", "127.0.0.1"}, {"udp.port", 9001}, {"udp.target", "127.0.0.1"}, {"udp.targetPort", 9002}};
+        {"server.address", "0.0.0.0"}, {"server.port", 9000}, {"server.clients", 64},
+        {"udp.address", "0.0.0.0"}, {"udp.port", 0}, {"udp.target", ""}, {"udp.targetPort", 9002}};
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it) {
         const auto value = draft.values.value(it.key(), defaults.value(it.key()));
         if (it.key() == "serial.port")
             selectSerialPort(value.toString());
-        else if (auto *combo = qobject_cast<QComboBox *>(it.value()))
+        else if (it.key() == "server.address" || it.key() == "udp.address")
+            selectBindAddress(it.key(), value.toString());
+        else if (auto *combo = qobject_cast<QComboBox *>(it.value())) {
             combo->setCurrentText(value.toString());
-        else if (auto *edit = qobject_cast<QLineEdit *>(it.value()))
+            // setCurrentText() keeps QLineEdit's old horizontal scroll position on some
+            // styles. A preceding 10-digit custom baud rate could therefore make the next
+            // 6-digit preset look as if its first digit had been cut off. Loading a draft is
+            // not an editing gesture, so consistently expose its start.
+            if (auto *lineEdit = combo->lineEdit()) lineEdit->setCursorPosition(0);
+        } else if (auto *edit = qobject_cast<QLineEdit *>(it.value()))
             edit->setText(value.toString());
         else if (auto *spin = qobject_cast<QSpinBox *>(it.value())) {
             bool ok = false;
@@ -745,6 +926,8 @@ PortDraft PortSelectorWidget::draft() const
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it) {
         if (it.key() == "serial.port")
             result.values.insert(it.key(), m_serialPorts->currentData().toString());
+        else if (it.key() == "server.address" || it.key() == "udp.address")
+            result.values.insert(it.key(), qobject_cast<QComboBox *>(it.value())->currentData().toString());
         else if (auto *combo = qobject_cast<QComboBox *>(it.value()))
             result.values.insert(it.key(), combo->currentText());
         else if (auto *edit = qobject_cast<QLineEdit *>(it.value()))
@@ -772,8 +955,10 @@ void PortSelectorWidget::updateValidation()
         auto *field = m_fields.value(key);
         const auto *combo = qobject_cast<QComboBox *>(field);
         const auto *edit = combo ? combo->lineEdit() : qobject_cast<QLineEdit *>(field);
-        if (optional && edit->text().isEmpty()) return;
-        if (edit->text().trimmed().isEmpty() || !edit->hasAcceptableInput()) errors.insert(field, message);
+        const QString text = combo && !combo->isEditable() ? combo->currentData().toString()
+                                                             : edit ? edit->text() : QString();
+        if (optional && text.trimmed().isEmpty()) return;
+        if (text.trimmed().isEmpty() || (edit && !edit->hasAcceptableInput())) errors.insert(field, message);
     };
     switch (m_type->currentData().toInt()) {
     case 0:
@@ -791,11 +976,11 @@ void PortSelectorWidget::updateValidation()
         break;
     }
     case 2:
-        requireText("server.address", tr("本地地址：请输入有效的 IPv4 地址"));
+        requireText("server.address", tr("监听网卡：请选择可用的 IPv4 地址"));
         break;
     case 3:
-        requireText("udp.address", tr("本地地址：请输入有效的 IPv4 地址"));
-        requireText("udp.target", tr("目标地址：请输入有效的 IPv4 地址；仅接收时可留空"), true);
+        requireText("udp.address", tr("监听网卡：请选择可用的 IPv4 地址"));
+        requireText("udp.target", tr("发送目标：请输入有效的 IPv4 地址；仅接收时可留空"), true);
         break;
     }
     // 组帧校验与类型无关：结束符模式必须给出可解析且非空的结束符。
@@ -829,7 +1014,8 @@ void PortSelectorWidget::updateValidation()
         if (invalid) messages.append(errors.value(field));
     };
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it)
-        apply(it.value(), it.value() == m_serialPorts ? m_serialPorts->currentText() : QString());
+        apply(it.value(), it.value() == m_serialPorts ? m_serialPorts->currentText()
+                                                       : it.value()->property("helpToolTip").toString());
     apply(m_framingDelimiter, QString());
     m_validationError = messages.join('\n');
     // 动作按钮：配置有效才可打开；已打开时保持可点（用于关闭/取消）。

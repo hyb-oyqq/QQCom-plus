@@ -18,6 +18,10 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $major = [int]$manifest.major
 $minor = [int]$manifest.minor
 $patch = [int]$manifest.patch
+$product = [string]$manifest.product
+if ($product -notmatch '^[A-Za-z][A-Za-z0-9]*$') {
+    throw "Invalid product name in version manifest: $product"
+}
 
 switch ($Mode) {
     "major" {
@@ -45,18 +49,18 @@ $version = "$major.$minor.$patch"
 $timestamp = Get-Date -Format "yyyyMMddHHmm"
 $buildText = "v$version Build:$timestamp"
 $header = @"
-#ifndef EASYDEBUG_VERSION_H
-#define EASYDEBUG_VERSION_H
+#ifndef QQCOM_VERSION_H
+#define QQCOM_VERSION_H
 
-#define EASYDEBUG_VERSION_MAJOR $major
-#define EASYDEBUG_VERSION_MINOR $minor
-#define EASYDEBUG_VERSION_PATCH $patch
-#define EASYDEBUG_VERSION_STR "$version"
-#define EASYDEBUG_BUILD_TIMESTAMP "$timestamp"
-#define EASYDEBUG_BUILD_STR "$buildText"
-#define EASYDEBUG_APP_TITLE "easyDebug $buildText"
+#define QQCOM_VERSION_MAJOR $major
+#define QQCOM_VERSION_MINOR $minor
+#define QQCOM_VERSION_PATCH $patch
+#define QQCOM_VERSION_STR "$version"
+#define QQCOM_BUILD_TIMESTAMP "$timestamp"
+#define QQCOM_BUILD_STR "$buildText"
+#define QQCOM_APP_TITLE "$product $buildText"
 
-#endif // EASYDEBUG_VERSION_H
+#endif // QQCOM_VERSION_H
 "@
 
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)

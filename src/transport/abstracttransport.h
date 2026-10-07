@@ -16,7 +16,7 @@
 // 的字节数——对 TCP/串口这只代表进入发送缓冲，不代表对端已收到。
 //
 // 会话代次（generation）：端点每重新打开/替换实例自增一次。所有事件都
-// 携带发出时的代次，上层据此丢弃旧实例的残留回调（ARCHITECTURE §5.2）。
+// 携带发出时的代次，上层据此丢弃旧实例的残留回调。
 class AbstractTransport : public QObject
 {
     Q_OBJECT

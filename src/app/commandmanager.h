@@ -33,8 +33,8 @@ public:
 
     // 导入导出
     bool exportToFile(const QString &filePath, const CommandFormats::Format format,
-                     const QList<CommandSet> &sets, const QString &errorMessage);
-    bool importFromFile(const QString &filePath, QString &errorMessage, QString *importedSetName = nullptr);
+                     const QList<CommandSet> &sets, QString &errorMessage);
+    bool importFromFile(const QString &filePath, QString &errorMessage, QString *detectedLabel = nullptr);
 
     // 撤销重做（操作快照）
     void pushSnapshot();
@@ -49,7 +49,6 @@ signals:
 
 private:
     explicit CommandManager(QObject *parent = nullptr);
-    static CommandManager *s_instance;
 
     QList<CommandSet> m_sets;
     QStack<QList<CommandSet>> m_undoStack;  // 最多10步

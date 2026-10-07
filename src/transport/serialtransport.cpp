@@ -2,7 +2,7 @@
 
 namespace {
 
-// 每目标 Qt 读写缓冲上限，与 ARCHITECTURE §7 的窗口预算一致：
+// 每目标 Qt 读写缓冲上限：
 // 读侧有限缓冲让无数据消费时形成背压；写侧有限缓冲让 write() 在
 // 设备/驱动来不及消化时返回部分接受，而不是把滞留藏进无界队列。
 constexpr qint64 SerialReadBufferBytes = 256 * 1024;

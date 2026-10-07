@@ -12,6 +12,8 @@ class PreferencesStore final : public QObject
     Q_OBJECT
 public:
     explicit PreferencesStore(QObject *parent = nullptr, const QString &fileName = {});
+    // Copy once on a product rename; never overwrite a target or modify the source.
+    static bool migrateLegacyFile(const QString &source, const QString &target, QString *error = nullptr);
     QStringList addressHistory(bool localAddress) const;
     void rememberAddress(const QString &address, bool localAddress);
     static constexpr int MaxAddressHistory = 20;

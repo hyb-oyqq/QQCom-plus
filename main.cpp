@@ -77,9 +77,9 @@ bool parseAutoOpenEndpoint(const QString &spec, PortDraft *out)
 int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
-    a.setApplicationName("easyDebug");
-    a.setOrganizationName("easyDebug");
-    a.setApplicationVersion(QStringLiteral(EASYDEBUG_VERSION_STR));
+    a.setApplicationName("QQCom");
+    a.setOrganizationName("QQCom");
+    a.setApplicationVersion(QStringLiteral(QQCOM_VERSION_STR));
     a.setStyle("Fusion");
     // 程序主图标（用户钦定 ActionResponse.ico）：exe 内嵌资源（RC_ICONS）管资源管理器，
     // 这行管运行中的窗口与任务栏——两处必须指向同一个图标，否则对不上。
@@ -89,7 +89,7 @@ int main(int argc, char *argv[])
         a.setStyleSheet(QString::fromUtf8(stylesheet.readAll()));
 
     QCommandLineParser parser;
-    parser.setApplicationDescription("easyDebug UI preview");
+    parser.setApplicationDescription("QQCom communication workbench");
     parser.addHelpOption();
     parser.addOption({"sample", "Show clearly labelled example traffic."});
     parser.addOption({"routes", "Show the forwarding rule editor."});
@@ -107,7 +107,7 @@ int main(int argc, char *argv[])
     QTranslator translator;
     const QStringList uiLanguages = QLocale::system().uiLanguages();
     for (const QString &locale : uiLanguages) {
-        const QString baseName = "easyDebug_" + QLocale(locale).name();
+        const QString baseName = "QQCom_" + QLocale(locale).name();
         if (translator.load(":/i18n/" + baseName)) {
             a.installTranslator(&translator);
             break;

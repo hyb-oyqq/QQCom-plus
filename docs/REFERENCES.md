@@ -1,35 +1,28 @@
-# 参考工程总索引
+# QQCom 参考来源
 
-easyDebug 的设计对照了四个参考工程。本文档是它们的入口索引；细节分析见各自的专项文档。
+以下为历史源码阅读所得的设计参考，不能当作 QQCom 的功能清单。原工程及文件指纹保留名称和内容，不随产品改名修改。
 
-| 工程 | 平台 | 来源 | 专项文档 | 主要借鉴维度 |
-| --- | --- | --- | --- | --- |
-| debugTool | Qt Widgets / C++17（qmake） | 本地工作区 `D:/AWork/myself/QTProject/debugTool` | [REFERENCE_REVIEW.md](REFERENCE_REVIEW.md) | 端口抽象与工厂、多类型端口参数页、主从转发、50ms 批量刷新 |
-| YmodemTool | Qt Widgets / C++23（qmake） | 本地工作区 `D:/AWork/myself/QTProject/YmodemTool` | [REFERENCE_REVIEW.md](REFERENCE_REVIEW.md) | 协议状态机与链路分离、指令历史、转义发送、Ymodem 移植说明 |
-| BLE 调试工具 | iOS / Swift / SwiftUI | https://gitee.com/qinjmin/ble-debug-tool-ios.git | [REFERENCE_BLE_TOOL.md](REFERENCE_BLE_TOOL.md) | 消息模型、过滤分类、显示设置开关、接收组帧、发送历史、日志导出 |
-| Serial Studio | Qt 6.9（Widgets + QML）/ C++20（CMake） | https://github.com/Serial-Studio/Serial-Studio | [REFERENCE_SERIAL_STUDIO.md](REFERENCE_SERIAL_STUDIO.md) | 分层治理与构建期校验、驱动抽象、环形缓冲帧提取与计数、控制台文本与终端缓冲、发送预设、记录校验 |
+| 来源 | 阅读基线 | 借鉴范围 |
+| --- | --- | --- |
+| 本地 `debugTool` | 2026-10-01，HEAD `d391e82`，含当时工作区修改 | 多类型端口参数行、端口工厂、批量显示和错误处理教训 |
+| 本地 `YmodemTool` | 2026-10-01，HEAD `2c2ca24`，含当时工作区修改 | 协议状态机与链路分离、转义发送；YMODEM 未迁入 |
+| [BLE 调试工具](https://gitee.com/qinjmin/ble-debug-tool-ios.git) | 2026-10-02 阅读，`0af321c536e6d640ab12388ae27f5ad7396f8c62` | 日志分类、显示开关、过滤、10 ms 空闲/300 字节兜底、快捷指令文件语义 |
+| [Serial Studio](https://github.com/Serial-Studio/Serial-Studio) | 2026-10-03 阅读，`70aeb505f1001789a182a0c5c82f9c0d1e987637` | 分层、帧提取、缓冲计数、文本性能和验证方法 |
 
-## 按需求找参考
+两个本地参考工程原位于本仓库上级工程目录，仓库构建不依赖它们。精确阅读文件及 SHA-256 见 [reference-snapshot.csv](reference-snapshot.csv)，指纹反映当时工作区内容，不保证等同 HEAD 的所有文件。
 
-| 要做的事 | 先看 |
-| --- | --- |
-| 消息字段、日志行显示要素、显示开关 | REFERENCE_BLE_TOOL.md §3–4（模型/开关对照表） |
-| 过滤分类与关键词搜索 | REFERENCE_BLE_TOOL.md §4；实现以 `TrafficFilter` 为准 |
-| 字节流组帧、分包/粘包 | REFERENCE_BLE_TOOL.md §5；配置结构 `src/domain/receiveframing.h` |
-| 端口抽象、参数页布局、转发 | REFERENCE_REVIEW.md §3（可复用思路表） |
-| 协议解析、文件传输（YMODEM） | REFERENCE_REVIEW.md §3 + YmodemTool 源码 |
-| 发送历史、快捷命令、记录导出 | REFERENCE_BLE_TOOL.md §6（尚未借鉴清单） |
-| 分层约束、构建期依赖校验 | REFERENCE_SERIAL_STUDIO.md §3（七层静态库 + layer-verify） |
-| 帧提取、溢出/丢帧/校验计数 | REFERENCE_SERIAL_STUDIO.md §6（FrameReader + CircularBuffer） |
-| 文本视图性能、行状态机、HEX 渲染 | REFERENCE_SERIAL_STUDIO.md §7（TextFormat、批量刷屏、scrollback） |
-| 速率/丢弃/摘要计数、拥塞治理 | REFERENCE_SERIAL_STUDIO.md §8（LinkStats、ParseBudget） |
-| 循环发送、命令预设、校验和 | REFERENCE_SERIAL_STUDIO.md §9（SendLibrary） |
-| 入站分路、桥接写路径 | REFERENCE_SERIAL_STUDIO.md §10（DeviceIoRouter） |
-| 记录格式与完整性校验 | REFERENCE_SERIAL_STUDIO.md §12（Sessions/Verifier） |
+## 保留的设计结论
 
-## 约定
+- 通信实现不继承 QWidget；配置控件和 I/O 对象分离。
+- 端口类型用稳定枚举和 itemData 表达，不靠翻译文字或下拉位置识别。
+- TCP 消息必须保留 peer 身份，UDP 必须保留来源及数据报边界。
+- UDP 收到数据不自动创建连接或切换发送目标。
+- 过滤和显示从原始消息派生；缓存上限不能代替入口背压。
+- 字节编码严格校验；本地 write 接受量不是对端确认，部分写入需独立设计。
+- 借鉴状态机、批量刷新和验证方法，不照搬参考工程的全局对象或框架规模。
 
-- 两个本地工程与两个远端仓库都保持原状，不修改、不进入本项目工作区；远端仓库按需重新克隆。
-- 迁入任何参考语义或代码时，提交说明记录来源工程、路径与文件指纹；指纹登记在 [reference-snapshot.csv](reference-snapshot.csv)。
-- 参考工程是"产品语义与教训来源"，不是代码基座：easyDebug 的分层（domain/transport/ui）、严格编码、有界队列等关键决策不因参考而回退。
-- Serial Studio 为 GPL-3.0-or-later / 商业双许可：只借鉴设计结论与验证手段，不复制实现；引入其任何代码前须单独评估许可。
+## 许可与追溯
+
+Serial Studio 为 GPL-3.0-or-later / 商业双许可，本项目只借鉴设计结论与验证方法；如引入代码必须另行核对许可。BLE 工程为不同技术栈，参考交互与数据语义，不迁移 Swift 实现。图标主要使用 Material Design Icons（Apache-2.0）；保留资源中的原有来源/许可注释。应用主图标保持现有资源。
+
+历史三个专项参考报告已合并到本文。需要逐文件对照分析时可通过 Git 历史读取旧报告；不会为合并文档改写外部源码指纹。

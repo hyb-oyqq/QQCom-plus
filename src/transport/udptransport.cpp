@@ -29,7 +29,8 @@ void UdpTransport::start(const PortDraft &draft, quint64 generation)
         return;
     }
 
-    // 目标地址可留空：仅接收（界面与校验规则同此约定）。
+    // 目标地址可留空：仅接收。收到的数据报不隐式改变目的地址，避免任意来源
+    // 在用户不知情时接管后续发送。
     const auto targetText = draft.values.value(QStringLiteral("udp.target")).toString().trimmed();
     const int targetPort = draft.values.value(QStringLiteral("udp.targetPort"), 0).toInt();
     if (!targetText.isEmpty()) {
@@ -54,9 +55,9 @@ void UdpTransport::start(const PortDraft &draft, quint64 generation)
         return;
     }
     const auto targetSuffix = m_targetPort != 0
-        ? tr(" → 发往 %1:%2").arg(m_targetAddress.toString()).arg(m_targetPort)
-        : tr("（仅接收）");
-    emit stateChanged(m_generation, int(Transport::State::Open), tr("绑定 %1:%2%3")
+        ? tr(" → 发送目标 %1:%2").arg(m_targetAddress.toString()).arg(m_targetPort)
+        : tr("；未设置发送目标：仅接收，收到数据报不会建立连接或自动回发");
+    emit stateChanged(m_generation, int(Transport::State::Open), tr("监听 %1:%2%3")
         .arg(m_socket->localAddress().toString())
         .arg(m_socket->localPort())
         .arg(targetSuffix));

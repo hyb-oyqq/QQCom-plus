@@ -6,11 +6,7 @@
 #include <QUuid>
 
 class QComboBox;
-class QLineEdit;
 class QPushButton;
-class QSpinBox;
-class QTabWidget;
-class QTimer;
 class QVBoxLayout;
 class CommandTableWidget;
 class PreferencesStore;
@@ -39,25 +35,20 @@ signals:
     // 由发送区唯一持有（见 SendPanel::targetMask）。这里再多一个目标参数就等于
     // 给同一件事留了第二个来源，迟早出现"快捷按钮发错了口"。
     void sendCommand(const CommandItem &command);
-    void batchSendRequested(const QStringList &commands, const QList<int> &delays, int targetEndpoint);
     void expandedChanged(bool expanded);  // 展开/折叠状态改变时发出
 
 private slots:
     void onCurrentSetChanged(int index);
     void onAddSetClicked();
     void onRemoveSetClicked();
-    void onNotesClicked();
-    void onUndoClicked();
-    void onRedoClicked();
+    void onRenameSetClicked();
     void onImportClicked();
     void onExportClicked();
     void onCommandsChanged();
     void onSendCommand(const CommandItem &cmd);
     // rows 与 commands 一一对应且同序：时序与进度都在这一个函数里排，两边不会错开。
     void onBatchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands);
-    void onPeriodicSendTimeout();
     void refreshSetComboBox();
-    void refreshUndoRedoButtons();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -76,21 +67,12 @@ private:
     QComboBox *m_setComboBox = nullptr;
     QPushButton *m_addSetButton = nullptr;
     QPushButton *m_removeSetButton = nullptr;
-    QPushButton *m_notesButton = nullptr;
-    QPushButton *m_undoButton = nullptr;
-    QPushButton *m_redoButton = nullptr;
+    QPushButton *m_renameSetButton = nullptr;
     QPushButton *m_importButton = nullptr;
     QPushButton *m_exportButton = nullptr;
-    QPushButton *m_expandButton = nullptr;
 
-    QTabWidget *m_tabs = nullptr;
     CommandTableWidget *m_commandTable = nullptr;
-    CommandTableWidget *m_initTable = nullptr;
-    CommandTableWidget *m_periodicTable = nullptr;
 
-    QTimer *m_periodicTimer = nullptr;
-    QSpinBox *m_periodicInterval = nullptr;
-    QPushButton *m_startPeriodicButton = nullptr;
 
     PreferencesStore *m_preferences = nullptr;
     bool m_expanded = true;

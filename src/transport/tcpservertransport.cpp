@@ -2,6 +2,7 @@
 
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <utility>
 
 namespace {
 // 每客户端读缓冲上限，与串口/TCP 客户端一致：客户端只发不收时，
@@ -17,6 +18,7 @@ TcpServerTransport::TcpServerTransport(int endpointIndex, QObject *parent)
 
 void TcpServerTransport::start(const PortDraft &draft, quint64 generation)
 {
+    stop();
     m_draft = draft;
     m_generation = generation;
 
@@ -54,18 +56,21 @@ void TcpServerTransport::start(const PortDraft &draft, quint64 generation)
 
 void TcpServerTransport::stop()
 {
-    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+    // disconnectFromHost 可同步发 disconnected；先移走容器并断开回调，
+    // 避免 detachPeer 在遍历过程中删除当前迭代器。
+    const auto peers = std::exchange(m_peers, {});
+    for (auto it = peers.cbegin(); it != peers.cend(); ++it) {
+        it.key()->disconnect(this);
         it.key()->disconnectFromHost();
         it.key()->deleteLater();
     }
-    m_peers.clear();
     if (m_server)
         m_server->close();
 }
 
 qint64 TcpServerTransport::write(const QByteArray &payload, const QUuid &peerId)
 {
-    if (!m_server || !m_server->isListening())
+    if (!m_server || !m_server->isListening() || m_peers.isEmpty())
         return -1;
     qint64 accepted = 0;
     if (!peerId.isNull()) {
@@ -87,10 +92,7 @@ void TcpServerTransport::acceptPending()
 {
     while (m_server && m_server->hasPendingConnections()) {
         auto *socket = m_server->nextPendingConnection();
-        // 改挂到传输对象上：nextPendingConnection 默认把 socket 认 QTcpServer 作父，
-        // 而断开/stop 时我们又对它 deleteLater——两条销毁路径会在关闭后打架
-        // （父析构删一遍、队列里的 deleteLater 再删一遍）。归属收敛到本对象后，
-        // deleteLater 与父子析构互斥，不会有悬空事件。
+        // 连接归传输对象管理，独立于监听器的重新创建。
         socket->setParent(this);
         if (m_peers.size() >= m_maxClients) {
             // 超出上限立即拒绝；连接里的待处理字节随断开丢弃，不假装收下了。
@@ -116,11 +118,7 @@ void TcpServerTransport::acceptPending()
         // socket 断开后的 errorOccurred 只属于这个已detach 的对象，无需单独处理；
         // 销毁交给 disconnected 里的 deleteLater。
         m_peers.insert(socket, peer);
-        QList<Transport::PeerInfo> peers;
-        peers.reserve(m_peers.size());
-        for (auto pit = m_peers.cbegin(); pit != m_peers.cend(); ++pit)
-            peers.append(Transport::PeerInfo{pit.value().id, pit.value().address});
-        emit peerListChanged(m_generation, peers);
+        publishPeers();
     }
 }
 
@@ -135,6 +133,11 @@ void TcpServerTransport::detachPeer(QTcpSocket *socket)
     m_peers.remove(socket);
     socket->deleteLater();
     emit errorOccurred(m_generation, tr("客户端 %1 已断开").arg(address));
+    publishPeers();
+}
+
+void TcpServerTransport::publishPeers()
+{
     QList<Transport::PeerInfo> peers;
     peers.reserve(m_peers.size());
     for (auto pit = m_peers.cbegin(); pit != m_peers.cend(); ++pit)

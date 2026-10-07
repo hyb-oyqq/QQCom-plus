@@ -16,12 +16,7 @@
 // 派生文本一律现算，不写回消息。这样切换显示格式、增删显示列都不会改动数据本身，
 // 也不会让两条同样的消息因为显示设置不同而无法比较。
 //
-// 与 ARCHITECTURE.md §3 的 IngressFrame / TrafficEvent 的关系：二者在实现上
-// 合成本类型。IngressFrame 描述"来源侧发生了什么"，是 Source + 时间 + raw +
-// 关联 id；TrafficEvent 描述"这条记录该怎么被看到"，是 direction/origin/
-// state/framing/statusText。首版工作区只有 A/B 两个端点、显示即事实，拆成两个
-// 类型只会让每个消费者都要同时持有两者；等 ProtocolInspectorPage 引入
-// 解析结果（字段树、错误定位）时再拆，此时解析结果是第三个独立维度。
+// 来源、时间、原始字节与展示事件共用此类型；当前消费者需要这些信息一起传递。
 
 namespace Traffic {
 

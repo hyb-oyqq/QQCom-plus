@@ -23,6 +23,7 @@ public:
 private:
     void acceptPending();
     void detachPeer(QTcpSocket *socket);
+    void publishPeers();
 
     struct Peer
     {

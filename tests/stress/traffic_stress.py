@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""easyDebug 发压脚本（仅标准库）。
+"""QQCom 发压脚本（仅标准库）。
 
-按固定或线性爬升速率向 easyDebug 端点发送可复现报文，结束时打印
-总发送条数 / 字节数 / 实际速率，用于与 easyDebug 的 RX 计数对账判断丢数。
+按固定或线性爬升速率向 QQCom 端点发送可复现报文，结束时打印
+总发送条数 / 字节数 / 实际速率，用于与 QQCom 的 RX 计数对账判断丢数。
 
 每条报文布局：<8 字节递增序号><8 字节毫秒时间戳><填充>（共 --size 字节）。
 序号从 0 单调递增，接收端据此数出"丢了几条、丢在哪"；时间戳保留到达时刻，
-方便与 easyDebug 侧的接收时间比对。填充字节由序号派生，同一条报文每次重放一致。
+方便与 QQCom 侧的接收时间比对。填充字节由序号派生，同一条报文每次重放一致。
 
 用法示例：
   python traffic_stress.py --proto tcp --host 127.0.0.1 --port 5000 \
@@ -35,7 +35,7 @@ def build_packet(seq: int, size: int) -> bytes:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="easyDebug 发压脚本（TCP/UDP）")
+    parser = argparse.ArgumentParser(description="QQCom 发压脚本（TCP/UDP）")
     parser.add_argument("--proto", choices=("tcp", "udp"), required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)

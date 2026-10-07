@@ -78,7 +78,6 @@ signals:
 
 private:
     void notifyChanged();
-    void refreshValidation();
     void refreshReset();
     QLineEdit *makeInput(const QString &iconPath, const QString &placeholder, const QString &tip,
         const QString &objectName);

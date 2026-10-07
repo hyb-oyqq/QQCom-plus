@@ -7,10 +7,12 @@
 #include "ui/panels/traffic/trafficpanel.h"
 #include "ui/panels/commands/commandpanel.h"
 #include "ui/common/payloadcodec.h"
+#include "ui/common/bytesformat.h"
 #include "discovery/portdiscoveryservice.h"
 #include "persistence/preferencesstore.h"
 
 #include <QCloseEvent>
+#include <QCoreApplication>
 #include <QFile>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -68,19 +70,6 @@ PortDraft draftFromVariant(const QVariantMap &m)
     return d;
 }
 
-// 状态栏字节数：KB/MB 用一位小数，B 保持整数——速率栏要的是"一眼量级"。
-// 自由函数没有 this 上下文，tr 用 QObject 的全局语境。
-QString formatBytes(qint64 bytes)
-{
-    if (bytes >= 1024 * 1024 * 1024)
-        return QString::number(double(bytes) / (1024.0 * 1024.0 * 1024.0), 'f', 2) + QObject::tr(" GB");
-    if (bytes >= 1024 * 1024)
-        return QString::number(double(bytes) / (1024.0 * 1024.0), 'f', 1) + QObject::tr(" MB");
-    if (bytes >= 1024)
-        return QString::number(double(bytes) / 1024.0, 'f', 1) + QObject::tr(" KB");
-    return QString::number(bytes) + QObject::tr(" B");
-}
-
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
@@ -88,7 +77,7 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
-    setWindowTitle(QStringLiteral(EASYDEBUG_APP_TITLE) + tr(" · 通信调试工作台"));
+    setWindowTitle(QStringLiteral(QQCOM_APP_TITLE) + tr(" · 通信调试工作台"));
     setMinimumSize(900, 720);  // 宽度的真实下限由内容决定（见 updateWindowMinimumWidth），这里只兜底
     resize(1440, 920);
     ui->menubar->hide();
@@ -175,6 +164,8 @@ MainWindow::MainWindow(QWidget *parent)
     // 监视区摘要放主窗口状态栏：条数是全局信息，不该占用显示区的纵向空间。
     connect(m_traffic, &TrafficPanel::summaryChanged, this,
         [this](const QString &text) { m_trafficStatus->setText(text); });
+    connect(m_traffic, &TrafficPanel::performanceChanged, this,
+        [this](const QString &text) { m_trafficStatus->setToolTip(text); });
     dataSplitter->addWidget(m_traffic);
     dataSplitter->addWidget(m_sender);
     // 显示区承载更多内容：发送区正文固定约三行、贴着自身内容高度，
@@ -422,8 +413,11 @@ MainWindow::~MainWindow()
     // 先停 I/O 线程再拆 UI：运行时析构在 I/O 线程内完成，端口关闭
     // 不需要 GUI 参与，也就不会出现退出时的竞态。
     if (m_ioThread) {
+        QMetaObject::invokeMethod(m_runtime, &EndpointRuntime::shutdown, Qt::BlockingQueuedConnection);
         m_ioThread->quit();
         m_ioThread->wait();
+        // I/O 已停止，处理关闭前排队的尾帧，再让监视面板结束日志记录。
+        QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
     }
     delete ui;
 }
@@ -498,6 +492,7 @@ void MainWindow::autoOpenEndpoint(const PortDraft &draft)
 
 void MainWindow::handleEndpointState(int index, int state, const QString &detail)
 {
+    Q_UNUSED(detail);
     if (index < 0 || index >= m_selectors.size()) return;
     m_endpointStates[index] = Transport::State(state);
     m_selectors.at(index)->setConnectionOpen(state == int(Transport::State::Open));
@@ -604,7 +599,12 @@ void MainWindow::updateEndpointStatus()
         case Transport::State::Open:
             if (kind == PortDraft::TcpServer)
                 return tr("监听中 · %1 个客户端").arg(m_endpointPeers[index].size());
-            return kind == PortDraft::Udp ? tr("已绑定") : tr("已连接");
+            if (kind == PortDraft::Udp) {
+                const int sources = m_endpointPeers[index].size();
+                return sources == 0 ? tr("已绑定")
+                                    : tr("已绑定 · %1 个来源").arg(sources);
+            }
+            return tr("已连接");
         case Transport::State::Closed:
             break;
         }

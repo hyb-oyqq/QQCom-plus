@@ -27,6 +27,7 @@
 #include <QFileInfo>
 #include <QHash>
 #include <QImage>
+#include <QInputDialog>
 #include <QInputMethodEvent>
 #include <QLineEdit>
 #include <QLabel>
@@ -51,6 +52,7 @@
 #include <QTextBlock>
 #include <QTextFragment>
 #include <QToolButton>
+#include <QTimer>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -759,6 +761,56 @@ private slots:
         QCOMPARE(broadcast.count(), 0);
     }
 
+    void renamingACommandSetKeepsItsContents()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1400, 800);
+        window.show();
+        QTest::qWait(30);
+
+        auto *panel = window.findChild<CommandPanel *>();
+        auto *selector = panel ? panel->findChild<QComboBox *>() : nullptr;
+        auto *rename = panel ? panel->findChild<QPushButton *>(QStringLiteral("renameCommandSet"))
+                             : nullptr;
+        QVERIFY(panel && selector && rename);
+        QCOMPARE(rename->text(), QStringLiteral("重命名"));
+
+        const QUuid setId = selector->currentData().toUuid();
+        QVERIFY(!setId.isNull());
+        CommandSet before = CommandManager::instance()->getSet(setId);
+        before.name = QStringLiteral("原分组名称");
+        before.notes = QStringLiteral("保留的备注");
+        CommandItem command;
+        command.content = QStringLiteral("AT+RST");
+        command.description = QStringLiteral("重启");
+        before.commands = {command};
+        CommandManager::instance()->updateSet(setId, before);
+        QTRY_COMPARE(selector->currentText(), before.name);
+
+        const QString renamed = QStringLiteral("生产线 A");
+        bool dialogAccepted = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = qobject_cast<QInputDialog *>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            dialog->setTextValue(renamed);
+            dialog->accept();
+            dialogAccepted = true;
+        });
+        rename->click();
+        QVERIFY(dialogAccepted);
+
+        const CommandSet after = CommandManager::instance()->getSet(setId);
+        QCOMPARE(after.id, before.id);
+        QCOMPARE(after.name, renamed);
+        QCOMPARE(after.notes, before.notes);
+        QCOMPARE(after.commands.size(), 1);
+        QCOMPARE(after.commands.first().content, command.content);
+        QCOMPARE(after.commands.first().description, command.description);
+        QCOMPARE(selector->currentText(), renamed);
+    }
+
     // ★ 快捷指令的发送必须真的到达运行时。
     //
     // 早先 MainWindow::handleCommandSend 调的是 EndpointRuntime 的 "write" 槽，
@@ -1297,14 +1349,9 @@ private slots:
         selector.setDraft(port);
         QVERIFY(!selector.hasValidConfiguration());
         auto *address = selector.findChild<QComboBox *>("server.address");
-        address->setEditText("192.168.1.20");
+        QVERIFY(!address->isEditable());
+        address->setCurrentIndex(address->findData(QStringLiteral("0.0.0.0")));
         QVERIFY(selector.hasValidConfiguration());
-        address->lineEdit()->selectAll();
-        QApplication::clipboard()->setText("192.168.foo.1");
-        address->lineEdit()->paste();
-        QCOMPARE(address->currentText(), QString("192.168.1.20"));
-        address->setEditText("192.168.");
-        QVERIFY(!selector.hasValidConfiguration());
         port.kind = 1;
         port.values.insert("client.host", "device-1.example.com");
         selector.setDraft(port);
@@ -1334,6 +1381,137 @@ private slots:
         port.values.insert("udp.target", ""); // Receive-only UDP remains valid.
         selector.setDraft(port);
         QVERIFY(selector.hasValidConfiguration());
+    }
+
+    void editableBaudRateUsesTheWholeComboEditField()
+    {
+        PortSelectorWidget selector;
+        PortDraft port;
+        port.values.insert(QStringLiteral("serial.port"), QStringLiteral("COM3"));
+        port.values.insert(QStringLiteral("serial.baud"), QStringLiteral("2147483647"));
+        selector.setDraft(port);
+        selector.show();
+
+        auto *baud = selector.findChild<QComboBox *>(QStringLiteral("serial.baud"));
+        QVERIFY(baud);
+        auto *edit = baud->lineEdit();
+        QVERIFY(edit);
+        edit->setFocus();
+        edit->setCursorPosition(edit->text().size());
+        QCoreApplication::processEvents();
+
+        const auto editFieldWidth = [baud] {
+            QStyleOptionComboBox option;
+            option.initFrom(baud);
+            option.currentText = baud->currentText();
+            return baud->style()->subControlRect(
+                QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxEditField, baud).width();
+        };
+        QVERIFY2(editFieldWidth() >= edit->fontMetrics().horizontalAdvance(edit->text()),
+                 "The editable baud-rate field must fit the longest legal value");
+
+        // A preset loaded after a longer custom value must reset the embedded editor's
+        // horizontal scroll. The first digit of 921600 was previously hidden in this path.
+        port.values.insert(QStringLiteral("serial.baud"), QStringLiteral("2000000"));
+        selector.setDraft(port);
+        QCoreApplication::processEvents();
+        QCOMPARE(edit->text(), QStringLiteral("2000000"));
+        QVERIFY2(editFieldWidth() >= edit->fontMetrics().horizontalAdvance(edit->text()),
+                 "The editable baud-rate field must fit 2000000");
+
+        port.values.insert(QStringLiteral("serial.baud"), QStringLiteral("921600"));
+        selector.setDraft(port);
+        QCoreApplication::processEvents();
+        QCOMPARE(edit->text(), QStringLiteral("921600"));
+        QCOMPARE(edit->cursorPosition(), 0);
+
+        // The embedded editor must not retain the generic line-edit frame/padding. Otherwise
+        // Qt may scroll the text left even when the combo still has visibly unused space.
+        QCOMPARE(edit->textMargins(), QMargins());
+        QVERIFY(edit->contentsRect().width() >= edit->fontMetrics().horizontalAdvance(edit->text()));
+    }
+
+    void localBindingsUseInterfacePickerAndAutoPort()
+    {
+        PortSelectorWidget selector;
+        PortDraft port;
+        port.kind = PortDraft::Udp;
+        port.values.insert("udp.target", "");
+        selector.setDraft(port);
+
+        auto *bindAddress = selector.findChild<QComboBox *>("udp.address");
+        auto *bindPort = selector.findChild<QSpinBox *>("udp.port");
+        auto *target = selector.findChild<QComboBox *>("udp.target");
+        QVERIFY(bindAddress && bindPort && target);
+        QVERIFY(!bindAddress->isEditable());
+        QVERIFY(bindAddress->findData(QStringLiteral("0.0.0.0")) >= 0);
+        QCOMPARE(bindAddress->currentData().toString(), QStringLiteral("0.0.0.0"));
+        QCOMPARE(bindPort->minimum(), 0);
+        QCOMPARE(bindPort->value(), 0);
+        QVERIFY(target->isEditable());
+        QVERIFY(target->lineEdit()->placeholderText().contains(QStringLiteral("仅接收")));
+        QVERIFY(bindAddress->toolTip().contains(QStringLiteral("本机 IPv4 网卡")));
+        QVERIFY(selector.hasValidConfiguration());
+        QCOMPARE(selector.draft().values.value("udp.address").toString(), QStringLiteral("0.0.0.0"));
+
+        port = PortDraft{};
+        port.kind = PortDraft::TcpServer;
+        selector.setDraft(port);
+        auto *serverBind = selector.findChild<QComboBox *>("server.address");
+        QVERIFY(serverBind);
+        QVERIFY(!serverBind->isEditable());
+        QVERIFY(serverBind->findData(QStringLiteral("0.0.0.0")) >= 0);
+        QCOMPARE(serverBind->currentData().toString(), QStringLiteral("0.0.0.0"));
+        QVERIFY(serverBind->toolTip().contains(QStringLiteral("本机 IPv4 网卡")));
+        QCOMPARE(selector.draft().values.value("server.address").toString(), QStringLiteral("0.0.0.0"));
+
+        for (int i = 1; i < serverBind->count(); ++i) {
+            const QString address = serverBind->itemData(i).toString();
+            QVERIFY(serverBind->itemText(i).contains(QStringLiteral(" · ")));
+            QVERIFY(serverBind->itemText(i).endsWith(address));
+            QVERIFY(serverBind->itemData(i, Qt::ToolTipRole).toString().contains(QStringLiteral("网卡：")));
+        }
+    }
+
+    void udpSourcesAreVisibleWithoutChangingTheSendTarget()
+    {
+        // 每条 UDP 接收记录都在监视区的 RX 后带上实际来源。
+        TrafficTextView view;
+        TrafficTextView::DisplayOptions options;
+        options.number = false;
+        options.timestamp = false;
+        Traffic::Message message;
+        message.id = 1;
+        message.timestamp = QDateTime::currentDateTime();
+        message.direction = Traffic::Direction::Receive;
+        message.framing = Traffic::Framing::Datagram;
+        message.source.endpointIndex = 0;
+        message.source.endpointKind = PortDraft::Udp;
+        message.source.endpointId = QUuid::createUuid();
+        message.source.peerAddress = QStringLiteral("127.0.0.1:9001");
+        message.raw = QByteArray("ping");
+        message.rawLength = message.raw.size();
+        view.appendMessages({message}, PayloadCodec::Format::Utf8, options);
+        QCOMPARE(view.toPlainText(), QStringLiteral("RX ← 127.0.0.1:9001: ping"));
+
+        // 纯数据模式依旧不添加任何元信息。
+        TrafficTextView pureView;
+        options.pure = true;
+        pureView.appendMessages({message}, PayloadCodec::Format::Utf8, options);
+        QCOMPARE(pureView.toPlainText(), QStringLiteral("ping"));
+
+        PortSelectorWidget selector;
+        PortDraft draft;
+        draft.kind = PortDraft::Udp;
+        draft.values.insert(QStringLiteral("udp.target"), QStringLiteral("192.168.1.10"));
+        selector.setDraft(draft);
+        auto *hint = selector.findChild<QLabel *>(QStringLiteral("udpPeerHint"));
+        QVERIFY(hint);
+        selector.setPeerList({QStringLiteral("127.0.0.1:9001"), QStringLiteral("192.168.1.20:8000")});
+        QCOMPARE(hint->text(), QStringLiteral("本次已收到来自 2 个来源的数据报"));
+        QCOMPARE(hint->toolTip(), QStringLiteral("127.0.0.1:9001\n192.168.1.20:8000"));
+        QCOMPARE(selector.draft().values.value(QStringLiteral("udp.target")).toString(),
+                 QStringLiteral("192.168.1.10"));
     }
 
     void endpointSummaryTracksConfigurationAndType()
@@ -1414,7 +1592,7 @@ private slots:
             draft.values.insert("serial.parity", setting.first);
             QVERIFY(portDraftSummary(draft).contains("7" + setting.second + "2"));
         }
-        const auto artifactDir = qEnvironmentVariable("EASYDEBUG_UI_ARTIFACT_DIR");
+        const auto artifactDir = qEnvironmentVariable("QQCOM_UI_ARTIFACT_DIR");
         if (!artifactDir.isEmpty()) {
             QTest::qWait(30);
             QDir().mkpath(artifactDir);
@@ -1580,6 +1758,32 @@ private slots:
         QCOMPARE(model.record(0).id, id - rowBudget);
     }
 
+    void historyBudgetHandlesOversizedBatch()
+    {
+        TrafficModel model;
+        model.setBudget(5, 3);
+        QList<Traffic::Message> batch;
+        for (int i = 1; i <= 10; ++i) {
+            Traffic::Message message;
+            message.id = i;
+            message.raw = "xy";
+            batch.append(message);
+        }
+        QCOMPARE(model.appendRecords(batch), 8);
+        QCOMPARE(model.rowCount(), 2);
+        QCOMPARE(model.rawBytes(), qint64(4));
+        QCOMPARE(model.record(0).id, quint64(9));
+        QCOMPARE(model.record(1).id, quint64(10));
+        model.setBudget(100, 1);
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.record(0).id, quint64(10));
+        Traffic::Message oversized;
+        oversized.raw = QByteArray(8192, 'x');
+        QCOMPARE(model.appendRecords({oversized}), 2);
+        QCOMPARE(model.rowCount(), 0);
+        QCOMPARE(model.rawBytes(), qint64(0));
+    }
+
     void displayPreferencesPersistAcrossPanels()
     {
         QTemporaryDir directory;
@@ -1612,6 +1816,31 @@ private slots:
                  QStringLiteral("UTF-8"));
         QCOMPARE(secondSender.findChild<QComboBox *>(QStringLiteral("sendFormat"))->currentText(),
                  QStringLiteral("GBK"));
+    }
+
+    void pendingTrafficIsLoggedOnDestruction()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        PreferencesStore store(nullptr, directory.filePath("preferences.ini"));
+        store.setValue("traffic/recordPath", directory.filePath("tail.log"));
+        store.setValue("traffic/record", true);
+        store.setValue("traffic/format", "UTF-8");
+        {
+            TrafficPanel panel;
+            panel.setPreferences(&store);
+            Traffic::Message message;
+            message.timestamp = QDateTime::currentDateTime();
+            message.raw = "pending-at-exit";
+            message.rawLength = message.raw.size();
+            panel.appendMessage(message);
+            // 不推进事件循环，确保这一批尚未进入显示刷新。
+        }
+        const auto paths = QDir(directory.path()).entryList({"tail-*.log"}, QDir::Files);
+        QCOMPARE(paths.size(), 1);
+        QFile file(directory.filePath(paths.first()));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QVERIFY(file.readAll().contains("pending-at-exit"));
     }
 
     void logRecordingFollowsDisplayFormat()
@@ -1647,6 +1876,7 @@ private slots:
         rx.source.endpointIndex = 0;
         rx.source.endpointKind = PortDraft::Serial;
         rx.source.endpointId = QUuid::createUuid();
+        rx.source.peerAddress = QStringLiteral("127.0.0.1:9001");
         rx.raw = QByteArray::fromHex("0102");
         Traffic::Message tx;
         tx.direction = Traffic::Direction::Transmit;
@@ -1664,14 +1894,16 @@ private slots:
         QFile log(logPath);
         QVERIFY(log.open(QIODevice::ReadOnly | QIODevice::Text));
         const auto hexLines = QString::fromUtf8(log.readAll()).trimmed().split(QLatin1Char('\n'));
-        // 首行是新建文件的元信息头：日期时间 + 当前显示格式；其次才是数据行。
-        QCOMPARE(hexLines.size(), 3);
-        QVERIFY2(hexLines.at(0).startsWith(QStringLiteral("# easyDebug")), qPrintable(hexLines.at(0)));
+        // 元信息头后是固定的列名：日志里的 Peer 字段有明确含义。
+        QCOMPARE(hexLines.size(), 4);
+        QVERIFY2(hexLines.at(0).startsWith(QStringLiteral("# QQCom")), qPrintable(hexLines.at(0)));
         QVERIFY(hexLines.at(0).contains(QStringLiteral("格式=HEX")));
-        QVERIFY(hexLines.at(1).contains(QStringLiteral("A · 串口")));
-        QVERIFY(hexLines.at(1).contains(QStringLiteral("RX")));
-        QVERIFY(hexLines.at(1).endsWith(QStringLiteral("01 02"))); // HEX 模式记 HEX
-        QVERIFY(hexLines.at(2).endsWith(QStringLiteral("FF")));
+        QCOMPARE(hexLines.at(1), QStringLiteral("# Time\tPort\tPeer\tDirection\tData"));
+        QVERIFY(hexLines.at(2).contains(QStringLiteral("A · 串口")));
+        QVERIFY(hexLines.at(2).contains(QStringLiteral("127.0.0.1:9001")));
+        QVERIFY(hexLines.at(2).contains(QStringLiteral("RX")));
+        QVERIFY(hexLines.at(2).endsWith(QStringLiteral("01 02"))); // HEX 模式记 HEX
+        QVERIFY(hexLines.at(3).endsWith(QStringLiteral("FF")));
         log.close();
 
         // 切换显示格式后新行跟随新模式：所见即所记；并追加一行"格式切换"元信息。
@@ -1686,11 +1918,11 @@ private slots:
         QTRY_COMPARE(model->rowCount(), 3);
         QVERIFY(log.open(QIODevice::ReadOnly | QIODevice::Text));
         const auto all = QString::fromUtf8(log.readAll()).trimmed().split(QLatin1Char('\n'));
-        // 头 + 2 数据 + 格式切换行 + 1 数据 = 5 行
-        QCOMPARE(all.size(), 5);
-        QVERIFY(all.at(3).contains(QStringLiteral("格式切换")));
-        QVERIFY(all.at(3).contains(QStringLiteral("UTF-8")));
-        QVERIFY(all.at(4).endsWith(QStringLiteral("ok")));
+        // 元信息 + 列名 + 2 数据 + 格式切换行 + 1 数据 = 6 行
+        QCOMPARE(all.size(), 6);
+        QVERIFY(all.at(4).contains(QStringLiteral("格式切换")));
+        QVERIFY(all.at(4).contains(QStringLiteral("UTF-8")));
+        QVERIFY(all.at(5).endsWith(QStringLiteral("ok")));
     }
 
     // 三时刻重开：① 启动恢复记录、② 点「清空」、③ 手动勾选「记录到文件」——每次都
@@ -1759,10 +1991,10 @@ private slots:
             QCOMPARE(file.readAll(), seed); // 模板内容原样：它只提供目录+基名+扩展名
         }
 
-        // ---- C2：新文件首行是元信息头 # easyDebug ... 格式=... ----
+        // ---- C2：新文件首行是元信息头 # QQCom ... 格式=... ----
         QStringList lines = readLines(firstLog);
         QVERIFY(!lines.isEmpty());
-        QVERIFY2(lines.at(0).startsWith(QStringLiteral("# easyDebug ")), qPrintable(lines.at(0)));
+        QVERIFY2(lines.at(0).startsWith(QStringLiteral("# QQCom ")), qPrintable(lines.at(0)));
         QVERIFY2(lines.at(0).contains(QStringLiteral("格式=")), qPrintable(lines.at(0)));
 
         // ---- C3：记录若干条 → 数据行数正确、每行 4 个制表符、且没有额外的 # 行 ----
@@ -1784,7 +2016,7 @@ private slots:
         QTRY_COMPARE(model->rowCount(), 2); // 攒批落地即已写日志
 
         lines = readLines(firstLog);
-        QCOMPARE(lines.size(), 3); // 头 + 2 数据
+        QCOMPARE(lines.size(), 4); // 元信息 + 列名 + 2 数据
         int dataLines = 0;
         int metaLines = 0;
         for (const auto &line : lines) {
@@ -1796,7 +2028,7 @@ private slots:
             QCOMPARE(line.count(QLatin1Char('\t')), 4); // 时间\t端点\t对端\t方向\t载荷
         }
         QCOMPARE(dataLines, 2);
-        QCOMPARE(metaLines, 1); // 记录消息本身不产生 # 行
+        QCOMPARE(metaLines, 2); // 元信息与列名各占一行
 
         // ---- C4：点「清空视图」是会话边界 → 另起一个文件，从头写、开关保持勾选 ----
         QCOMPARE(logFiles().size(), 1);
@@ -1814,13 +2046,14 @@ private slots:
         else
             QVERIFY(secondBase.startsWith(QStringLiteral("traffic-"))); // 跨秒：新时间戳
         const QStringList secondLines = readLines(secondLog);
-        QCOMPARE(secondLines.size(), 1); // 只有头行，清空前的 2 条数据不在其中
-        QVERIFY2(secondLines.at(0).startsWith(QStringLiteral("# easyDebug ")), qPrintable(secondLines.at(0)));
+        QCOMPARE(secondLines.size(), 2); // 元信息 + 列名，清空前的 2 条数据不在其中
+        QVERIFY2(secondLines.at(0).startsWith(QStringLiteral("# QQCom ")), qPrintable(secondLines.at(0)));
+        QCOMPARE(secondLines.at(1), QStringLiteral("# Time\tPort\tPeer\tDirection\tData"));
 
         // ---- C5：切换显示格式 → 当前文件追加一行 # 格式切换 → ... ----
         format->setCurrentText(QStringLiteral("UTF-8"));
         const QStringList afterSwitch = readLines(secondLog);
-        QCOMPARE(afterSwitch.size(), 2); // 头 + 格式切换
+        QCOMPARE(afterSwitch.size(), 3); // 元信息 + 列名 + 格式切换
         QVERIFY2(afterSwitch.last().startsWith(QStringLiteral("# 格式切换 → ")), qPrintable(afterSwitch.last()));
         QVERIFY(afterSwitch.last().contains(QStringLiteral("UTF-8")));
 
@@ -1930,7 +2163,7 @@ private slots:
     // 端点同类错误 3 秒内只弹一次；④ 记录期间状态栏摘要出现当前日志大小，关掉后消失。
     // 打开失败用 TCP 服务器监听一个已被占用的端口制造：listen() 同步失败、立即返回，
     // 不依赖网络栈对"无人监听端口"的延迟（本机对被拒绝连接可能要有秒级 SYN 重试）。
-    void portOpenFailureSurfacesErrorRowAndNonModalPopup()
+    void portOpenFailureSurfacesErrorRowAndStatus()
     {
         clearEndpointDrafts();
         QTemporaryDir directory;
@@ -1956,7 +2189,7 @@ private slots:
         auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
         QVERIFY(b);
         QTcpServer blocker; // 占住端口的"另一个进程"：保持监听，直到本用例结束
-        QVERIFY(blocker.listen(QHostAddress::LocalHost, 0));
+        QVERIFY(blocker.listen(QHostAddress::AnyIPv4, 0));
         const quint16 conflictPort = blocker.serverPort();
         b->findChild<QSpinBox *>(QStringLiteral("server.port"))->setValue(conflictPort);
         auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
@@ -1974,28 +2207,19 @@ private slots:
             qPrintable(text->toPlainText()));
         QVERIFY2(text->toPlainText().contains(QStringLiteral("失败")),
             qPrintable(text->toPlainText()));
-        QVERIFY2(text->toPlainText().contains(QStringLiteral("B · TCP 服务器")),
+        QVERIFY2(text->toPlainText().contains(QStringLiteral("B · ")),
             qPrintable(QStringLiteral("Error 行应带端点标识：") + text->toPlainText()));
         QCOMPARE(errorRows(), 1);
 
-        // 非模态弹窗：标题带端点名、正文带原因；点掉自毁。
-        QMessageBox *notice = nullptr;
-        QTRY_VERIFY((notice = window.findChild<QMessageBox *>()) != nullptr);
-        QVERIFY(!notice->isModal());
-        QVERIFY(notice->windowModality() == Qt::NonModal);
-        QVERIFY2(notice->windowTitle().contains(QStringLiteral("B · TCP")),
-            qPrintable(notice->windowTitle()));
-        QVERIFY2(notice->text().contains(QStringLiteral("监听")), qPrintable(notice->text()));
-        notice->close();
-        delete notice; // 立刻收掉，别让去重窗口（3s）在等待 deleteLater 期间白白流逝
-        QTRY_VERIFY(window.findChildren<QMessageBox *>().isEmpty()); // WA_DeleteOnClose 生效
+        // 当前交互通过日志和状态栏报错，不弹窗打断调试。
+        QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
 
         // 状态栏短消息同样带端点标识——读状态栏右端的临时提示格 StatusNote，
         // 不再是 statusBar()->currentMessage()：后者（showMessage）会隐藏 addWidget
         // 挂的统计行，已按项目铁律改用 MainWindow::showStatusNote（见其说明）。
         auto *note = window.findChild<QLabel *>(QStringLiteral("StatusNote"));
         QVERIFY(note);
-        QVERIFY2(note->text().contains(QStringLiteral("B · TCP")), qPrintable(note->text()));
+        QVERIFY2(note->text().contains(QStringLiteral("B · ")), qPrintable(note->text()));
 
         // 防轰炸：3 秒内同端点同类错误再失败一次，不再弹新窗。
         action->click();
@@ -2021,7 +2245,7 @@ private slots:
     }
 
     // 运行中异常断开（TCP 对端 abort）→ Error 行 + 状态栏播报一句，**不弹窗**
-    // （长压测中断开/重连风暴会把弹窗叠成轰炸）。用 localhost TCP Server：easyDebug
+    // （长压测中断开/重连风暴会把弹窗叠成轰炸）。用 localhost TCP Server：QQCom
     // 监听、脚本/QTcpSocket 连上、先发一字节确认已接受，再 abort 掉。
     // 用户主动停止是正常迁移，走 State 行，同样不弹窗。
     void runtimeDisconnectReportsErrorRowWithoutPopup()
@@ -2056,7 +2280,7 @@ private slots:
         QTRY_COMPARE(client.state(), QAbstractSocket::ConnectedState);
         client.write("ping");
         QTRY_COMPARE(client.bytesToWrite(), qint64(0));
-        // 先确认 easyDebug 已接受并收到了这条数据，再 abort——否则连接还没从 backlog
+        // 先确认 QQCom 已接受并收到了这条数据，再 abort——否则连接还没从 backlog
         // 接进来，断开事件无 peer 可挂。
         QTRY_VERIFY2(text->toPlainText().contains(QStringLiteral("ping")),
             qPrintable(text->toPlainText()));
@@ -2064,13 +2288,13 @@ private slots:
         client.abort(); // 模拟对端异常掉线
         QTRY_VERIFY2(text->toPlainText().contains(QStringLiteral("已断开")),
             qPrintable(text->toPlainText()));
-        QVERIFY2(text->toPlainText().contains(QStringLiteral("B · TCP 服务器")),
+        QVERIFY2(text->toPlainText().contains(QStringLiteral("B · ")),
             qPrintable(QStringLiteral("Error 行应带端点标识：") + text->toPlainText()));
         // 与"打开失败"路径同理：读临时提示格 StatusNote，而不是 statusBar()->currentMessage()。
         auto *note = window.findChild<QLabel *>(QStringLiteral("StatusNote"));
         QVERIFY(note);
-        QTRY_VERIFY2(note->text().contains(QStringLiteral("连接异常断开")), qPrintable(note->text()));
-        QVERIFY2(note->text().contains(QStringLiteral("B · TCP")), qPrintable(note->text()));
+        QTRY_VERIFY2(note->text().contains(QStringLiteral("已断开")), qPrintable(note->text()));
+        QVERIFY2(note->text().contains(QStringLiteral("B · ")), qPrintable(note->text()));
         // 运行中异常断开不弹窗（与"打开失败"路径的分野）。
         QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
 
@@ -2317,7 +2541,7 @@ private slots:
                  qPrintable(QStringLiteral("AB right edge %1 vs send left %2")
                                 .arg(targets.at(2)->mapTo(&window, QPoint()).x() + targets.at(2)->width())
                                 .arg(send->mapTo(&window, QPoint()).x())));
-        const auto artifactDir = qEnvironmentVariable("EASYDEBUG_UI_ARTIFACT_DIR");
+        const auto artifactDir = qEnvironmentVariable("QQCOM_UI_ARTIFACT_DIR");
         if (!artifactDir.isEmpty()) {
             QDir().mkpath(artifactDir);
             QVERIFY(window.grab().save(artifactDir + "/send-panel.png"));
@@ -2502,8 +2726,8 @@ private slots:
             qPrintable(QStringLiteral("关闭来源应写进正文：") + lastLine()));
         // 而且必须说清**是哪个端口**关了：只说"已关闭 · 用户停止"仍然答不全是 A 还是 B、
         // 是哪个口（用户反馈"需要清晰表明是那个端口关闭"）。身份取草稿的真实配置——
-        // 这条用例里 B 是 TCP 服务器，身份形如 "B · 127.0.0.1:<端口>"。
-        const QString identity = QStringLiteral("B · 127.0.0.1:%1")
+        // 这条用例里 B 是 TCP 服务器，身份形如 "B · 0.0.0.0:<端口>"。
+        const QString identity = QStringLiteral("B · 0.0.0.0:%1")
             .arg(b->findChild<QSpinBox *>(QStringLiteral("server.port"))->value());
         QVERIFY2(lastLine().contains(identity),
             qPrintable(QStringLiteral("关闭行应带端点身份「%1」：%2").arg(identity, lastLine())));
@@ -2534,7 +2758,7 @@ private slots:
         auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
         QVERIFY(model && b); // B 默认 TCP 服务器
         QTcpServer blocker;  // 占住端口的"另一个进程"：保持监听直到本用例结束
-        QVERIFY(blocker.listen(QHostAddress::LocalHost, 0));
+        QVERIFY(blocker.listen(QHostAddress::AnyIPv4, 0));
         b->findChild<QSpinBox *>(QStringLiteral("server.port"))->setValue(blocker.serverPort());
         auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
         QVERIFY(action);
@@ -2556,7 +2780,7 @@ private slots:
     // addWidget 挂的普通部件，把 RX/TX/条数统计整行顶掉 5 秒。旧实现两处残留的 showMessage
     // 正是这么干的，偏偏"打开失败常常连续发生"，用户于是看到统计行反复消失。
     //
-    // 为什么必须**独立成例**：同类的端口断言分别住在 portOpenFailureSurfacesErrorRowAndNonModalPopup
+    // 为什么必须**独立成例**：同类的端口断言分别住在 portOpenFailureSurfacesErrorRowAndStatus
     // 与 runtimeDisconnectReportsErrorRowWithoutPopup 里，而这两条用例在本机因**预存失败**
     // （断言要求日志行带端点名前缀，属过时用例）会提前中止——挂在它们后面的 StatusNote /
     // 统计行断言**永远执行不到**。独立用例才真正跑到。
@@ -2579,7 +2803,7 @@ private slots:
         auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
         QVERIFY(model && note && b); // B 默认 TCP 服务器
         QTcpServer blocker;          // 占住端口的"另一个进程"：保持监听直到本用例结束
-        QVERIFY(blocker.listen(QHostAddress::LocalHost, 0));
+        QVERIFY(blocker.listen(QHostAddress::AnyIPv4, 0));
         b->findChild<QSpinBox *>(QStringLiteral("server.port"))->setValue(blocker.serverPort());
         auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
         QVERIFY(action);
@@ -2634,7 +2858,7 @@ private slots:
 
         // C1 + C4：连点两次都命中"监听一个已被占用端口"的确定性同步失败。
         QTcpServer blocker;
-        QVERIFY(blocker.listen(QHostAddress::LocalHost, 0));
+        QVERIFY(blocker.listen(QHostAddress::AnyIPv4, 0));
         portBox->setValue(blocker.serverPort());
 
         action->click(); // 失败 #1
@@ -2877,7 +3101,7 @@ private slots:
         QTest::qWait(30);
         auto *b = window.findChild<PortSelectorWidget *>("endpointB");
         QVERIFY(b);
-        QVERIFY(b->hasValidConfiguration()); // TCP 服务器默认 127.0.0.1:9000
+        QVERIFY(b->hasValidConfiguration()); // TCP 服务器默认监听所有 IPv4 网卡的 9000 端口
         auto *action = b->findChild<QPushButton *>("endpointAction");
         QCOMPARE(action->text(), QStringLiteral("监听"));
         action->click();
@@ -2986,7 +3210,7 @@ private slots:
         const Framing defaults;
         QVERIFY(defaults.isValid());
         QCOMPARE(defaults.mode, Framing::Passthrough); // 默认仅兜底输出，不改逐包语义
-        QCOMPARE(defaults.idleTimeoutMs, 100);
+        QCOMPARE(defaults.idleTimeoutMs, 10);
         QCOMPARE(defaults.bufferThresholdBytes, 300);
         QVERIFY(!defaults.includeDelimiter);           // 结束符默认剥离
         QVERIFY(defaults.includeLengthPrefix);         // 长度前缀默认保留帧头
@@ -2997,6 +3221,9 @@ private slots:
         QVERIFY(!delimiter.isValid());
         delimiter.delimiter = QByteArray::fromHex("0D0A");
         QVERIFY(delimiter.isValid());
+        Framing idle;
+        idle.mode = Framing::IdleTimeout;
+        QVERIFY(idle.isValid());
         Framing badTimeout = delimiter;
         badTimeout.idleTimeoutMs = 0;
         QVERIFY(!badTimeout.isValid());
@@ -3046,7 +3273,7 @@ private slots:
         // 释放只从最旧一端发生：第 1 条已被挤掉，最新一条一定还在。
         QVERIFY2(!view.document()->firstBlock().text().startsWith(QStringLiteral("1 ")),
             qPrintable(QStringLiteral("首块应已不是第 1 条：") + view.document()->firstBlock().text()));
-        QVERIFY2(view.document()->toPlainText().contains(QStringLiteral("60 2")),
+        QVERIFY2(view.document()->toPlainText().contains(QRegularExpression(QStringLiteral("(?m)^60 .*line one"))),
                  "最新一条必须还在");
     }
 
@@ -3088,8 +3315,7 @@ private slots:
                 batch.append(message);
             }
             window.findChild<TrafficPanel *>()->appendMessages(batch);
-            // 等攒批逐批落地：同步连灌会让所有批合成一个巨批落地，
-            // 而"先裁后插"裁不到单批自身——单批不超预算是调用方的既有约定。
+            // 分批推进，模拟实际到达节奏；单批超限另有独立用例。
             QTest::qWait(20);
         }
         // 攒批是 16ms 异步的；空表上 record(-1) 是未定义行为，先等首条落地。
@@ -3113,7 +3339,7 @@ private slots:
             qPrintable(QStringLiteral("摘要应播报缓冲区已满：") + status->text()));
 
         // 向上翻阅自动解除跟随；滚回顶部，第 1 条仍然在第一行。
-        text->verticalScrollBar()->setValue(text->verticalScrollBar()->maximum() - 100);
+        text->verticalScrollBar()->triggerAction(QAbstractSlider::SliderPageStepSub);
         QVERIFY(!follow->isChecked());
         text->verticalScrollBar()->setValue(0);
         QCOMPARE(text->verticalScrollBar()->value(), 0);
@@ -4149,13 +4375,32 @@ private slots:
         auto *mode = selector->findChild<QComboBox *>(QStringLiteral("framingMode"));
         auto *delimiter = selector->findChild<QLineEdit *>(QStringLiteral("framingDelimiter"));
         auto *idle = selector->findChild<QSpinBox *>(QStringLiteral("framingIdle"));
+        auto *threshold = selector->findChild<QSpinBox *>(QStringLiteral("framingThreshold"));
+        auto *keepBoundary = selector->findChild<QCheckBox *>(QStringLiteral("framingKeepBoundary"));
         auto *logHints = selector->findChild<QCheckBox *>(QStringLiteral("framingLogHints"));
-        QVERIFY(mode && delimiter && idle && logHints);
+        QVERIFY(mode && delimiter && idle && threshold && keepBoundary && logHints);
+        // 参考 BLE 调试助手分层展示：开关、完整帧判定、兜底参数各自独立成行，
+        // 避免窄窗口下所有控件挤在一条线上。
+        QVERIFY(mode->parentWidget() != idle->parentWidget());
+        QVERIFY(mode->parentWidget() != threshold->parentWidget());
+        // 保留边界与完整帧判定同属规则行，允许保持在同一行。
+        QVERIFY(logHints->parentWidget() != idle->parentWidget());
+        auto *enabled = selector->findChild<QCheckBox *>(QStringLiteral("framingEnabled"));
+        QVERIFY(enabled);
+        QVERIFY(mode->findData(int(ReceiveFraming::IdleTimeout)) >= 0);
+        QCOMPARE(idle->value(), 10);
+        mode->setCurrentIndex(mode->findData(int(ReceiveFraming::IdleTimeout)));
+        QTest::qWait(20);
+        QVERIFY(enabled->isChecked());
+        QVERIFY(idle->isEnabled());
+        QVERIFY(threshold->isEnabled());
+        QVERIFY(!keepBoundary->isVisible());
+        QVERIFY(selector->hasValidConfiguration());
         const auto valid = [selector](const QString &stage) {
             QVERIFY2(selector->hasValidConfiguration(),
                 qPrintable(stage + QStringLiteral("：") + selector->validationError()));
         };
-        // 默认仅兜底输出：不需要结束符，输入因此不出现。
+        // 空闲超时模式不需要结束符，输入因此不出现。
         QVERIFY(!delimiter->isVisible());
         valid(QStringLiteral("默认模式"));
 
@@ -4185,7 +4430,7 @@ private slots:
         // 供目视检查排版与文案清晰度。
         mode->setCurrentIndex(mode->findData(int(ReceiveFraming::Delimiter)));
         QTest::qWait(20);
-        const auto artifactDir = qEnvironmentVariable("EASYDEBUG_UI_ARTIFACT_DIR");
+        const auto artifactDir = qEnvironmentVariable("QQCOM_UI_ARTIFACT_DIR");
         if (!artifactDir.isEmpty()) {
             QDir().mkpath(artifactDir);
             QVERIFY(selector->grab().save(artifactDir + "/framing-row.png"));
@@ -4215,8 +4460,8 @@ int main(int argc, char **argv)
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
         qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
-    app.setOrganizationName("easyDebugTests");
-    app.setApplicationName("easyDebugUiTests");
+    app.setOrganizationName("QQComTests");
+    app.setApplicationName("QQComUiTests");
     QStandardPaths::setTestModeEnabled(true);
     UiSmokeTest test;
     return QTest::qExec(&test, argc, argv);

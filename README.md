@@ -1,58 +1,44 @@
-# easyDebug
+# QQCom
 
-面向设备调试的 Qt Widgets 工具，计划支持串口、TCP 服务器、TCP 客户端和 UDP，并提供实时收发显示、端口间转发、自定义发送。
+基于 Qt Widgets 的通信调试工具，固定 A/B 双端点，支持串口、TCP 客户端、TCP 服务器和 UDP。
 
-**当前阶段：M0 设计基线 + 固定双端点工作台。** 当前版本已经提供可运行的 Qt Widgets 工作台原型：顶部 A/B 两行横向端点条、桥接行、接收监视区和单页发送区（目标 A/B/AB + 正文 + 格式/编码/末尾 + 字节预览）。快捷命令列表暂时撤下，后续以右侧可展开面板回归。当前版本已接入真实串口/TCP/UDP 收发、文本监视、单次与定时发送；A/B 桥接为预览状态，转发引擎与配置导入导出按 M4–M6 实施。
+## 当前功能
 
-## 设计文档
+- 真实收发、端点状态、TCP 客户端身份及 UDP 来源 IP/端口记录。
+- TCP 服务器和 UDP 通过网卡名称及 IPv4 地址选择本地绑定地址，支持 `0.0.0.0`；本地端口 `0` 由系统分配。
+- 串口/TCP 接收支持直通、空闲超时、结束符、U16 小端长度前缀。空闲默认 10 ms，从最后一次非空数据到达重新计时；长度兜底默认 300 字节，关闭时输出残留缓冲。
+- 多种显示/发送编码、分类及关键词过滤、文本日志、TSV 预览导出、手动和定时发送。
+- 快捷指令分组、重命名、行内编辑、拖动排序、批量顺序发送；QQCom JSON、JCom、BLE 调试器指令文件导入导出。
+
+桥接/路由目前只有界面预览，尚不转发真实数据。协议插件、OTA、工作区管理和后台轮转日志尚未实现，见 [后续工作](docs/ROADMAP.md)。
+
+## 构建运行
+
+主要验证环境：Windows x64、Qt 6.10.1 MSVC 2022、C++17、qmake。需要 Qt Widgets、Network、SerialPort、Concurrent、Core5Compat；测试另需 Qt Test。
+
+Qt Creator 打开 [QQCom.pro](QQCom.pro)，选择对应 Kit 构建。命令行可在仓库根目录运行：
+
+```powershell
+.\build.bat
+.\build\release\release\QQCom.exe
+```
+
+`build.bat` 支持用 `QT_BIN`、`VCVARS64` 覆盖本机工具链路径，采用独立构建目录，失败返回非零。qmake 自动生成版本头；Windows 链接后自动部署当前 Kit 的 Qt DLL 和插件。搬移程序时保留整个运行目录；目标机器还需匹配的 MSVC 运行库。
+
+## 配置兼容
+
+程序、工程和测试目标统一使用 QQCom。Windows 配置位于 `%LOCALAPPDATA%\QQCom\QQCom\preferences.ini`。首次运行且新配置不存在时，从旧目录 `%LOCALAPPDATA%\easyDebug\easyDebug\preferences.ini` 复制设置和指令，原文件保留；已有 QQCom 配置不会被覆盖。
+
+改名不改变指令 JSON 的字段和版本，旧文件仍可导入。仓库所在磁盘目录名称不影响构建；重新打开 `QQCom.pro` 即可使用新工程名。
+
+## 文档入口
 
 | 文档 | 内容 |
 | --- | --- |
-| [PLAN.md](PLAN.md) | 需求范围、阶段安排、交付清单与实施顺序 |
-| [参考工程索引](docs/REFERENCES.md) | 四个参考工程的入口、借鉴维度与按需求查表 |
-| [参考工程分析](docs/REFERENCE_REVIEW.md) | debugTool/YmodemTool 两个本地工程的结构、复用点和需改进的问题 |
-| [BLE 调试工具参考](docs/REFERENCE_BLE_TOOL.md) | 同作者 iOS BLE 调试工具：消息模型、过滤、显示设置、接收组帧的对照 |
-| [Serial Studio 参考](docs/REFERENCE_SERIAL_STUDIO.md) | Qt 遥测仪表盘工程：分层治理、驱动抽象、帧提取与计数、控制台文本缓冲、发送预设 |
-| [架构评审](docs/ARCHITECTURE_REVIEW.md) | 对比参考工程的架构评审结论、分级问题清单与修复记录 |
-| [架构设计](docs/ARCHITECTURE.md) | 模块边界、接口契约、线程、转发、缓冲与配置 |
-| [界面与交互](docs/UI_DESIGN.md) | 端口选择控件扩展、监视区、路由和自定义发送 |
-| [验收与性能计划](docs/TEST_PLAN.md) | 功能矩阵、异常测试、性能目标与测量方法 |
-| [版本管理](docs/VERSIONING.md) | 版本源文件、自动构建标识和发布版本递增 |
-| [参考源码指纹](docs/reference-snapshot.csv) | 本次阅读涉及文件的 SHA-256，定位工作区版本 |
-
-## 技术基线
-
-采用 C++17、Qt 6.10.1、Qt Widgets、qmake，主验收环境为 Windows 10/11 x64、MSVC 2022。这是根据现有 `easyDebug.pro` 和本机 Qt Creator Kit 作出的首版选择；MinGW 在发布阶段验证。
-
-可用 Qt Creator 打开 `easyDebug.pro`，选择 Qt 6.10.1 Kit 构建。当前界面使用 Qt Widgets，SerialPort 与 Concurrent 用于后台扫描系统串口；通信实现阶段再加入 Qt Network。Qt Test 用于独立测试工程。示例数据只进入界面模型，不会发送到真实设备。
-
-串口下拉列表显示端口号和友好名称，启动时自动扫描，之后每 2 秒自动刷新一次，设备插拔无需手动操作。TCP/UDP 地址支持历史下拉选择，编辑完成后保存最近 20 条有效地址，重启后仍可使用；本地绑定地址与远端地址分别记录在用户配置目录的 `preferences.ini`，不会自动切换当前端点目标。
-
-qmake 配置 `easyDebug.pro` 时会自动运行版本脚本，生成 `version/version.h`。主窗口标题显示版本和构建时间；版本号的修改方式见 [版本管理](docs/VERSIONING.md)。
-
-Windows 构建链接完成后会自动运行 `scripts/deploy_qt_windows.ps1`，从当前 qmake Kit 复制匹配 Debug/Release 的 Qt 运行库与平台插件到 exe 目录，支持脱离 Qt Creator 启动。旧构建目录或手动部署可执行：
-
-```powershell
-pwsh -File scripts/deploy_qt_windows.ps1 -Binary build/release/release/easyDebug.exe
-pwsh -File scripts/deploy_qt_windows.ps1 -Binary build/ui-tests/release/easyDebug_ui_tests.exe -IncludeOffscreen
-pwsh -File scripts/deploy_qt_windows.ps1 -Binary build/Desktop_Qt_6_10_1_MSVC2022_64bit-Debug/debug/easyDebug.exe -Configuration Debug
-```
-
-运行 UI 测试时使用 `QT_QPA_PLATFORM=offscreen`；脚本会把插件复制到 exe 旁边，避免“没有 Qt 平台插件”启动错误。
-
-移动程序时需保留整个运行目录，包括 Qt DLL 和 `platforms` 子目录；不要仅复制 exe。更换 Kit 后重新运行 qmake；手动部署其他 Qt 版本时用 `-QtBin` 指定对应 Kit。
-
-## 核心设计
-
-沿用参考工程的“类型下拉框＋参数页”交互，并采用其单行形态：A、B 各是一个完整的 `PortSelectorWidget` 行，类型、参数、状态和连接动作都在该行内，两个端点的参数同时可编辑，不需要选中步骤。低频参数（名称、数据位/校验/停止位/流控、连接超时、客户端上限）在该行下方就地展开。通信后端独立为 `AbstractTransport`，桥接只连接这两个端点。
-
-数据在专用 I/O 线程装配为 Traffic::Message 经队列回传 GUI；转发引擎按 M4 实施。监视显示和文件记录使用独立的有界旁路。转发保留原始字节，文本与 HEX 只是显示/发送编码选项。TCP 客户端身份、UDP 目标及数据报边界都显式建模。
-
-参考工程位置（总索引与按需求查表见 [docs/REFERENCES.md](docs/REFERENCES.md)）：
-
-- `D:/AWork/myself/QTProject/debugTool`
-- `D:/AWork/myself/QTProject/YmodemTool`
-- https://gitee.com/qinjmin/ble-debug-tool-ios.git（BLE 调试工具，功能与交互参考）
-- https://github.com/Serial-Studio/Serial-Studio（Serial Studio，分层治理、帧提取与文本缓冲等底层做法参考；GPLv3/商业双许可，只借鉴设计结论）
-
-界面原型对应 [PLAN.md](PLAN.md) 的 M0/M2/M3 交互准备工作；后续实现从 M1 通信契约开始。每个阶段完成后更新任务状态、测试记录和设计偏差。
+| [架构](docs/ARCHITECTURE.md) | 真实模块职责、线程、数据流及容量边界 |
+| [界面与使用约定](docs/UI_DESIGN.md) | 端口、UDP 语义、组帧、过滤、发送与日志 |
+| [开发与验证](docs/DEVELOPMENT.md) | 构建、测试、版本和发布流程 |
+| [性能测试](tests/PERFORMANCE_TEST.md) | 可复现探针、压测步骤及计量限制 |
+| [后续工作](docs/ROADMAP.md) | 未实现能力和优化优先级 |
+| [参考来源](docs/REFERENCES.md) | 参考工程、版本、借鉴范围与许可 |
+| [历史归档](docs/archive/2026-10-07-review.md) | 本轮审查结果、性能证据和文档合并记录 |

@@ -36,7 +36,7 @@ public:
     void setSerialPorts(const QList<SerialPortDescriptor> &ports);
     void setAddressHistory(const QStringList &remote, const QStringList &local);
     void commitAddressHistory();
-    // TCP 服务器客户端列表（显示用）；其他类型传空列表即可。
+    // TCP 服务器显示已连接客户端；UDP 显示本次打开期间观察到的数据报来源。
     void setPeerList(const QStringList &peers);
 
 signals:
@@ -52,14 +52,17 @@ private:
     void updateActionLabels();
     void updateAdvancedToggle();
     void selectSerialPort(const QString &portName);
+    void selectBindAddress(const QString &key, const QString &address);
     void rememberAddress(const QString &key);
     QComboBox *addAddress(const QString &key, bool allowHostName = false);
+    QComboBox *addBindAddress(const QString &key);
     QComboBox *addChoice(const QString &key, const QStringList &items, bool editable = false);
     QSpinBox *addNumber(const QString &key, int minimum, int maximum);
     QWidget *buildFramingRow(); // 接收组帧：与端点类型无关，挂在高级参数区底部
     void syncFramingControls(); // 模式联动：只有结束符模式需要结束符输入
     void applyFramingToDraft(PortDraft &draft) const;
     QComboBox *m_framingMode = nullptr;
+    QCheckBox *m_framingEnabled = nullptr;
     QLineEdit *m_framingDelimiter = nullptr;
     QLabel *m_framingIdleLabel = nullptr;
     QLabel *m_framingIdleUnit = nullptr; // "ms" 单位标签：单位在框外，输入框只放数字
@@ -69,7 +72,9 @@ private:
     QSpinBox *m_framingThreshold = nullptr;
     QCheckBox *m_framingKeepBoundary = nullptr;
     QCheckBox *m_framingLogHints = nullptr;
+    QLabel *m_framingMechanismTitle = nullptr;
     QLabel *m_framingHint = nullptr; // 组帧模式的白话说明（跟随模式切换）
+    ReceiveFraming::Mode m_framingRememberedMode = ReceiveFraming::IdleTimeout;
     PortDraft m_draft;
     bool m_loading = false;
     bool m_initialised = false;
@@ -92,6 +97,7 @@ private:
     bool m_serialScanComplete = false;
     QSet<QString> m_editedAddresses;
     QLabel *m_peerHint = nullptr; // TCP 服务器高级参数页的客户端提示行
+    QLabel *m_udpPeerHint = nullptr; // UDP 高级参数页的已发现来源提示行
 };
 
 #endif

@@ -11,6 +11,8 @@ SOURCES += \
     $$PWD/panels/commands/exportgroupsdialog.cpp \
     $$PWD/panels/portselector/portselectorwidget.cpp \
     $$PWD/panels/traffic/trafficpanel.cpp \
+    $$PWD/panels/traffic/trafficmodel.cpp \
+    $$PWD/panels/traffic/trafficfilter.cpp \
     $$PWD/panels/traffic/traffictextview.cpp \
     $$PWD/panels/traffic/filterbar.cpp \
     $$PWD/panels/traffic/filterflags.cpp \
@@ -35,6 +37,8 @@ HEADERS += \
     $$PWD/panels/commands/exportgroupsdialog.h \
     $$PWD/panels/portselector/portselectorwidget.h \
     $$PWD/panels/traffic/trafficpanel.h \
+    $$PWD/panels/traffic/trafficmodel.h \
+    $$PWD/panels/traffic/trafficfilter.h \
     $$PWD/panels/traffic/traffictextview.h \
     $$PWD/panels/traffic/filterbar.h \
     $$PWD/panels/traffic/filterflags.h \

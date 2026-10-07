@@ -3,6 +3,7 @@
 
 #include <QDateTime>
 #include <QTimer>
+#include <utility>
 
 EndpointRuntime::EndpointRuntime(QObject *parent) : QObject(parent)
 {
@@ -11,14 +12,13 @@ EndpointRuntime::EndpointRuntime(QObject *parent) : QObject(parent)
 
 EndpointRuntime::~EndpointRuntime()
 {
-    // 在 I/O 线程内析构（组合根 quit + wait 之后），传输对象就地关闭销毁，
-    // 不依赖延迟删除。
-    for (auto *&transport : m_transports) {
-        if (!transport) continue;
-        transport->stop();
-        delete transport;
-        transport = nullptr;
-    }
+    shutdown();
+}
+
+void EndpointRuntime::shutdown()
+{
+    for (int index = 0; index < EndpointCount; ++index)
+        closeTransport(index);
 }
 
 namespace {
@@ -72,30 +72,26 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
 {
     if (index < 0 || index >= EndpointCount) return;
     closeTransport(index);
+    m_observedUdpPeers[index].clear();
+    // 换一次打开就是新的观察周期。无论前一个端点类型是什么，都先清掉界面的旧对端列表。
+    emit endpointPeersChanged(index, {});
     m_generations[index]++;
     m_pendingFailureGeneration[index] = 0; // 换代即作废旧失败合并锚点，避免串代误并
     m_drafts[index] = draft;
-    // 组帧策略随 open 下发；换策略即清空缓冲，不把上次连接的半帧带进来。
-    m_framers[index].setConfig(draft.framing);
 
     auto *transport = TransportFactory::create(draft.kind, index, this);
     if (!transport) return;
     m_transports[index] = transport;
     const quint64 generation = m_generations[index];
 
-    // 空闲输出定时器在本对象已归属 I/O 线程后创建，超时回调自然落在 I/O 线程。
-    auto *idle = new QTimer(this);
-    idle->setSingleShot(true);
-    connect(idle, &QTimer::timeout, this, [this, index, generation] {
-        if (generation != m_generations[index]) return;
-        flushFramer(index, ReceiveFramer::Idle);
-    });
-    m_idleTimers[index] = idle;
-
     // 连接按代次闭包：实例被替换后，旧实例晚到的信号一律丢弃。
     connect(transport, &AbstractTransport::stateChanged, this,
         [this, index, generation](quint64 gen, int state, const QString &detail) {
             if (gen != m_generations[index]) return;
+            // 传输层主动报告关闭（例如 TCP 对端断开、串口设备错误）时，
+            // 也要把尚未达到空闲超时的残留字节交给监视区，不能静默丢掉尾帧。
+            if (state == int(Transport::State::Closed))
+                flushFramers(index, ReceiveFramer::Closed);
             // 一次失败被传输层拆成"errorOccurred + Closed"两条信号；错误行已经给出了完整
             // 原因，这条随之而来的 Closed 若再单独成行，用户看到的就是"错误 xx"＋"状态 打开失败"
             // 两条（他反馈的"错误跟状态感觉重复了"）。所以它只负责把端点确实回到 Closed
@@ -106,21 +102,34 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             if (!mergedIntoRecentError) {
                 auto message = makeMessage(index, Traffic::Direction::State, Traffic::Origin::Automatic,
                     {}, Traffic::Framing::Message);
-            // 状态词与细节在这里拼定，监视区因此能看到"已打开 · COM2 @115200"这样
-            // 一眼读出结果的迁移记录（见 stateRowText 的说明）。
-            // 身份取自**当前草稿**：它要么是本代次 open 下发的配置，要么（重开后）
-            // 已是新配置，两种情况都比"不写是谁"准确。
-            message.statusText = stateRowText(state, detail, endpointIdentity(index, m_drafts[index]));
+                message.statusText = stateRowText(state, detail, endpointIdentity(index, m_drafts[index]));
                 publish(std::move(message));
             }
             emit endpointStateChanged(index, state, detail);
         });
     connect(transport, &AbstractTransport::dataReceived, this,
         [this, index, generation](quint64 gen, const Traffic::Source &source,
-                                  const QByteArray &payload, int framing) {
+                                   const QByteArray &payload, int framing) {
             if (gen != m_generations[index]) return;
             // 数据报自带边界，直接就是一条；字节流片段才交给组帧器。
             if (Traffic::Framing(framing) != Traffic::Framing::Stream) {
+                // UDP 每个数据报都带独立的来源地址。首次见到一个来源时，用状态行和
+                // 参数区明确告诉用户来源，但不把它误解成“已连接”，更不能暗中改写
+                // 用户指定的固定发送目标。
+                if (m_drafts[index].kind == PortDraft::Udp && source.hasPeer()
+                    && !m_observedUdpPeers[index].contains(source.peerAddress)) {
+                    m_observedUdpPeers[index].insert(source.peerAddress);
+                    QStringList peers = m_observedUdpPeers[index].values();
+                    peers.sort();
+                    emit endpointPeersChanged(index, peers);
+
+                    auto notice = makeMessage(index, Traffic::Direction::State,
+                        Traffic::Origin::Automatic, {}, Traffic::Framing::Message);
+                    notice.source = source;
+                    notice.statusText = tr("UDP 已收到来自 %1 的数据报；UDP 无连接，未自动设为发送目标。")
+                                            .arg(source.peerAddress);
+                    publish(std::move(notice));
+                }
                 auto message = makeMessage(index, Traffic::Direction::Receive,
                     Traffic::Origin::Automatic, payload, Traffic::Framing(framing));
                 message.source = source; // 传输层带 peer/代次的完整来源
@@ -133,6 +142,7 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
     connect(transport, &AbstractTransport::peerListChanged, this,
         [this, index, generation](quint64 gen, const QList<Transport::PeerInfo> &peers) {
             if (gen != m_generations[index]) return;
+            removeDisconnectedPeers(index, peers);
             QStringList addresses;
             addresses.reserve(peers.size());
             for (const auto &peer : peers) addresses.append(peer.address);
@@ -147,7 +157,8 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             m_pendingFailureGeneration[index] = generation;
             auto message = makeMessage(index, Traffic::Direction::Error, Traffic::Origin::Automatic,
                 {}, Traffic::Framing::Message);
-            message.statusText = text;
+            message.statusText = QStringLiteral("%1 · %2")
+                .arg(endpointIdentity(index, m_drafts[index]), text);
             publish(std::move(message));
         });
 
@@ -158,6 +169,7 @@ void EndpointRuntime::closeEndpoint(int index)
 {
     if (index < 0 || index >= EndpointCount) return;
     closeTransport(index);
+    m_observedUdpPeers[index].clear();
 
     // "谁关的"必须写在正文里：以前这条写死"已关闭"，用户看着一条没有来源的关闭记录，
     // 无从判断是自己点了停止，还是对端断了。用户主动关闭是这个来源的**专有措辞**，
@@ -201,12 +213,10 @@ void EndpointRuntime::sendPayload(int index, const QByteArray &payload, int orig
 void EndpointRuntime::closeTransport(int index)
 {
     // 关闭前把组帧缓冲里的残留输出掉：半帧不该凭空消失，用户要看到最后那几个字节。
-    flushFramer(index, ReceiveFramer::Closed);
-    if (auto *idle = m_idleTimers[index]) {
-        idle->stop();
-        delete idle;
-        m_idleTimers[index] = nullptr;
-    }
+    flushFramers(index, ReceiveFramer::Closed);
+    for (const auto &session : std::as_const(m_receiveSessions[index]))
+        delete session.idle;
+    m_receiveSessions[index].clear();
     auto *&transport = m_transports[index];
     if (!transport) return;
     m_generations[index]++; // 立即作废旧实例的一切在途事件
@@ -217,9 +227,43 @@ void EndpointRuntime::closeTransport(int index)
 
 void EndpointRuntime::feedFramer(int index, const Traffic::Source &source, const QByteArray &payload)
 {
-    const auto frames = m_framers[index].feed(payload);
+    if (payload.isEmpty()) return;
+    const auto &config = m_drafts[index].framing;
+    if (config.mode == ReceiveFraming::Passthrough || !config.isValid()) {
+        auto message = makeMessage(index, Traffic::Direction::Receive, Traffic::Origin::Automatic,
+            payload, Traffic::Framing::Message);
+        message.source = source;
+        message.frameId = QUuid::createUuid();
+        publish(std::move(message));
+        return;
+    }
+
+    auto &sessions = m_receiveSessions[index];
+    auto it = sessions.find(source.peerId);
+    if (it == sessions.end()) {
+        ReceiveSession session;
+        session.framer.setConfig(config);
+        session.source = source;
+        session.idle = new QTimer(this);
+        session.idle->setSingleShot(true);
+        // 空闲超时不能提前触发；忙时允许延后，由 I/O 事件循环调度。
+        session.idle->setTimerType(Qt::PreciseTimer);
+        connect(session.idle, &QTimer::timeout, this,
+            [this, index, peerId = source.peerId, generation = m_generations[index]] {
+                if (generation != m_generations[index]) return;
+                auto found = m_receiveSessions[index].find(peerId);
+                if (found != m_receiveSessions[index].end())
+                    flushSession(index, found.value(), ReceiveFramer::Idle);
+            });
+        it = sessions.insert(source.peerId, std::move(session));
+    }
+    auto &session = it.value();
+    const auto frames = session.framer.feed(payload);
     publishFrames(index, source, frames);
-    restartIdleTimer(index); // 有新数据即推迟空闲输出
+    if (session.framer.pendingBytes() > 0)
+        session.idle->start(config.idleTimeoutMs);
+    else
+        session.idle->stop();
 }
 
 void EndpointRuntime::publishFrames(int index, const Traffic::Source &source,
@@ -234,28 +278,42 @@ void EndpointRuntime::publishFrames(int index, const Traffic::Source &source,
         if (!frame.complete) message.hasMoreFragments = true;
         publish(std::move(message));
         // 提示日志：只有开关打开且这次输出有话要说才发，正常定界不产生噪声。
-        if (m_framers[index].config().logHints && !frame.hint.isEmpty()) {
+        if (m_drafts[index].framing.logHints && !frame.hint.isEmpty()) {
             auto hint = makeMessage(index, Traffic::Direction::Warning, Traffic::Origin::Automatic,
                 {}, Traffic::Framing::Message);
             hint.statusText = frame.hint;
+            hint.source = source;
             publish(std::move(hint));
         }
     }
 }
 
-void EndpointRuntime::flushFramer(int index, ReceiveFramer::Trigger trigger)
+void EndpointRuntime::flushSession(int index, ReceiveSession &session, ReceiveFramer::Trigger trigger)
 {
-    const auto frames = m_framers[index].flush(trigger);
-    publishFrames(index, sourceOf(index), frames);
+    session.idle->stop();
+    publishFrames(index, session.source, session.framer.flush(trigger));
 }
 
-void EndpointRuntime::restartIdleTimer(int index)
+void EndpointRuntime::flushFramers(int index, ReceiveFramer::Trigger trigger)
 {
-    auto *idle = m_idleTimers[index];
-    if (!idle) return;
-    const int timeout = m_framers[index].config().idleTimeoutMs;
-    if (timeout <= 0) return;
-    idle->start(timeout);
+    for (auto &session : m_receiveSessions[index])
+        flushSession(index, session, trigger);
+}
+
+void EndpointRuntime::removeDisconnectedPeers(int index, const QList<Transport::PeerInfo> &peers)
+{
+    QSet<QUuid> active;
+    for (const auto &peer : peers) active.insert(peer.id);
+    auto &sessions = m_receiveSessions[index];
+    for (auto it = sessions.begin(); it != sessions.end();) {
+        if (active.contains(it.key())) {
+            ++it;
+            continue;
+        }
+        flushSession(index, it.value(), ReceiveFramer::Closed);
+        delete it->idle;
+        it = sessions.erase(it);
+    }
 }
 
 Traffic::Source EndpointRuntime::sourceOf(int index) const

@@ -55,11 +55,11 @@ QString portDraftSummary(const PortDraft &draft)
         return v.value("client.host", "127.0.0.1").toString()
             + ":" + v.value("client.port", 9000).toString();
     case PortDraft::TcpServer:
-        return v.value("server.address", "127.0.0.1").toString()
+        return v.value("server.address", "0.0.0.0").toString()
             + ":" + v.value("server.port", 9000).toString();
     default:
-        return v.value("udp.address", "127.0.0.1").toString()
-            + ":" + v.value("udp.port", 9001).toString();
+        return v.value("udp.address", "0.0.0.0").toString()
+            + ":" + v.value("udp.port", 0).toString();
     }
 }
 

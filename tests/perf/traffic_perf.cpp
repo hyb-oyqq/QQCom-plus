@@ -4,7 +4,7 @@
 // 这件事只能测出货代码：卡顿来自面板与视图的协作方式（攒批怎么落、文本怎么追加、
 // 跟随怎么滚动），任何用假模型搭出来的复现都测不到同一个瓶颈。
 //
-// 用法：easyDebug_traffic_perf.exe [载荷字节数] [每批条数] [批数] [拖动窗口基准:0/1] [投影基准行数]
+// 用法：QQCom_traffic_perf.exe [载荷字节数] [每批条数] [批数] [拖动窗口基准:0/1] [投影基准行数]
 // 判读：mean/p50 是流畅度，max 与 over100 是"卡顿"——用户感知到的正是长尾。
 // 第 5 个参数 >0 时追加"视图投影基准"：量把 K 行重新渲染进文本框要多久，
 // 显示设置/过滤条件"立即作用于已有内容"的代价就是它。
@@ -356,8 +356,8 @@ int main(int argc, char **argv)
         // （一条消息一个块）完全不是一回事——这个陷阱本身也值得记一笔。
         constexpr int Trials = 5000;
         const int SampleRows = 3; // 每轮插几行，摊薄固定开销后再折合到每次插入
-        std::printf("\n微实验：文档写入的固定开销（%d 行 × %d 次插入/行，行内 %d 字符）\n",
-            Trials, SampleRows, sample.length());
+        std::printf("\n微实验：文档写入的固定开销（%d 行 × %d 次插入/行，行内 %lld 字符）\n",
+            Trials, SampleRows, static_cast<long long>(sample.length()));
         for (int variant = 0; variant < 4; ++variant) {
             auto *probe = new TrafficTextView;
             QTextCursor cursor(probe->document());

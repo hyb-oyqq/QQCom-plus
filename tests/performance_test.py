@@ -35,7 +35,7 @@ def test_high_frequency_send(host='127.0.0.1', port=5000, interval_ms=50, durati
     print(f"  发送间隔: {interval_ms}ms")
     print(f"  测试时长: {duration_sec}s")
     print(f"  预计消息数: {int(duration_sec * 1000 / interval_ms)} 条")
-    print(f"\n请确保 easyDebug 已启动并监听 TCP Server 端口 {port}，开启自动换行功能")
+    print(f"\n请确保 QQCom 已启动并监听 TCP Server 端口 {port}，开启自动换行功能")
     input("准备好后按 Enter 开始测试...")
 
     try:
@@ -66,13 +66,13 @@ def test_high_frequency_send(host='127.0.0.1', port=5000, interval_ms=50, durati
         print(f"  实际时长: {elapsed:.2f}s")
         print(f"  发送消息数: {count}")
         print(f"  平均速率: {count / elapsed:.1f} 条/秒")
-        print(f"\n请观察 easyDebug 界面是否流畅，有无卡顿")
+        print(f"\n请观察 QQCom 界面是否流畅，有无卡顿")
 
         sock.close()
 
     except ConnectionRefusedError:
         print(f"\n[错误] 无法连接到 {host}:{port}")
-        print("请确保 easyDebug 已启动并配置 TCP Server 监听该端口")
+        print("请确保 QQCom 已启动并配置 TCP Server 监听该端口")
         return False
     except KeyboardInterrupt:
         print(f"\n[中断] 用户取消测试")
@@ -89,7 +89,7 @@ def test_extreme_frequency(host='127.0.0.1', port=5000):
     return test_high_frequency_send(host, port, interval_ms=20, duration_sec=5)
 
 def main():
-    print("=== easyDebug 自动换行性能测试 ===\n")
+    print("=== QQCom 自动换行性能测试 ===\n")
 
     # 场景1：50ms/包
     print("=== 场景1：正常高频测试 (50ms/包) ===")

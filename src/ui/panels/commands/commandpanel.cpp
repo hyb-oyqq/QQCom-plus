@@ -14,8 +14,6 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QShowEvent>
-#include <QSpinBox>
-#include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -56,13 +54,14 @@ void CommandPanel::setupUi()
     // 隐蔽状态反而让用户困惑（用户钦定）。
     m_addSetButton = new QPushButton(tr("添加"), m_topBarWidget);
     m_removeSetButton = new QPushButton(tr("删除"), m_topBarWidget);
-    m_notesButton = new QPushButton(tr("备注"), m_topBarWidget);
+    m_renameSetButton = new QPushButton(tr("重命名"), m_topBarWidget);
+    m_renameSetButton->setObjectName(QStringLiteral("renameCommandSet"));
     m_importButton = new QPushButton(tr("导入"), m_topBarWidget);
     m_exportButton = new QPushButton(tr("导出"), m_topBarWidget);
 
     connect(m_addSetButton, &QPushButton::clicked, this, &CommandPanel::onAddSetClicked);
     connect(m_removeSetButton, &QPushButton::clicked, this, &CommandPanel::onRemoveSetClicked);
-    connect(m_notesButton, &QPushButton::clicked, this, &CommandPanel::onNotesClicked);
+    connect(m_renameSetButton, &QPushButton::clicked, this, &CommandPanel::onRenameSetClicked);
     connect(m_importButton, &QPushButton::clicked, this, &CommandPanel::onImportClicked);
     connect(m_exportButton, &QPushButton::clicked, this, &CommandPanel::onExportClicked);
 
@@ -70,7 +69,7 @@ void CommandPanel::setupUi()
     topBar->addWidget(m_setComboBox);
     topBar->addWidget(m_addSetButton);
     topBar->addWidget(m_removeSetButton);
-    topBar->addWidget(m_notesButton);
+    topBar->addWidget(m_renameSetButton);
     topBar->addStretch();
     topBar->addWidget(m_importButton);
     topBar->addWidget(m_exportButton);
@@ -239,7 +238,7 @@ void CommandPanel::onRemoveSetClicked()
     savePreferences();
 }
 
-void CommandPanel::onNotesClicked()
+void CommandPanel::onRenameSetClicked()
 {
     QUuid currentId = m_setComboBox->currentData().toUuid();
     if (currentId.isNull()) return;
@@ -247,13 +246,13 @@ void CommandPanel::onNotesClicked()
     CommandSet set = CommandManager::instance()->getSet(currentId);
 
     bool ok;
-    QString notes = StyleDialogs::getMultiLineText(this, tr("备注"),
-                                                    tr("指令集备注:"),
-                                                    set.notes, &ok);
-    if (!ok) return;
+    const QString name = StyleDialogs::getText(this, tr("重命名指令集"),
+                                               tr("指令集名称:"),
+                                               set.name, &ok).trimmed();
+    if (!ok || name.isEmpty() || name == set.name) return;
 
-    set.notes = notes;
-    // 改备注是用户真正的编辑动作：广播让下拉框刷新
+    set.name = name;
+    // 名称显示在下拉框中，更新后需要广播，让当前选中项立即显示新名称。
     CommandManager::instance()->updateSet(currentId, set, true);
     savePreferences();
 }
@@ -464,26 +463,3 @@ void CommandPanel::savePreferences()
     m_preferences->setValue("commandPanel/currentSet",
                             m_setComboBox->currentData().toString());
 }
-
-void CommandPanel::onUndoClicked()
-{
-    CommandManager::instance()->undo();
-}
-
-void CommandPanel::onRedoClicked()
-{
-    CommandManager::instance()->redo();
-}
-
-void CommandPanel::refreshUndoRedoButtons()
-{
-    // 撤销/重做按钮状态更新
-    // TODO: 当 CommandManager 实现撤销栈后，这里更新按钮的启用状态
-}
-
-void CommandPanel::onPeriodicSendTimeout()
-{
-    // 周期发送定时器触发
-    // TODO: 实现周期发送功能
-}
-

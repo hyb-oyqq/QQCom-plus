@@ -205,7 +205,6 @@ void FilterBar::notifyChanged()
     // 用户动了条件条上的任何东西（输入框 / 开关）——「清除过滤」的停用状态到此结束，
     // 条件重新生效。这正是"清除后改一下就能接着用"的手感。
     m_suspended = false;
-    refreshValidation();
     refreshReset();
     emit changed();
 }
@@ -218,11 +217,6 @@ QStringList FilterBar::splitConditions(const QString &text)
         if (!trimmed.isEmpty() && !conditions.contains(trimmed)) conditions.append(trimmed);
     }
     return conditions;
-}
-
-void FilterBar::refreshValidation()
-{
-    // 验证逻辑已移除：不再支持正则表达式
 }
 
 void FilterBar::refreshReset()
@@ -294,7 +288,6 @@ void FilterBar::restore(const FilterBarState &state)
     m_keywords->setText(state.keywords.join(QStringLiteral(", ")));
     m_excludes->setText(state.excludes.join(QStringLiteral(", ")));
     m_restoring = false;
-    refreshValidation();
     refreshReset();
 }
 

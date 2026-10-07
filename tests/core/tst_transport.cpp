@@ -3,6 +3,8 @@
 #include <QTcpSocket>
 #include "app/endpointruntime.h"
 #include "app/receiveframer.h"
+#include "app/commandmanager.h"
+#include "persistence/preferencesstore.h"
 #include "transport/serialtransport.h"
 #include "transport/tcpclienttransport.h"
 #include "transport/tcpservertransport.h"
@@ -62,6 +64,196 @@ class TransportTest : public QObject
     Q_OBJECT
 
 private slots:
+    void preferencesMigrationPreservesBothFiles()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto source = dir.filePath("old/preferences.ini");
+        const auto target = dir.filePath("new/preferences.ini");
+        QString error;
+        QVERIFY(PreferencesStore::migrateLegacyFile(source, target, &error));
+        QVERIFY(!QFileInfo::exists(target));
+        {
+            PreferencesStore oldStore(nullptr, source);
+            oldStore.setValue("commands/sets", QByteArray("legacy-command-data"));
+            oldStore.setValue("serial/baud", 2000000);
+        }
+        QFile original(source);
+        QVERIFY(original.open(QIODevice::ReadOnly));
+        const auto originalBytes = original.readAll();
+        original.close();
+        QVERIFY2(PreferencesStore::migrateLegacyFile(source, target, &error), qPrintable(error));
+        {
+            PreferencesStore newStore(nullptr, target);
+            QCOMPARE(newStore.value("commands/sets").toByteArray(), QByteArray("legacy-command-data"));
+            QCOMPARE(newStore.value("serial/baud").toInt(), 2000000);
+            newStore.setValue("serial/baud", 115200);
+        }
+        QVERIFY(PreferencesStore::migrateLegacyFile(source, target, &error));
+        PreferencesStore newStore(nullptr, target);
+        QCOMPARE(newStore.value("serial/baud").toInt(), 115200);
+        QVERIFY(!PreferencesStore::migrateLegacyFile(source, source + "/blocked.ini", &error));
+        QVERIFY(!error.isEmpty());
+        QVERIFY(original.open(QIODevice::ReadOnly));
+        QCOMPARE(original.readAll(), originalBytes);
+    }
+
+    void framerHandlesFragmentedBoundariesAndTinyThreshold()
+    {
+        ReceiveFraming config;
+        config.mode = ReceiveFraming::Delimiter;
+        config.delimiter = "aba";
+        config.bufferThresholdBytes = 100000;
+        ReceiveFramer framer(config);
+        QVERIFY(framer.feed("xxab").isEmpty());
+        const auto frames = framer.feed("aabaYYab");
+        QCOMPARE(frames.size(), 2);
+        QCOMPARE(frames[0].bytes, QByteArray("xx"));
+        QCOMPARE(frames[1].bytes, QByteArray());
+        QCOMPARE(framer.feed("a").first().bytes, QByteArray("YY"));
+        QVERIFY(framer.flush(ReceiveFramer::Closed).isEmpty());
+
+        config.mode = ReceiveFraming::LengthPrefixU16LE;
+        config.bufferThresholdBytes = 1;
+        framer.setConfig(config);
+        const auto partial = framer.feed(QByteArray(1, '\x02'));
+        QCOMPARE(partial.size(), 1);
+        QCOMPARE(partial.first().trigger, ReceiveFramer::Threshold);
+        QCOMPARE(framer.pendingBytes(), 0);
+    }
+
+    void runtimeSeparatesTcpPeerFramesAndFlushesDisconnect()
+    {
+        QList<Traffic::Message> received;
+        EndpointRuntime runtime;
+        auto draft = makeDraft(PortDraft::TcpServer,
+            {{"server.address", "127.0.0.1"}, {"server.port", 0}});
+        draft.framing.mode = ReceiveFraming::Delimiter;
+        draft.framing.delimiter = "\n";
+        draft.framing.idleTimeoutMs = 5000;
+        connect(&runtime, &EndpointRuntime::messageReceived, this,
+            [&received](const Traffic::Message &message) {
+                if (message.direction == Traffic::Direction::Receive) received.append(message);
+            });
+        runtime.openEndpoint(0, draft);
+        auto *listener = runtime.findChild<QTcpServer *>();
+        QVERIFY(listener && listener->isListening());
+        auto *transport = runtime.findChild<AbstractTransport *>();
+        QSignalSpy chunks(transport, &AbstractTransport::dataReceived);
+        QTcpSocket first, second;
+        first.connectToHost(QHostAddress::LocalHost, listener->serverPort());
+        second.connectToHost(QHostAddress::LocalHost, listener->serverPort());
+        QTRY_COMPARE(first.state(), QAbstractSocket::ConnectedState);
+        QTRY_COMPARE(second.state(), QAbstractSocket::ConnectedState);
+        first.write("first-tail");
+        QTRY_COMPARE(chunks.size(), 1);
+        second.write("second\n");
+        QTRY_COMPARE(received.size(), 1);
+        QCOMPARE(received[0].raw, QByteArray("second"));
+        QVERIFY(received[0].source.peerAddress.endsWith(QString(":%1").arg(second.localPort())));
+        const auto firstSource = chunks.first()[1].value<Traffic::Source>();
+        first.disconnectFromHost();
+        QTRY_COMPARE_WITH_TIMEOUT(received.size(), 2, 1000);
+        QCOMPARE(received[1].raw, QByteArray("first-tail"));
+        QCOMPARE(received[1].source.peerId, firstSource.peerId);
+        QCOMPARE(received[1].source.peerAddress, firstSource.peerAddress);
+        second.write("shutdown-tail");
+        QTRY_COMPARE(chunks.size(), 3);
+        runtime.closeEndpoint(0);
+        QCOMPARE(received.size(), 3);
+        QCOMPARE(received.last().raw, QByteArray("shutdown-tail"));
+        QCOMPARE(received.last().source.peerId, received.first().source.peerId);
+    }
+
+    void runtimeIdleRestartsAfterEveryArrival()
+    {
+        QList<Traffic::Message> received;
+        EndpointRuntime runtime;
+        auto draft = makeDraft(PortDraft::TcpServer,
+            {{"server.address", "127.0.0.1"}, {"server.port", 0}});
+        draft.framing.mode = ReceiveFraming::IdleTimeout;
+        draft.framing.idleTimeoutMs = 240;
+        connect(&runtime, &EndpointRuntime::messageReceived, this,
+            [&received](const Traffic::Message &message) {
+                if (message.direction == Traffic::Direction::Receive) received.append(message);
+            });
+        runtime.openEndpoint(0, draft);
+        auto *listener = runtime.findChild<QTcpServer *>();
+        QVERIFY(listener && listener->isListening());
+        QSignalSpy chunks(runtime.findChild<AbstractTransport *>(), &AbstractTransport::dataReceived);
+        QTcpSocket client;
+        client.connectToHost(QHostAddress::LocalHost, listener->serverPort());
+        QTRY_COMPARE(client.state(), QAbstractSocket::ConnectedState);
+        client.write("one");
+        QTRY_COMPARE(chunks.size(), 1);
+        QTest::qWait(140);
+        client.write("two");
+        QTRY_COMPARE(chunks.size(), 2);
+        QTest::qWait(120); // 已过首次输入的期限，但距最后输入尚不足 240 ms。
+        QVERIFY(received.isEmpty());
+        QTRY_COMPARE(received.size(), 1);
+        QCOMPARE(received.first().raw, QByteArray("onetwo"));
+        QVERIFY(!received.first().source.peerId.isNull());
+        runtime.closeEndpoint(0);
+    }
+
+    void tcpServerStopsMultipleActivePeers()
+    {
+        TcpServerTransport server(0);
+        server.start(makeDraft(PortDraft::TcpServer,
+            {{"server.address", "127.0.0.1"}, {"server.port", 0}}), 1);
+        auto *listener = server.findChild<QTcpServer *>();
+        QVERIFY(listener && listener->isListening());
+        QSignalSpy peers(&server, &AbstractTransport::peerListChanged);
+        QTcpSocket first, second;
+        first.connectToHost(QHostAddress::LocalHost, listener->serverPort());
+        second.connectToHost(QHostAddress::LocalHost, listener->serverPort());
+        QTRY_COMPARE(peerCount(peers), 2);
+        server.stop();
+        server.stop(); // 幂等关闭。
+        QTRY_COMPARE(first.state(), QAbstractSocket::UnconnectedState);
+        QTRY_COMPARE(second.state(), QAbstractSocket::UnconnectedState);
+        QCOMPARE(server.write("closed", {}), qint64(-1));
+    }
+
+    void commandManagerUsesSelectedFileFormat()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        PreferencesStore store(nullptr, directory.filePath("preferences.ini"));
+        auto *manager = CommandManager::instance();
+        manager->load(&store);
+        CommandSet group(QStringLiteral("设备指令"));
+        CommandItem command;
+        command.content = "01 AB FF";
+        command.isHex = true;
+        command.description = "probe";
+        command.tail = "CR+LF";
+        group.commands.append(command);
+        for (const auto format : CommandFormats::allFormats()) {
+            const auto path = directory.filePath("commands." + CommandFormats::suffix(format));
+            QString error, detectedLabel;
+            QVERIFY2(manager->exportToFile(path, format, {group}, error), qPrintable(error));
+            QList<CommandSet> parsed;
+            CommandFormats::Format detected;
+            QVERIFY(CommandFormats::parseFile(path, parsed, error, &detected));
+            QCOMPARE(detected, format);
+            QCOMPARE(parsed.size(), 1);
+            QCOMPARE(parsed.first().commands.first().content, command.content);
+            const auto before = manager->setCount();
+            QVERIFY2(manager->importFromFile(path, error, &detectedLabel), qPrintable(error));
+            QCOMPARE(manager->setCount(), before + 1);
+            QCOMPARE(detectedLabel, CommandFormats::label(format));
+            QVERIFY(manager->allSets().last().id != group.id);
+            manager->undo();
+            QCOMPARE(manager->setCount(), before);
+        }
+        QString error;
+        QVERIFY(!manager->exportToFile(directory.filePath("missing/commands.json"),
+            CommandFormats::Format::QQCom, {group}, error));
+        QVERIFY(!error.isEmpty());
+    }
+
     // 接收组帧器：纯逻辑，不需要端口与事件循环——把字节流片段喂进去，
     // 看它按定界/长度/兜底三种规则吐出什么。
     void framerSplitsOnDelimiter()
@@ -128,6 +320,30 @@ private slots:
         QCOMPARE(stripped.pendingBytes(), 0);
     }
 
+    void framerSplitsOnIdleTimeout()
+    {
+        ReceiveFraming config;
+        config.mode = ReceiveFraming::IdleTimeout;
+        config.idleTimeoutMs = 10;
+        config.bufferThresholdBytes = 8;
+        ReceiveFramer framer(config);
+
+        QVERIFY(framer.feed(QByteArray("abc")).isEmpty());
+        QCOMPARE(framer.pendingBytes(), 3);
+        auto frames = framer.flush(ReceiveFramer::Idle);
+        QCOMPARE(frames.size(), 1);
+        QCOMPARE(frames.at(0).bytes, QByteArray("abc"));
+        QVERIFY(!frames.at(0).complete);
+        QCOMPARE(frames.at(0).trigger, ReceiveFramer::Idle);
+        QCOMPARE(framer.pendingBytes(), 0);
+
+        // 空闲模式仍受长度兜底限制，单次输入达到阈值立即输出。
+        frames = framer.feed(QByteArray(8, 'x'));
+        QCOMPARE(frames.size(), 1);
+        QCOMPARE(frames.at(0).trigger, ReceiveFramer::Threshold);
+        QCOMPARE(frames.at(0).bytes, QByteArray(8, 'x'));
+    }
+
     void framerFallbacksBoundBuffer()
     {
         // 缓冲阈值：慢速/无定界协议不能无限滞留，也不能无界增长。
@@ -135,6 +351,7 @@ private slots:
         config.mode = ReceiveFraming::Delimiter;
         config.delimiter = QByteArray::fromHex("0D0A");
         config.bufferThresholdBytes = 8;
+        config.logHints = true;
         ReceiveFramer framer(config);
 
         auto frames = framer.feed(QByteArray(8, 'x'));
@@ -153,6 +370,13 @@ private slots:
         QCOMPARE(idle.at(0).bytes, QByteArray("tail"));
         QCOMPARE(idle.at(0).trigger, ReceiveFramer::Idle);
         QVERIFY(framer.flush(ReceiveFramer::Idle).isEmpty());
+
+        // 低于阈值的残留才会留在缓冲区，关闭时应由 Closed 收尾输出。
+        framer.feed(QByteArray("end"));
+        auto closed = framer.flush(ReceiveFramer::Closed);
+        QCOMPARE(closed.size(), 1);
+        QCOMPARE(closed.at(0).bytes, QByteArray("end"));
+        QCOMPARE(closed.at(0).trigger, ReceiveFramer::Closed);
 
         // 直通模式：收到什么出什么，不做任何拆分。
         ReceiveFramer passthrough{ReceiveFraming()};
@@ -199,10 +423,6 @@ private slots:
         runtime.openEndpoint(0, draft);
         QTRY_COMPARE(lastState(states), int(Transport::State::Open));
 
-        QTcpSocket client;
-        client.connectToHost(QStringLiteral("127.0.0.1"), port);
-        QVERIFY(client.waitForConnected(3000));
-
         // 只看接收消息：状态/错误事件混在同一个信号里，断言前先按方向过滤。
         const auto received = [&messages] {
             QList<Traffic::Message> rx;
@@ -212,6 +432,16 @@ private slots:
             }
             return rx;
         };
+
+        // 空闲超时从“收到第一段数据”开始计算；端口刚打开时没有数据，
+        // 等待一个超时时间也不应产生空的接收消息。
+        QTest::qWait(160);
+        QCOMPARE(received().size(), 0);
+
+        QTcpSocket client;
+        client.connectToHost(QStringLiteral("127.0.0.1"), port);
+        QVERIFY(client.waitForConnected(3000));
+
         const auto waitReceived = [&](int count) { QTRY_VERIFY(received().size() >= count); };
 
         // 半帧先到：定界未到，只应出"one"这一帧，"t"留在缓冲里。
@@ -409,6 +639,9 @@ private slots:
             {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
              {"udp.target", ""}, {"udp.targetPort", 0}}), 1);
         QCOMPARE(lastState(state), int(Transport::State::Open));
+        const auto detail = state.last().at(2).toString();
+        QVERIFY(detail.contains(QStringLiteral("仅接收")));
+        QVERIFY(detail.contains(QStringLiteral("不会建立连接或自动回发")));
         // 仅接收的端点没有发送目标：写操作显式失败，不悄悄挑选目的地。
         QCOMPARE(receiver.write("x", QUuid()), qint64(-1));
         receiver.stop();
@@ -477,6 +710,30 @@ private slots:
         QVERIFY(!rx.source.peerAddress.isEmpty());
         QVERIFY(!rx.frameId.isNull());
 
+        // UDP 没有连接事件：首次收到每个来源时，运行时要把来源传给界面，
+        // 同时留下不会自动修改发送目标的明确提示。
+        const auto observedPeers = [&peers] {
+            QStringList result;
+            for (const auto &params : peers)
+                result.append(params.at(1).toStringList());
+            return result;
+        };
+        QTRY_VERIFY(observedPeers().contains(rx.source.peerAddress));
+        const auto peerNotices = [&messages] {
+            int count = 0;
+            for (const auto &params : messages) {
+                const auto message = params.at(0).value<Traffic::Message>();
+                if (message.direction == Traffic::Direction::State && message.source.endpointIndex == 0
+                    && message.statusText.contains(QStringLiteral("UDP 无连接")))
+                    ++count;
+            }
+            return count;
+        };
+        QCOMPARE(peerNotices(), 1);
+        runtime.sendPayload(1, "ping-again", int(Traffic::Origin::Manual));
+        QTRY_VERIFY(!findMessage(Traffic::Direction::Receive, 0, "ping-again").frameId.isNull());
+        QCOMPARE(peerNotices(), 1); // 同一来源不重复刷状态日志
+
         // 仅接收端点（已打开但没有发送目标）发送：显式 Failed，不静默丢弃。
         const int baseline = messages.count();
         runtime.sendPayload(0, "nope", int(Traffic::Origin::Manual));
@@ -487,9 +744,9 @@ private slots:
         runtime.closeEndpoint(1);
         runtime.closeEndpoint(0);
         QTRY_COMPARE(lastState(states), int(Transport::State::Closed));
-        // UDP 平时不发 peer 事件；关闭时的空列表广播用于复位界面显示。
-        for (const auto &params : peers)
-            QVERIFY(params.at(1).toStringList().isEmpty());
+        // 关闭时的空列表广播用于复位界面显示。
+        QVERIFY(!peers.isEmpty());
+        QVERIFY(peers.last().at(1).toStringList().isEmpty());
     }
 };
 

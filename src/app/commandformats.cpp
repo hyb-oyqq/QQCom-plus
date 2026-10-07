@@ -7,6 +7,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QSaveFile>
 #include <QStringList>
 
 namespace {
@@ -34,14 +35,7 @@ QByteArray hexTextToBytes(const QString &text)
 // 这样导入进来的 HEX 指令用户能直接在发送框里看懂、改得动。
 QString bytesToHexText(const QByteArray &bytes)
 {
-    QStringList parts;
-    parts.reserve(bytes.size());
-    for (const char byte : bytes) {
-        parts.append(QString::number(static_cast<unsigned char>(byte), 16)
-                         .rightJustified(2, QLatin1Char('0'))
-                         .toUpper());
-    }
-    return parts.join(QLatin1Char(' '));
+    return QString::fromLatin1(bytes.toHex(' ').toUpper());
 }
 
 QString isoUtcNow()
@@ -234,9 +228,9 @@ QJsonObject toBle(const QList<CommandSet> &sets)
     return root;
 }
 
-// ── easyDebug 自有格式 ──────────────────────────────────────────────────
+// ── QQCom 自有格式 ──────────────────────────────────────────────────
 
-QList<CommandSet> parseEasyDebug(const QJsonObject &root)
+QList<CommandSet> parseQQCom(const QJsonObject &root)
 {
     QList<CommandSet> sets;
     const QJsonArray array = root.value(QStringLiteral("commandSets")).toArray();
@@ -246,7 +240,7 @@ QList<CommandSet> parseEasyDebug(const QJsonObject &root)
     return sets;
 }
 
-QJsonObject toEasyDebug(const QList<CommandSet> &sets)
+QJsonObject toQQCom(const QList<CommandSet> &sets)
 {
     QJsonArray array;
     for (const auto &set : sets) {
@@ -264,13 +258,13 @@ namespace CommandFormats {
 
 QList<Format> allFormats()
 {
-    return {Format::EasyDebug, Format::JCom, Format::BleDebugger};
+    return {Format::QQCom, Format::JCom, Format::BleDebugger};
 }
 
 QString label(Format format)
 {
     switch (format) {
-    case Format::EasyDebug:   return QCoreApplication::translate("CommandFormats", "easyDebug (*.json)");
+    case Format::QQCom:   return QCoreApplication::translate("CommandFormats", "QQCom (*.json)");
     case Format::JCom:        return QCoreApplication::translate("CommandFormats", "JCom (*.port)");
     case Format::BleDebugger: return QCoreApplication::translate("CommandFormats", "BLE 调试器 (*.blemsg)");
     }
@@ -280,7 +274,7 @@ QString label(Format format)
 QString suffix(Format format)
 {
     switch (format) {
-    case Format::EasyDebug:   return QStringLiteral("json");
+    case Format::QQCom:   return QStringLiteral("json");
     case Format::JCom:        return QStringLiteral("port");
     case Format::BleDebugger: return QStringLiteral("blemsg");
     }
@@ -296,6 +290,7 @@ QString saveFilter(Format format)
 bool parseFile(const QString &filePath, QList<CommandSet> &outSets,
                QString &errorMessage, Format *detected)
 {
+    errorMessage.clear();
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         errorMessage = QCoreApplication::translate("CommandFormats", "无法打开文件");
@@ -326,34 +321,40 @@ bool parseFile(const QString &filePath, QList<CommandSet> &outSets,
         return true;
     }
     if (root.contains(QStringLiteral("commandSets"))) {
-        if (detected) *detected = Format::EasyDebug;
-        outSets = parseEasyDebug(root);
+        if (detected) *detected = Format::QQCom;
+        outSets = parseQQCom(root);
         return true;
     }
 
     errorMessage = QCoreApplication::translate(
         "CommandFormats",
-        "无法识别的指令集文件格式（支持 easyDebug / JCom / BLE 调试器 三种）");
+        "无法识别的指令集文件格式（支持 QQCom / JCom / BLE 调试器 三种）");
     return false;
 }
 
 bool writeFile(const QString &filePath, Format format,
                const QList<CommandSet> &sets, QString &errorMessage)
 {
+    errorMessage.clear();
     QJsonDocument doc;
     switch (format) {
-    case Format::EasyDebug:   doc = QJsonDocument(toEasyDebug(sets)); break;
+    case Format::QQCom:   doc = QJsonDocument(toQQCom(sets)); break;
     case Format::JCom:        doc = QJsonDocument(toJCom(sets));      break;
     case Format::BleDebugger: doc = QJsonDocument(toBle(sets));       break;
     }
 
-    QFile file(filePath);
+    QSaveFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        errorMessage = QCoreApplication::translate("CommandFormats", "无法写入文件");
+        errorMessage = QCoreApplication::translate("CommandFormats", "无法写入文件：%1")
+                           .arg(file.errorString());
         return false;
     }
-    file.write(doc.toJson(QJsonDocument::Indented));
-    file.close();
+    const auto data = doc.toJson(QJsonDocument::Indented);
+    if (file.write(data) != data.size() || !file.commit()) {
+        errorMessage = QCoreApplication::translate("CommandFormats", "保存文件失败：%1")
+                           .arg(file.errorString());
+        return false;
+    }
     return true;
 }
 

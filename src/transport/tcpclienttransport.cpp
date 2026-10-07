@@ -37,6 +37,7 @@ void TcpClientTransport::start(const PortDraft &draft, quint64 generation)
     }
 
     m_socket = new QTcpSocket(this);
+    m_socket->setReadBufferSize(256 * 1024);
     connect(m_socket, &QTcpSocket::connected, this, [this] {
         m_timeout->stop();
         m_open = true;

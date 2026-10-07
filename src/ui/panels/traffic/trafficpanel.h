@@ -5,6 +5,8 @@
 #include "domain/trafficmessage.h"
 #include "domain/portdraft.h"
 #include "traffictextview.h"
+#include "trafficmodel.h"
+#include "trafficfilter.h"
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QObject>
@@ -26,117 +28,6 @@ class PreferencesStore;
 class QPushButton;
 class QStackedWidget;
 class QTimer;
-
-// 消息是 domain 的值类型（Traffic::Message）：原始字节、时间戳、来源、长度都是事实。
-//
-// TrafficModel 是**屏幕上能重画的完整事实来源**：监视区里看到的每一行都由它投影而来。
-// 显示设置与过滤条件要能立刻作用于"已经收到的内容"，前提就是原始记录还在——
-// 只留渲染后的字符串是做不到的（这也正是它早先只能"影响新行"的原因）。
-// 导出、记录与关键词搜索同样以它为唯一数据源。
-class TrafficModel : public QObject
-{
-    Q_OBJECT
-public:
-    // 上限**不是历史策略，只是内存安全阀**（用户钦定：像 JCom 一样一直留着）。
-    // 早先的 16 MiB / 5 万条是"重投影还能点一下就有"的性能取舍，代价是压测跑
-    // 一万多条就开始丢最早的记录——用户拿 JCom 一比就发现丢了（16 MiB ÷ 每条字节
-    // 数就是那条隐形的历史长度）。现在默认不再设小预算：正常压测——几十小时、
-    // 上百万条——都碰不到安全阀。留着它是因为无界增长最终以 OOM 收场，
-    // 那比丢最旧数据更糟。
-    //
-    // 安全阀触顶时**必须播报**：appendRecords 把释放条数交回调用方，由面板写进
-    // 状态栏摘要（见 TrafficPanel::m_releasedRecords）。无声丢数据是这里唯一
-    // 不可接受的行为——"屏幕上少了几万条"和"根本没收到"必须能分辨。
-    static constexpr qint64 kSafetyByteBudget = 512LL * 1024 * 1024; // 512 MiB 原始载荷
-    static constexpr int kSafetyRowBudget = 20000000;                // 2000 万条：元数据兜底
-
-    explicit TrafficModel(QObject *parent = nullptr);
-    int rowCount() const;
-    qint64 rawBytes() const { return m_rawBytes; }
-    qint64 byteBudget() const { return m_byteBudget; }
-    int rowBudget() const { return m_rowBudget; }
-    // 注入上限。默认就是上面两个安全阀；测试用它把预算压到极小以便验证淘汰语义，
-    // 将来的"内存紧张时收紧"策略也从这里进。
-    void setBudget(qint64 bytes, int rows);
-    void replaceRecords(QList<Traffic::Message> records);
-    // 返回**本次从头部释放掉的最旧条数**（0 表示没释放）。调用方必须把它播报出去，
-    // 不能丢进 /dev/null。
-    int appendRecords(QList<Traffic::Message> records);
-    const Traffic::Message &record(int row) const;
-private:
-    QList<Traffic::Message> m_records;
-    qint64 m_rawBytes = 0; // m_records 的原始字节总数，避免每次追加都全量重算
-    qint64 m_byteBudget = kSafetyByteBudget;
-    int m_rowBudget = kSafetyRowBudget;
-};
-
-// 过滤判定的唯一实现：文本显示在消息到达时调用它，条件由调用方持有。
-// 全部条件都作用在结构化字段上：端点/方向来自消息本身，
-// 内容条件则对同一份原始字节做多种视图的匹配，所见即可搜。
-class TrafficFilter
-{
-public:
-    // 一条内容条件（关键词或排除词）。正则模式下构造时预编译一次，热路径只 match()。
-    // 非法正则**不进判定**（该条件被丢弃，由条件条标红提示）：退化的方向必须是"不过滤"，
-    // 文本条件：只支持字面匹配（大小写敏感/不敏感）。
-    class TextCondition
-    {
-    public:
-        TextCondition() = default;
-        TextCondition(const QString &literal, Qt::CaseSensitivity sensitivity);
-        bool matches(const QString &text) const;
-        bool isEmpty() const;
-    private:
-        QString m_literal;
-        Qt::CaseSensitivity m_sensitivity = Qt::CaseInsensitive;
-    };
-
-    struct Options
-    {
-        QSet<QUuid> endpoints; // 集合为空表示不显示任何端点的记录
-        bool rx = true;
-        bool tx = true;
-        bool states = true;   // 状态迁移（端口打开/关闭/重连等）
-        bool warnings = true; // 警告日志
-        bool errors = true;   // 错误日志
-        // 内容条件：关键词任一命中即通过（组内 OR），排除词命中任一即隐藏（黑名单）。
-        // 两者共用同一套候选文本视图，见 Matcher。
-        QStringList keywords;
-        QStringList excludes;
-        bool caseSensitive = false;
-
-        // 面板用它判断"条件是否变了、视图是否还和条件一致"。
-        bool operator==(const Options &other) const
-        {
-            return endpoints == other.endpoints && rx == other.rx && tx == other.tx
-                && states == other.states && warnings == other.warnings && errors == other.errors
-                && keywords == other.keywords && excludes == other.excludes
-                && caseSensitive == other.caseSensitive;
-        }
-        bool operator!=(const Options &other) const { return !(*this == other); }
-    };
-
-    // 预编译后的判定器：正则只编译一次；候选文本按"便宜 → 昂贵"排序并逐项短路，
-    // 最贵的两条 HEX 串在多数消息上根本不会被构造（热路径性能红线，见设计稿 §6）。
-    class Matcher
-    {
-    public:
-        Matcher() = default;
-        Matcher(const Options &options, PayloadCodec::Format format);
-        bool accepts(const Traffic::Message &record) const;
-        // 供摘要与持久化复用；Matcher 持有的是构造时的条件快照。
-        const Options &options() const { return m_options; }
-    private:
-        Options m_options;
-        PayloadCodec::Format m_format = PayloadCodec::Format::Hex;
-        QList<TextCondition> m_keywords;
-        QList<TextCondition> m_excludes;
-    };
-
-    // 一次性判定，等价于 Matcher(options, format).accepts(record)：供测试与低频场景使用。
-    // 热路径必须自己构造一次 Matcher 反复调用，不要每条消息都走这里。
-    static bool accepts(const Traffic::Message &record, const Options &options, PayloadCodec::Format format);
-};
 
 class TrafficPanel : public QWidget
 {

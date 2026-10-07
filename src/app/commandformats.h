@@ -6,7 +6,7 @@
 #include <QList>
 #include <QString>
 
-// 指令集文件的外部格式适配层：easyDebug 自有格式 / JCom(*.port) / BLE 调试器(*.blemsg)。
+// 指令集文件的外部格式适配层：QQCom 自有格式 / JCom(*.port) / BLE 调试器(*.blemsg)。
 //
 // 导入侧按 JSON 顶层结构自动嗅探，不看扩展名——用户会随手改扩展名，而且同一个
 // 工具导出的文件也可能被重命名。
@@ -18,14 +18,14 @@ namespace CommandFormats
 {
 enum class Format
 {
-    EasyDebug,   // {"version":"1.0","commandSets":[...]}
+    QQCom,   // {"version":"1.0","commandSets":[...]}
     JCom,        // [ {"GroupName":..., "InitSendList":[...]} ]
     BleDebugger  // {"version":1,"groups":[...],"items":[...]}
 };
 
 // 对话框下拉与文件对话框的顺序来源
 QList<Format> allFormats();
-QString label(Format format);      // "easyDebug (*.json)" 这类显示名
+QString label(Format format);      // "QQCom (*.json)" 这类显示名
 QString suffix(Format format);     // "json" / "port" / "blemsg"
 QString saveFilter(Format format); // QFileDialog 用的过滤器
 
