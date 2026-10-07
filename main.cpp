@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "version/version.h"
 #include "domain/networkaddress.h"
+#include "update/updateservice.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -11,6 +12,7 @@
 #include <QLocale>
 #include <QTimer>
 #include <QTranslator>
+#include <QUrl>
 
 #include <algorithm>
 #include <cmath>
@@ -132,6 +134,23 @@ int main(int argc, char *argv[])
                        << "——忽略并继续启动";
         }
     }
+
+#ifdef Q_OS_WIN
+    // 自动升级只在正常可见运行时触发；快照和延迟探针不能访问网络或弹窗。
+    // 可用 QQCOM_DISABLE_UPDATE=1 关闭本机检查，便于离线开发和自动化测试。
+    if (!parser.isSet("snapshot") && !parser.isSet("latency-probe")
+        && qEnvironmentVariableIsEmpty("QQCOM_DISABLE_UPDATE")) {
+        auto *updates = new UpdateService(QStringLiteral(QQCOM_VERSION_STR), &w);
+        const QString overrideUrl = qEnvironmentVariable("QQCOM_OTA_MANIFEST_URL");
+        const QUrl manifestUrl = overrideUrl.isEmpty()
+                                     ? QUrl(QStringLiteral(
+                                           "https://gitee.com/qinjmin/qqcom/raw/master/ota/stable.json"))
+                                     : QUrl(overrideUrl);
+        QTimer::singleShot(3000, &w, [updates, manifestUrl] {
+            updates->checkForUpdates(manifestUrl);
+        });
+    }
+#endif
 
     // 事件循环延迟探针（压测专用，用户钦定"先实测出上限，不做常驻性能提示"）：
     // 20ms 周期记"这一拍比理论时刻晚了多少"（µs，自校正：以上一拍实际时刻为基准，

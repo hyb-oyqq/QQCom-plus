@@ -1,44 +1,97 @@
 # QQCom
 
-基于 Qt Widgets 的通信调试工具，固定 A/B 双端点，支持串口、TCP 客户端、TCP 服务器和 UDP。
+QQCom 是一个基于 Qt Widgets 的 Windows 通信调试工作台，支持串口、TCP 客户端、TCP 服务器和 UDP，并提供收发监视、组帧、过滤、编码、日志和快捷指令管理。
 
-## 当前功能
+仓库地址：[gitee.com/qinjmin/qqcom](https://gitee.com/qinjmin/qqcom)
 
-- 真实收发、端点状态、TCP 客户端身份及 UDP 来源 IP/端口记录。
-- TCP 服务器和 UDP 通过网卡名称及 IPv4 地址选择本地绑定地址，支持 `0.0.0.0`；本地端口 `0` 由系统分配。
-- 串口/TCP 接收支持直通、空闲超时、结束符、U16 小端长度前缀。空闲默认 10 ms，从最后一次非空数据到达重新计时；长度兜底默认 300 字节，关闭时输出残留缓冲。
-- 多种显示/发送编码、分类及关键词过滤、文本日志、TSV 预览导出、手动和定时发送。
-- 快捷指令分组、重命名、行内编辑、拖动排序、批量顺序发送；QQCom JSON、JCom、BLE 调试器指令文件导入导出。
+## 当前能力
 
-桥接/路由目前只有界面预览，尚不转发真实数据。协议插件、OTA、工作区管理和后台轮转日志尚未实现，见 [后续工作](docs/ROADMAP.md)。
+- A/B 双端点真实收发，支持串口、TCP 客户端、TCP 服务器和 UDP。
+- 串口/TCP 直通、空闲超时、结束符和 U16 小端长度前缀组帧。
+- 多种显示与发送编码、关键词/正则过滤、文本日志和 TSV 预览导出。
+- 手动/定时发送、快捷指令分组、拖动排序和 QQCom/JCom/BLE 文件导入导出。
+- Windows x64 发布目录自动部署 Qt DLL 和插件，版本由 `version/version.json` 统一管理。
 
-## 构建运行
+桥接转发和后台日志轮转仍在演进中；Windows 自动升级已经接入第一版检查、下载和覆盖流程，协议和发布流程见 [OTA 方案](docs/OTA.md)。
 
-主要验证环境：Windows x64、Qt 6.10.1 MSVC 2022、C++17、qmake。需要 Qt Widgets、Network、SerialPort、Concurrent、Core5Compat；测试另需 Qt Test。
+## 快速开始
 
-Qt Creator 打开 [QQCom.pro](QQCom.pro)，选择对应 Kit 构建。命令行可在仓库根目录运行：
+### 开发环境
+
+- Windows x64
+- Qt 6.10.1 MSVC 2022（Widgets、Network、SerialPort、Concurrent、Core5Compat、Test）
+- Visual Studio 2022 C++ 工具链
+- PowerShell 5.1 或更高版本
+
+Qt Creator 直接打开 [QQCom.pro](QQCom.pro) 即可。命令行构建：
 
 ```powershell
 .\build.bat
 .\build\release\release\QQCom.exe
 ```
 
-`build.bat` 支持用 `QT_BIN`、`VCVARS64` 覆盖本机工具链路径，采用独立构建目录，失败返回非零。qmake 自动生成版本头；Windows 链接后自动部署当前 Kit 的 Qt DLL 和插件。搬移程序时保留整个运行目录；目标机器还需匹配的 MSVC 运行库。
+脚本默认使用 `C:\MyProgram\Qt\6.10.1\msvc2022_64\bin` 和 Visual Studio 2022 Community。安装路径不同可以覆盖：
 
-## 配置兼容
+```powershell
+$env:QT_BIN = 'D:\Qt\6.10.1\msvc2022_64\bin'
+$env:VCVARS64 = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
+.\build.bat
+```
 
-程序、工程和测试目标统一使用 QQCom。Windows 配置位于 `%LOCALAPPDATA%\QQCom\QQCom\preferences.ini`。首次运行且新配置不存在时，从旧目录 `%LOCALAPPDATA%\easyDebug\easyDebug\preferences.ini` 复制设置和指令，原文件保留；已有 QQCom 配置不会被覆盖。
+### 测试
 
-改名不改变指令 JSON 的字段和版本，旧文件仍可导入。仓库所在磁盘目录名称不影响构建；重新打开 `QQCom.pro` 即可使用新工程名。
+核心、UI 和性能测试的完整命令见 [开发与验证](docs/DEVELOPMENT.md)。提交前至少执行：
 
-## 文档入口
+```powershell
+git diff --check
+.\build.bat
+```
 
-| 文档 | 内容 |
+## 目录结构
+
+| 目录 | 作用 |
 | --- | --- |
-| [架构](docs/ARCHITECTURE.md) | 真实模块职责、线程、数据流及容量边界 |
-| [界面与使用约定](docs/UI_DESIGN.md) | 端口、UDP 语义、组帧、过滤、发送与日志 |
-| [开发与验证](docs/DEVELOPMENT.md) | 构建、测试、版本和发布流程 |
-| [性能测试](tests/PERFORMANCE_TEST.md) | 可复现探针、压测步骤及计量限制 |
-| [后续工作](docs/ROADMAP.md) | 未实现能力和优化优先级 |
-| [参考来源](docs/REFERENCES.md) | 参考工程、版本、借鉴范围与许可 |
-| [历史归档](docs/archive/2026-10-07-review.md) | 本轮审查结果、性能证据和文档合并记录 |
+| `src/domain` | 领域值对象和消息模型 |
+| `src/transport` | 串口、TCP、UDP 传输实现 |
+| `src/app` | 端点运行时、组帧和快捷指令 |
+| `src/ui` | Qt Widgets 面板和公共控件 |
+| `src/persistence` | 偏好设置、历史地址和旧版本迁移 |
+| `tests` | 核心、UI、性能和压力测试 |
+| `scripts` | 构建、版本、Qt 部署和发布工具 |
+| `docs` | 架构、开发、界面和 OTA 说明 |
+| `version` | 发布版本清单 |
+
+## 版本和发布
+
+版本源文件是 `version/version.json`。普通构建只生成被 Git 忽略的 `version/version.h`，不会改变版本号；发布前显式递增版本：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/update_version.ps1 -Mode patch
+```
+
+发布目录必须包含完整的 `QQCom.exe`、Qt DLL 和 `plugins` 子目录。生成 OTA 包和清单：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 `
+  -BinaryDir build/release/release `
+  -Version 0.1.0 `
+  -BaseUrl https://gitee.com/qinjmin/qqcom/releases/download/v0.1.0
+```
+
+发布流程、清单校验、安全要求和更新策略见 [OTA 方案](docs/OTA.md)。
+
+## 文档
+
+- [架构](docs/ARCHITECTURE.md)
+- [界面与使用约定](docs/UI_DESIGN.md)
+- [开发与验证](docs/DEVELOPMENT.md)
+- [OTA 自动升级方案](docs/OTA.md)
+- [后续工作](docs/ROADMAP.md)
+- [贡献指南](CONTRIBUTING.md)
+- [变更记录](CHANGELOG.md)
+
+## 贡献和许可
+
+提交代码前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，并确保 `git diff --check` 和相关测试通过。
+
+当前仓库尚未声明开源许可证。除维护者明确授权的范围外，不应将源码或构建产物用于再分发。

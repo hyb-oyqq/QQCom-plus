@@ -77,7 +77,7 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
-    setWindowTitle(QStringLiteral(QQCOM_APP_TITLE) + tr(" · 通信调试工作台"));
+    setWindowTitle(QStringLiteral(QQCOM_APP_TITLE));
     setMinimumSize(900, 720);  // 宽度的真实下限由内容决定（见 updateWindowMinimumWidth），这里只兜底
     resize(1440, 920);
     ui->menubar->hide();

@@ -18,6 +18,7 @@ win32 {
 
 include(src/ui/ui.pri)
 include(src/services.pri)
+include(src/update/update.pri)
 RESOURCES += resources/resources.qrc
 
 # 程序主图标：RC_ICONS 让 qmake 自动生成 .rc 并编译进 exe（资源管理器/任务栏/快捷方式用）。
