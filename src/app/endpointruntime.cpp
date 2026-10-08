@@ -111,6 +111,8 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
         [this, index, generation](quint64 gen, const Traffic::Source &source,
                                    const QByteArray &payload, int framing) {
             if (gen != m_generations[index]) return;
+            if (!payload.isEmpty())
+                emit rawDataReceived(index, source, payload);
             // 数据报自带边界，直接就是一条；字节流片段才交给组帧器。
             if (Traffic::Framing(framing) != Traffic::Framing::Stream) {
                 // UDP 每个数据报都带独立的来源地址。首次见到一个来源时，用状态行和

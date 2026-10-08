@@ -18,6 +18,7 @@ SOURCES += \
     $$PWD/panels/traffic/filterflags.cpp \
     $$PWD/panels/traffic/viewtoggles.cpp \
     $$PWD/panels/sending/sendpanel.cpp \
+    $$PWD/panels/sending/filetransferwidget.cpp \
     $$PWD/panels/routing/routeeditorwidget.cpp \
     $$PWD/common/endpointformat.cpp \
     $$PWD/common/styledialogs.cpp
@@ -44,4 +45,5 @@ HEADERS += \
     $$PWD/panels/traffic/filterflags.h \
     $$PWD/panels/traffic/viewtoggles.h \
     $$PWD/panels/sending/sendpanel.h \
+    $$PWD/panels/sending/filetransferwidget.h \
     $$PWD/panels/routing/routeeditorwidget.h

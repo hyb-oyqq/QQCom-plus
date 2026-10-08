@@ -32,5 +32,7 @@
         <file>icons/format-clear.svg</file>
         <file>icons/numeric.svg</file>
         <file>icons/wrap.svg</file>
+        <file>icons/pin.svg</file>
+        <file>icons/pin-outline.svg</file>
     </qresource>
 </RCC>

@@ -644,34 +644,27 @@ QWidget *PortSelectorWidget::buildFramingRow()
     column->setContentsMargins(0, 5, 0, 2);
     column->setSpacing(2);
 
-    const auto makeLine = [row] {
-        auto *line = new QWidget(row);
-        auto *layout = new QHBoxLayout(line);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(8);
-        return qMakePair(line, layout);
-    };
+    // 开关、完整帧判定和两个兜底参数收成一行。标签不用 Muted：那条规则是 12px，
+    // 输入框继承正文 13px，并排会看成字号不齐。说明文字留在下一行。
+    auto *controls = new QWidget(row);
+    controls->setObjectName(QStringLiteral("framingControls"));
+    auto *controlsLayout = new QHBoxLayout(controls);
+    controlsLayout->setContentsMargins(0, 0, 0, 0);
+    controlsLayout->setSpacing(6);
 
-    // 参考 BLE 调试助手，把最重要的两个开关放在设置区顶部，避免用户把
-    // “不拆分”误解成组帧功能没有生效。
-    auto [switchLine, switchLayout] = makeLine();
     m_framingEnabled = new QCheckBox(tr("启用接收组帧"));
     m_framingEnabled->setObjectName(QStringLiteral("framingEnabled"));
     m_framingEnabled->setToolTip(tr("启用后，串口和 TCP 字节流会按下面的完整帧判定规则组帧；UDP 数据报自带边界，不经过组帧。"));
-    switchLayout->addWidget(m_framingEnabled);
+    controlsLayout->addWidget(m_framingEnabled);
     m_framingLogHints = new QCheckBox(tr("记录组帧提示日志"));
     m_framingLogHints->setObjectName(QStringLiteral("framingLogHints"));
     m_framingLogHints->setToolTip(tr("兜底输出（空闲超时、缓冲阈值、关闭收尾）时向监视区发一条提示事件"));
-    switchLayout->addWidget(m_framingLogHints);
-    switchLayout->addStretch();
-    column->addWidget(switchLine);
+    controlsLayout->addWidget(m_framingLogHints);
+    controlsLayout->addSpacing(8);
 
-    // 第二行：完整帧判定。结束符输入和边界保留开关只在对应模式显示。
-    auto [modeLine, modeLayout] = makeLine();
     auto *label = new QLabel(tr("完整帧判定"));
-    label->setObjectName("Muted");
-    label->setMinimumWidth(92);
-    modeLayout->addWidget(label);
+    label->setObjectName(QStringLiteral("framingModeLabel"));
+    controlsLayout->addWidget(label);
 
     m_framingMode = new QComboBox;
     m_framingMode->setObjectName(QStringLiteral("framingMode"));
@@ -683,33 +676,30 @@ QWidget *PortSelectorWidget::buildFramingRow()
     // 非编辑型下拉框一律按内容定宽（AdjustToContents+Fixed），否则 QSS 的箭头内边距
     // 会把最宽项截掉——tests/ui 的 portControlsShowTheirOwnContent 就是这条底线。
     fitComboToItems(m_framingMode);
-    modeLayout->addWidget(m_framingMode, 0, Qt::AlignLeft);
+    controlsLayout->addWidget(m_framingMode);
 
     // 结束符按 HEX 输入（0D 0A / 0D0A 均可）：不可见字节必须能被精确表达。
+    // 只在结束符模式显示，隐藏后不占这一行的宽度。
     m_framingDelimiter = new QLineEdit;
     m_framingDelimiter->setObjectName(QStringLiteral("framingDelimiter"));
     m_framingDelimiter->setPlaceholderText(tr("结束符 HEX，如 0D 0A"));
     m_framingDelimiter->setToolTip(tr("结束符按 HEX 输入，可多字节（如 0D 0A、7E）"));
-    m_framingDelimiter->setMaximumWidth(190);
-    modeLayout->addWidget(m_framingDelimiter, 1);
+    m_framingDelimiter->setMaximumWidth(160);
+    controlsLayout->addWidget(m_framingDelimiter);
+
+    m_framingKeepBoundary = new QCheckBox(tr("保留结束符"));
+    m_framingKeepBoundary->setObjectName(QStringLiteral("framingKeepBoundary"));
+    controlsLayout->addWidget(m_framingKeepBoundary);
+    controlsLayout->addSpacing(8);
 
     // 用 PortSpinBox（sizeHint 覆盖量程两端）：写死宽度会让最大值显示不全，
     // tests/ui 的 portControlsShowTheirOwnContent 就是这条底线。
     auto numericLocale = QLocale::c();
     numericLocale.setNumberOptions(QLocale::RejectGroupSeparator);
 
-    m_framingKeepBoundary = new QCheckBox(tr("保留结束符"));
-    m_framingKeepBoundary->setObjectName(QStringLiteral("framingKeepBoundary"));
-    modeLayout->addWidget(m_framingKeepBoundary);
-    modeLayout->addStretch();
-    column->addWidget(modeLine);
-
-    // 第三、四行：兜底设置独立成行，数字和单位在窄窗口下也不会互相挤压。
-    auto [idleLine, idleLayout] = makeLine();
     m_framingIdleLabel = new QLabel(tr("空闲输出超时"));
-    m_framingIdleLabel->setObjectName("Muted");
-    m_framingIdleLabel->setMinimumWidth(140);
-    idleLayout->addWidget(m_framingIdleLabel);
+    m_framingIdleLabel->setObjectName(QStringLiteral("framingIdleLabel"));
+    controlsLayout->addWidget(m_framingIdleLabel);
     m_framingIdle = new PortSpinBox;
     m_framingIdle->setObjectName(QStringLiteral("framingIdle"));
     m_framingIdle->setRange(10, 60000);
@@ -717,19 +707,16 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingIdle->setLocale(numericLocale);
     m_framingIdle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_framingIdle->setToolTip(tr("超过该时长没有新数据，就把已缓冲的字节作为一条输出"));
-    idleLayout->addWidget(m_framingIdle);
-    // 单位在框外（与"连接超时"的处理一致）：输入框只放数字，单位用灰调小标签表达。
+    controlsLayout->addWidget(m_framingIdle);
+    // 单位在框外：输入框只放数字。字号与数字相同，不再用次要文字的 12px。
     m_framingIdleUnit = new QLabel(tr("ms"));
-    m_framingIdleUnit->setObjectName("Muted");
-    idleLayout->addWidget(m_framingIdleUnit);
-    idleLayout->addStretch();
-    column->addWidget(idleLine);
+    m_framingIdleUnit->setObjectName(QStringLiteral("framingIdleUnit"));
+    controlsLayout->addWidget(m_framingIdleUnit);
+    controlsLayout->addSpacing(8);
 
-    auto [thresholdLine, thresholdLayout] = makeLine();
     m_framingThresholdLabel = new QLabel(tr("缓冲输出阈值"));
-    m_framingThresholdLabel->setObjectName("Muted");
-    m_framingThresholdLabel->setMinimumWidth(140);
-    thresholdLayout->addWidget(m_framingThresholdLabel);
+    m_framingThresholdLabel->setObjectName(QStringLiteral("framingThresholdLabel"));
+    controlsLayout->addWidget(m_framingThresholdLabel);
     m_framingThreshold = new PortSpinBox;
     m_framingThreshold->setObjectName(QStringLiteral("framingThreshold"));
     m_framingThreshold->setRange(16, 65536);
@@ -737,23 +724,20 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingThreshold->setLocale(numericLocale);
     m_framingThreshold->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_framingThreshold->setToolTip(tr("缓冲达到该字节数即强制输出，避免无定界的数据一直滞留"));
-    thresholdLayout->addWidget(m_framingThreshold);
+    controlsLayout->addWidget(m_framingThreshold);
     m_framingThresholdUnit = new QLabel(tr("字节"));
-    m_framingThresholdUnit->setObjectName("Muted");
-    thresholdLayout->addWidget(m_framingThresholdUnit);
-    thresholdLayout->addStretch();
-    column->addWidget(thresholdLine);
+    m_framingThresholdUnit->setObjectName(QStringLiteral("framingThresholdUnit"));
+    controlsLayout->addWidget(m_framingThresholdUnit);
+    controlsLayout->addStretch();
+    column->addWidget(controls);
 
-    // 说明区对应参考图的“工作机制”，但使用可读的多行文本，不把实现术语
-    // 塞进控件标签。模式切换后只更新说明，不改变已经保存的字段含义。
+    // 说明区对应参考图的“工作机制”。模式切换后只更新说明，不改变已经保存的字段含义。
+    // 标题加粗但不再单独缩小字号，和上面这一行保持同一套正文大小。
     m_framingMechanismTitle = new QLabel(tr("工作机制"));
-    m_framingMechanismTitle->setObjectName("Muted");
-    QFont mechanismFont = m_framingMechanismTitle->font();
-    mechanismFont.setBold(true);
-    m_framingMechanismTitle->setFont(mechanismFont);
+    m_framingMechanismTitle->setObjectName(QStringLiteral("framingMechanismTitle"));
     column->addWidget(m_framingMechanismTitle);
     m_framingHint = new QLabel;
-    m_framingHint->setObjectName("Muted");
+    m_framingHint->setObjectName(QStringLiteral("framingHint"));
     m_framingHint->setWordWrap(true);
     m_framingHint->setIndent(8);
     column->addWidget(m_framingHint);

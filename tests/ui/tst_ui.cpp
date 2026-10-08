@@ -34,6 +34,8 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPoint>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
@@ -113,12 +115,8 @@ QStringList controlsThatClipContent(QWidget *area)
     return problems;
 }
 
-// 顶栏塞满之后的宽度上限。窗口最小宽度是"内容不被压缩"的代价，也是它自己的风险：
-// 一旦超过屏幕宽度，窗口就再也放不下了——那时用户看到的不是"按钮完整"，而是
-// "窗口装不进桌面"，而且他自己也没法把窗口调窄（最小宽度是硬下限）。
-// 取 1920：常见桌面的逻辑宽度，超过它就不再是"加宽窗口"而是"跑出屏幕"。
-// 这个数字是给这类回归按的闸，不是尺寸目标。
-constexpr int MaxSaneWindowWidth = 1920;
+// 窗口不再有内容下限：边框可以拖到比顶栏更窄，窄了允许裁切。
+// 顶栏"不重叠"只在放得下它的宽度上检查。
 
 // A horizontal strip must stay one row at any window width: no wrapping, no scrollbar.
 // Qt never wraps a QHBoxLayout, so the failure mode is overlap or a control pushed past the
@@ -655,25 +653,26 @@ private slots:
                  QStringLiteral("心跳"));
         QVERIFY2(toggle->text().contains(QStringLiteral("过滤 ")), qPrintable(toggle->text()));
 
-        // 顶栏必须排得下一行：开关常驻的代价就是这一行的宽度。窗口最小宽度不是谁算出来的，
-        // 而是**控件自己撑出来的**——行里每个控件横向策略为 Fixed（按 sizeHint 占位），
-        // 布局据此报出 minimumSizeHint，主窗口直接用它。所以这里能做的检查是：
-        // 把窗口压到它自己的最小宽度，看有没有控件被挤到重叠或探出右缘。
-        const int minWidth = window.minimumWidth();
+        // 窗口没有内容下限：布局激活之后仍然是 0，并且能停在比内容更小的尺寸上。
         auto *panel = window.findChild<TrafficPanel *>();
         QVERIFY(panel);
-        qInfo() << "window minimum width" << minWidth << "traffic minimum"
+        qInfo() << "window minimum width" << window.minimumWidth() << "traffic minimum"
                 << panel->minimumSizeHint().width();
-        QVERIFY2(minWidth <= MaxSaneWindowWidth,
-            qPrintable(QStringLiteral("窗口最小宽度 %1 已超出常见屏幕：顶栏该收窄了")
-                           .arg(minWidth)));
-        // 窗口最小宽度至少要装得下数据区自己报出的下限——小于它就意味着"到了最小宽度
-        // 数据区仍然放不下"，那正是控件会被挤变形的场景。
-        QVERIFY2(minWidth >= panel->minimumSizeHint().width(),
-            qPrintable(QStringLiteral("窗口最小宽度 %1 装不下数据区下限 %2")
-                           .arg(minWidth)
-                           .arg(panel->minimumSizeHint().width())));
-        window.resize(minWidth, 660);
+        QCOMPARE(window.minimumWidth(), 0);
+        QCOMPARE(window.minimumHeight(), 0);
+        window.resize(400, 280);
+        QApplication::processEvents();
+        QTest::qWait(50);
+        QVERIFY2(window.width() < 700,
+            qPrintable(QStringLiteral("窗口宽度被弹回 %1，最小宽度 %2")
+                           .arg(window.width()).arg(window.minimumWidth())));
+        QVERIFY2(window.height() < 500,
+            qPrintable(QStringLiteral("窗口高度被弹回 %1，最小高度 %2")
+                           .arg(window.height()).arg(window.minimumHeight())));
+        QCOMPARE(window.minimumWidth(), 0);
+        QCOMPARE(window.minimumHeight(), 0);
+        // 拉回放得下顶栏的宽度，这一行仍不重叠、不越右缘。
+        window.resize(1280, 660);
         QTest::qWait(30);
         QWidget *row = flags->parentWidget();
         QVERIFY(row);
@@ -1280,10 +1279,15 @@ private slots:
                  // `"01 GG"` 被解析成 7 字节（5 字符 + CRLF）而不是"输入错误"。
                  // 这类用例大多**显式设置** format，不依赖残留值，所以清掉是安全的。
                  "traffic/format", "send/format", "send/suffix",
+                 "file/mode", "file/endpoint", "file/block", "file/direction",
+                 "file/beforeId", "file/afterId", "file/beforeDelay", "file/afterDelay",
+                 "file/send/beforeHex", "file/send/afterHex",
+                 "file/receive/beforeHex", "file/receive/afterHex",
                  // 窗口几何与指令面板展开状态同样会落盘，而且后果最直接：某个用例把面板
                  // 收起 / 把窗口拖小之后不还原，下一个用例就在"面板已收起"的前提下断言。
                  // （commandPanel/expanded 由 CommandPanel::savePreferences 写入，属既有遗漏。）
-                 "window/geometry", "commandPanel/expanded"})
+                 "window/geometry", "window/width", "window/height", "window/stayOnTop",
+                 "commandPanel/expanded"})
             sweep.remove(QString::fromLatin1(key));
     }
 
@@ -2466,15 +2470,21 @@ private slots:
         window.resize(1280, 720);
         window.show();
         QTest::qWait(30);
-        // 快捷命令页签整体撤下，发送区回到单页，不再有页签容器。
-        QVERIFY(!window.findChild<QWidget *>("sendTabs"));
-        QVERIFY(!window.findChild<QTabWidget *>());
+        // 手动发送、发送文件、接收文件分成三个标签。快捷指令不再放进发送区。
+        auto *tabs = window.findChild<QTabWidget *>(QStringLiteral("sendModeTabs"));
+        QVERIFY(tabs);
+        QCOMPARE(tabs->count(), 3);
+        QCOMPARE(tabs->tabText(0), QStringLiteral("手动发送"));
+        QCOMPARE(tabs->tabText(1), QStringLiteral("发送文件"));
+        QCOMPARE(tabs->tabText(2), QStringLiteral("接收文件"));
+        QCOMPARE(window.findChildren<QTabWidget *>().size(), 1);
         auto *panel = window.findChild<SendPanel *>();
         auto *portA = window.findChild<QPushButton *>("showPortA");
         QVERIFY(panel && portA);
         // 目标只有 A／B／AB 三个按钮：端口默认目标下拉框已删除。
-        // 格式/末尾是发送区仅有的两个下拉框（编码并入格式列表，来自共享 PayloadCodec）。
-        QCOMPARE(panel->findChildren<QComboBox *>().size(), 2);
+        // 手动发送页的格式/末尾仍是那两个下拉框；文件页另有模式和前后指令下拉框。
+        QCOMPARE(panel->findChildren<QComboBox *>(QStringLiteral("sendFormat")).size(), 1);
+        QCOMPARE(panel->findChildren<QComboBox *>(QStringLiteral("sendSuffix")).size(), 1);
         // 发送区格式下拉框逐项来自共享 PayloadCodec（顺序与名称的权威断言在 renderFormats）。
         auto *sendFormat = window.findChild<QComboBox *>("sendFormat");
         QVERIFY(sendFormat);
@@ -2546,6 +2556,146 @@ private slots:
             QDir().mkpath(artifactDir);
             QVERIFY(window.grab().save(artifactDir + "/send-panel.png"));
         }
+        tabs->setCurrentIndex(1);
+        QTest::qWait(30);
+        if (!artifactDir.isEmpty())
+            QVERIFY(window.grab().save(artifactDir + QStringLiteral("/file-send.png")));
+        auto *stats = window.findChild<QLabel *>(QStringLiteral("fileTransferStats"));
+        QVERIFY(!window.findChild<QComboBox *>(QStringLiteral("fileTransferBeforeTail")));
+        QVERIFY(!window.findChild<QComboBox *>(QStringLiteral("fileTransferAfterTail")));
+        QVERIFY(!window.findChild<QComboBox *>(QStringLiteral("fileTransferBefore")));
+        QVERIFY(stats && stats->isVisibleTo(&window));
+        QVERIFY2(!stats->text().contains(QStringLiteral("B/s")), qPrintable(stats->text()));
+        QVERIFY(!stats->text().contains(QStringLiteral("重试")));
+        QVERIFY(window.findChild<QComboBox *>(QStringLiteral("fileTransferMode")));
+        auto *beforeText = window.findChild<QLineEdit *>(QStringLiteral("fileTransferBeforeText"));
+        auto *chunk = window.findChild<QSpinBox *>(QStringLiteral("fileTransferChunk"));
+        auto *sendMode = window.findChild<QComboBox *>(QStringLiteral("fileTransferMode"));
+        auto *sendPath = window.findChild<QLineEdit *>(QStringLiteral("fileTransferPath"));
+        QVERIFY(beforeText && beforeText->isVisibleTo(&window));
+        QCOMPARE(beforeText->placeholderText(), QStringLiteral("AT+START\\r\\n"));
+        auto *beforeFormat = window.findChild<QComboBox *>(QStringLiteral("fileTransferBeforeFormat"));
+        QVERIFY(beforeFormat);
+        beforeFormat->setCurrentIndex(1);
+        QTest::qWait(30);
+        QCOMPARE(beforeText->placeholderText(), QStringLiteral("0D 0A，留空不发"));
+        beforeFormat->setCurrentIndex(0);
+        QTest::qWait(30);
+        QCOMPARE(beforeText->placeholderText(), QStringLiteral("AT+START\\r\\n"));
+        QVERIFY(chunk && sendMode && sendPath);
+        const auto midY = [](const QWidget *widget, const QWidget *origin) {
+            return widget->mapTo(origin, QPoint()).y() + widget->height() / 2;
+        };
+        if (sendMode->currentData().toString() != QLatin1String("raw"))
+            sendMode->setCurrentIndex(sendMode->findData(QStringLiteral("raw")));
+        QTest::qWait(30);
+        QVERIFY2(chunk->isVisibleTo(&window), "RAW 发送要能设置分包");
+        auto *chunkGap = window.findChild<QSpinBox *>(QStringLiteral("fileTransferChunkGap"));
+        QVERIFY(chunkGap);
+        QCOMPARE(chunkGap->suffix(), QStringLiteral(" ms"));
+        QCOMPARE(chunkGap->minimum(), 0);
+        QCOMPARE(chunkGap->buttonSymbols(), QAbstractSpinBox::NoButtons);
+        QVERIFY2(chunkGap->isVisibleTo(&window), "RAW 发送要能设置包间隔");
+        QVERIFY2(qAbs(midY(chunk, &window) - midY(chunkGap, &window)) <= 2,
+            "分包大小与包间隔应在同一行");
+        const int tabBottom = tabs->tabBar()->mapTo(&window, QPoint(0, tabs->tabBar()->height())).y();
+        QVERIFY2(sendMode->mapTo(&window, QPoint()).y() - tabBottom >= 6,
+            qPrintable(QStringLiteral("页签与下方内容间距过小：%1")
+                           .arg(sendMode->mapTo(&window, QPoint()).y() - tabBottom)));
+        QCOMPARE(chunk->buttonSymbols(), QAbstractSpinBox::NoButtons);
+        auto *beforeDelay = window.findChild<QSpinBox *>(QStringLiteral("fileTransferBeforeDelay"));
+        auto *afterDelay = window.findChild<QSpinBox *>(QStringLiteral("fileTransferAfterDelay"));
+        QVERIFY(beforeDelay && afterDelay);
+        QCOMPARE(beforeDelay->buttonSymbols(), QAbstractSpinBox::NoButtons);
+        QCOMPARE(afterDelay->buttonSymbols(), QAbstractSpinBox::NoButtons);
+        auto *block128 = window.findChild<QPushButton *>(QStringLiteral("fileTransferBlock128"));
+        QVERIFY(block128 && !block128->isVisibleTo(&window));
+        sendMode->setCurrentIndex(sendMode->findData(QStringLiteral("ymodem")));
+        QTest::qWait(30);
+        QVERIFY(block128->isVisibleTo(&window));
+        QVERIFY(!chunk->isVisibleTo(&window));
+        QVERIFY(!chunkGap->isVisibleTo(&window));
+        sendMode->setCurrentIndex(sendMode->findData(QStringLiteral("raw")));
+        QTest::qWait(30);
+        QVERIFY(chunk->isVisibleTo(&window));
+        QVERIFY(chunkGap->isVisibleTo(&window));
+        QVERIFY(!block128->isVisibleTo(&window));
+        QVERIFY2(qAbs(midY(sendMode, &window) - midY(sendPath, &window)) <= 2,
+            "端点/方式与文件路径应在同一行");
+        auto *afterText = window.findChild<QLineEdit *>(QStringLiteral("fileTransferAfterText"));
+        QVERIFY(afterText && afterText->isVisibleTo(&window));
+        QVERIFY2(qAbs(midY(beforeText, &window) - midY(afterText, &window)) <= 2,
+            "前置指令与后置指令应在同一行");
+        auto *fileStart = window.findChild<QPushButton *>(QStringLiteral("fileTransferStart"));
+        auto *fileProgress = window.findChild<QProgressBar *>(QStringLiteral("fileTransferProgress"));
+        QVERIFY(fileStart && fileProgress && fileStart->isVisibleTo(&window));
+        QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("fileTransferStop")));
+        QVERIFY2(fileStart->mapTo(&window, QPoint()).x() > fileProgress->mapTo(&window, QPoint()).x(),
+            "发送按钮应在进度条右侧");
+        QCOMPARE(fileStart->height(), fileProgress->height());
+        auto *fileStatus = window.findChild<QLabel *>(QStringLiteral("fileTransferStatus"));
+        QVERIFY(fileStatus);
+        sendPath->clear();
+        QCOMPARE(fileStatus->text(), QStringLiteral("未选择"));
+        QVERIFY2(stats->text().contains(QStringLiteral("大小")), qPrintable(stats->text()));
+        QVERIFY(!stats->text().contains(QStringLiteral("CRC16")));
+        QTemporaryDir digestDir;
+        QVERIFY(digestDir.isValid());
+        const QString digestPath = digestDir.filePath(QStringLiteral("payload.bin"));
+        QFile digestFile(digestPath);
+        QVERIFY(digestFile.open(QIODevice::WriteOnly));
+        // 与传输层同一组校验：CRC16-XMODEM 31C3，CRC32-IEEE CBF43926。
+        QCOMPARE(digestFile.write(QByteArray("123456789")), qint64(9));
+        digestFile.close();
+        sendPath->setText(QDir::cleanPath(digestPath));
+        QTRY_VERIFY_WITH_TIMEOUT(stats->text().contains(QStringLiteral("CRC16 31C3")), 3000);
+        QVERIFY2(stats->text().contains(QStringLiteral("CRC32 CBF43926")), qPrintable(stats->text()));
+        QVERIFY(stats->text().contains(QStringLiteral("payload.bin")));
+        QVERIFY(stats->text().contains(QStringLiteral("9 B")));
+        QCOMPARE(fileStatus->text(), QStringLiteral("待发送"));
+        QVERIFY(!stats->text().contains(QStringLiteral("B/s")));
+        tabs->setCurrentIndex(2);
+        QTest::qWait(30);
+        auto *receiveMode = window.findChild<QComboBox *>(QStringLiteral("fileReceiveMode"));
+        auto *receivePath = window.findChild<QLineEdit *>(QStringLiteral("fileReceivePath"));
+        QVERIFY(receiveMode && receivePath && receivePath->isVisibleTo(&window));
+        receiveMode->setCurrentIndex(receiveMode->findData(QStringLiteral("raw")));
+        receivePath->clear();
+        receiveMode->setCurrentIndex(receiveMode->findData(QStringLiteral("ymodem")));
+        receiveMode->setCurrentIndex(receiveMode->findData(QStringLiteral("raw")));
+        QTest::qWait(30);
+        QVERIFY2(qAbs(midY(receiveMode, &window) - midY(receivePath, &window)) <= 2,
+            "接收页端点/方式与保存路径应在同一行");
+        QVERIFY2(receivePath->text().contains(QStringLiteral("raw_"))
+                && receivePath->text().endsWith(QStringLiteral(".bin")),
+            qPrintable(receivePath->text()));
+        auto *receiveStats = window.findChild<QLabel *>(QStringLiteral("fileReceiveStats"));
+        auto *receiveStatus = window.findChild<QLabel *>(QStringLiteral("fileReceiveStatus"));
+        QVERIFY(receiveStats && receiveStatus);
+        QCOMPARE(receiveStatus->text(), QStringLiteral("待接收"));
+        QVERIFY2(receiveStats->text().contains(QStringLiteral("新文件")), qPrintable(receiveStats->text()));
+        QVERIFY(!receiveStats->text().contains(QStringLiteral("CRC16")));
+        auto *receiveBeforeDelay = window.findChild<QSpinBox *>(QStringLiteral("fileReceiveBeforeDelay"));
+        auto *receiveAfterDelay = window.findChild<QSpinBox *>(QStringLiteral("fileReceiveAfterDelay"));
+        QVERIFY(receiveBeforeDelay && receiveAfterDelay);
+        QCOMPARE(receiveBeforeDelay->buttonSymbols(), QAbstractSpinBox::NoButtons);
+        QCOMPARE(receiveAfterDelay->buttonSymbols(), QAbstractSpinBox::NoButtons);
+        receiveMode->setCurrentIndex(receiveMode->findData(QStringLiteral("ymodem")));
+        QTest::qWait(30);
+        QVERIFY2(QFileInfo(receivePath->text()).isDir(),
+            qPrintable(QStringLiteral("YMODEM 应使用目录：%1").arg(receivePath->text())));
+        QVERIFY(!receivePath->text().endsWith(QStringLiteral(".bin")));
+        QVERIFY2(receiveStats->text().contains(QStringLiteral("对端")), qPrintable(receiveStats->text()));
+        QVERIFY(!receiveStats->text().contains(QStringLiteral("CRC16")));
+        QCOMPARE(receiveStatus->text(), QStringLiteral("待接收"));
+        const QString customDir = QDir(QDir::tempPath()).filePath(QStringLiteral("qqcom-ymodem-dir"));
+        QDir().mkpath(customDir);
+        receivePath->setText(QDir::cleanPath(customDir));
+        receiveMode->setCurrentIndex(receiveMode->findData(QStringLiteral("raw")));
+        receiveMode->setCurrentIndex(receiveMode->findData(QStringLiteral("ymodem")));
+        QTest::qWait(30);
+        QCOMPARE(QDir::cleanPath(receivePath->text()), QDir::cleanPath(customDir));
+        tabs->setCurrentIndex(0);
     }
 
     // 发送区四个按钮（目标 A/B/AB + 发送）宽度必须取齐，且都不能把文字截断（用户反馈）：
@@ -3805,6 +3955,21 @@ private slots:
             savedWidth = window.width();
             savedHeight = window.height();
             QVERIFY(savedWidth > 0 && savedHeight > 0);
+            auto *pin = window.findChild<QToolButton *>(QStringLiteral("stayOnTop"));
+            QVERIFY(pin);
+            QVERIFY(pin->text().isEmpty());
+            QVERIFY(!pin->icon().isNull());
+            QCOMPARE(pin->toolButtonStyle(), Qt::ToolButtonIconOnly);
+            QVERIFY(!pin->isChecked());
+            QVERIFY(!window.windowFlags().testFlag(Qt::WindowStaysOnTopHint));
+            const int widthBeforePin = window.width();
+            const int heightBeforePin = window.height();
+            pin->click();
+            QVERIFY(pin->isChecked());
+            QVERIFY(window.windowFlags().testFlag(Qt::WindowStaysOnTopHint));
+            // 置顶会重建原生窗口，大小必须留在原地。
+            QCOMPARE(window.width(), widthBeforePin);
+            QCOMPARE(window.height(), heightBeforePin);
             window.close(); // 触发 closeEvent → 几何落盘
             QTest::qWait(30);
         }
@@ -3821,7 +3986,10 @@ private slots:
             qPrintable(QStringLiteral("上次是收起状态，重开应仍是收起；实际 expanded=")
                 + QString::number(panel->isExpanded())));
         QVERIFY(!toggle->isChecked());
-        // 窗口最小尺寸是构造时的 900×720，默认尺寸是 1440×920；恢复后必须贴近"上次"，
+        auto *pinAgain = again.findChild<QToolButton *>(QStringLiteral("stayOnTop"));
+        QVERIFY(pinAgain && pinAgain->isChecked());
+        QVERIFY(again.windowFlags().testFlag(Qt::WindowStaysOnTopHint));
+        // 默认尺寸是 1440×920，且不再有 900×720 的下限；恢复后必须贴近"上次"，
         // 而不是退回默认——这是本用例要守的东西。
         //
         // 容差不一致是**故意的**：宽度逐像素（实测只差 2px），高度给 ±32。
@@ -4379,12 +4547,34 @@ private slots:
         auto *keepBoundary = selector->findChild<QCheckBox *>(QStringLiteral("framingKeepBoundary"));
         auto *logHints = selector->findChild<QCheckBox *>(QStringLiteral("framingLogHints"));
         QVERIFY(mode && delimiter && idle && threshold && keepBoundary && logHints);
-        // 参考 BLE 调试助手分层展示：开关、完整帧判定、兜底参数各自独立成行，
-        // 避免窄窗口下所有控件挤在一条线上。
-        QVERIFY(mode->parentWidget() != idle->parentWidget());
-        QVERIFY(mode->parentWidget() != threshold->parentWidget());
-        // 保留边界与完整帧判定同属规则行，允许保持在同一行。
-        QVERIFY(logHints->parentWidget() != idle->parentWidget());
+        // 组帧设置收成一行：开关、判定、兜底参数共用同一个父控件。
+        auto *framingControls = selector->findChild<QWidget *>(QStringLiteral("framingControls"));
+        QVERIFY(framingControls);
+        QCOMPARE(mode->parentWidget(), framingControls);
+        QCOMPARE(idle->parentWidget(), framingControls);
+        QCOMPARE(threshold->parentWidget(), framingControls);
+        QCOMPARE(logHints->parentWidget(), framingControls);
+        QCOMPARE(keepBoundary->parentWidget(), framingControls);
+        // 标签与输入框同一字号。Muted 是 12px，组帧行不能再用它。
+        QFile framingStyle(QStringLiteral(":/styles/workbench.qss"));
+        QVERIFY(framingStyle.open(QIODevice::ReadOnly));
+        const QString previousFramingStyle = qApp->styleSheet();
+        qApp->setStyleSheet(QString::fromUtf8(framingStyle.readAll()));
+        const auto framingLabels = selector->findChild<QWidget *>(QStringLiteral("framingPanel"))
+                                       ->findChildren<QLabel *>();
+        QVERIFY(!framingLabels.isEmpty());
+        for (auto *widget : selector->findChildren<QWidget *>())
+            widget->ensurePolished();
+        const int framingPx = idle->font().pixelSize();
+        QVERIFY(framingPx > 0);
+        for (auto *framingLabel : framingLabels) {
+            QVERIFY2(framingLabel->font().pixelSize() == framingPx,
+                qPrintable(QStringLiteral("%1 是 %2px，输入框是 %3px")
+                               .arg(framingLabel->objectName())
+                               .arg(framingLabel->font().pixelSize())
+                               .arg(framingPx)));
+        }
+        qApp->setStyleSheet(previousFramingStyle);
         auto *enabled = selector->findChild<QCheckBox *>(QStringLiteral("framingEnabled"));
         QVERIFY(enabled);
         QVERIFY(mode->findData(int(ReceiveFraming::IdleTimeout)) >= 0);

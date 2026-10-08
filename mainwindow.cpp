@@ -8,11 +8,13 @@
 #include "ui/panels/commands/commandpanel.h"
 #include "ui/common/payloadcodec.h"
 #include "ui/common/bytesformat.h"
+#include "ui/common/tintedicon.h"
 #include "discovery/portdiscoveryservice.h"
 #include "persistence/preferencesstore.h"
 
 #include <QCloseEvent>
 #include <QCoreApplication>
+#include <QEvent>
 #include <QFile>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -20,8 +22,13 @@
 #include <QResizeEvent>
 #include <QSplitter>
 #include <QStatusBar>
+#if defined(Q_OS_WIN)
+#include <qt_windows.h>
+#pragma comment(lib, "user32.lib")
+#endif
 #include <QThread>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace {
@@ -78,7 +85,8 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
     setWindowTitle(QStringLiteral(QQCOM_APP_TITLE));
-    setMinimumSize(900, 720);  // 宽度的真实下限由内容决定（见 updateWindowMinimumWidth），这里只兜底
+    // 不设最小尺寸。默认布局约束会把内容的 minimumSizeHint 写回窗口，边框就拖不下去。
+    releaseWindowSizeFloor();
     resize(1440, 920);
     ui->menubar->hide();
 
@@ -161,6 +169,7 @@ MainWindow::MainWindow(QWidget *parent)
     // 显示选项持久化：监视区开关/列状态与发送区格式/行尾记进 preferences.ini。
     m_traffic->setPreferences(preferences);
     m_sender->setPreferences(preferences);
+    connect(m_sender, &SendPanel::preferredHeightChanged, this, &MainWindow::fitSendPane);
     // 监视区摘要放主窗口状态栏：条数是全局信息，不该占用显示区的纵向空间。
     connect(m_traffic, &TrafficPanel::summaryChanged, this,
         [this](const QString &text) { m_trafficStatus->setText(text); });
@@ -236,10 +245,6 @@ MainWindow::MainWindow(QWidget *parent)
     // 本身就是数据区当前宽度，展开时原样用它即可。于是"用户拖过窗口/分栏"的结果
     // 天然被带上，也不用维护一份可能与现实脱节的记忆值。
     connect(m_commandPanel, &CommandPanel::expandedChanged, this, [this](bool expanded) {
-        // 先更新窗口最小宽度：它随展开状态变化（收起时不必为面板留位置）。
-        // 顺序反了的话，紧接着的"就地变窄"会被旧的最小宽度顶住、根本缩不动。
-        updateWindowMinimumWidth();
-
         if (!m_horizontalSplitter) return;
 
         const int handle = m_expandedHandle > 0 ? m_expandedHandle
@@ -262,7 +267,6 @@ MainWindow::MainWindow(QWidget *parent)
             columnWidth = sizes.size() == 2 ? sizes.at(0) : 0;
         }
         if (columnWidth <= 0) columnWidth = m_leftColumnMinimumWidth;
-        columnWidth = qMax(columnWidth, m_leftColumnMinimumWidth);
 
         // 目标窗口宽度分两种情形，差别就在**分栏手柄是否占位**：
         //   展开 —— 两块都在，中间那条手柄在，宽度是 左列 + 面板 + 手柄；
@@ -329,6 +333,21 @@ MainWindow::MainWindow(QWidget *parent)
     m_statusNote->setObjectName("StatusNote");
     statusLayout->addWidget(m_statusNote);
     ui->statusbar->addWidget(status, 1);
+    m_stayOnTop = new QToolButton;
+    m_stayOnTop->setObjectName(QStringLiteral("stayOnTop"));
+    m_stayOnTop->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_stayOnTop->setIconSize(QSize(16, 16));
+    m_stayOnTop->setCheckable(true);
+    m_stayOnTop->setToolTip(tr("窗口置顶"));
+    m_stayOnTop->setAccessibleName(tr("置顶"));
+    m_stayOnTop->setAutoRaise(true);
+    // 永久部件：showMessage 不会把它藏掉，也贴在尺寸握把左边。
+    ui->statusbar->addPermanentWidget(m_stayOnTop);
+    connect(m_stayOnTop, &QToolButton::toggled, this, &MainWindow::setStayOnTop);
+    if (preferences->value(QStringLiteral("window/stayOnTop"), false).toBool())
+        m_stayOnTop->setChecked(true);
+    else
+        setStayOnTop(false);
 
     // 通信运行时：对象搬进 I/O 线程，GUI 只通过队列信号与它往来。
     // 线程结束时运行时在 I/O 线程内自我销毁，串口/socket 的收尾不落在 GUI。
@@ -337,8 +356,11 @@ MainWindow::MainWindow(QWidget *parent)
     m_runtime->moveToThread(m_ioThread);
     connect(m_ioThread, &QThread::finished, m_runtime, &QObject::deleteLater);
     m_ioThread->start();
+    m_sender->setRuntime(m_runtime);
     connect(m_runtime, &EndpointRuntime::endpointStateChanged, this, &MainWindow::handleEndpointState);
     connect(m_runtime, &EndpointRuntime::endpointPeersChanged, this, &MainWindow::handleEndpointPeers);
+    connect(m_runtime, &EndpointRuntime::rawDataReceived, m_sender,
+        &SendPanel::handleRawDataReceived);
     connect(m_runtime, &EndpointRuntime::messageReceived, this, &MainWindow::handleMessage);
 
     for (int index = 0; index < m_selectors.size(); ++index) {
@@ -369,26 +391,11 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_rateTimer, &QTimer::timeout, this, &MainWindow::updateRateLabels);
     refreshEndpoints();
 
-    // 数据区宽度下限 = **数据区自己报出的最小宽度**。
-    //
-    // 这是一条完整的链：dataArea 的布局 → 竖直分栏 → TrafficPanel → 头块两行 → 每个控件。
-    // 链上的控件一律按自己的 sizeHint 声明下限（`rowmetrics.h::pinRowToContents` 把横向
-    // 策略钉成 Fixed，语义就是"布局按我的 sizeHint 给我位置"），所以头两行"最少要多宽"
-    // 由 Qt 在布局时算出来，包含内边距、间距、边框在内，一项不漏。
-    //
-    // 这里刻意不做任何像素求和——早先按"逐项 sizeHint 之和 + 手算边距"估过一次，
-    // 漏了 TrafficPanel 自己的 20px 内边距，结果窗口到了最小宽度、顶栏最右那个按钮
-    // 仍差 1px 探出右缘。这种账目错误不会报错，只在特定窗口宽度上悄悄显形。
+    // 内容铺开要多宽，只留给「展开指令面板」当没有快照时的起步宽度。
+    // 不挂到控件上，也不写进窗口：挂上之后 Qt 会把这个数当成边框拖动的硬下限。
     m_trafficMinimumWidth = dataArea->minimumSizeHint().width();
-    // 同时把它作为硬下限挂在数据区上：手动拖分栏也拖不到比这更窄。
-    dataArea->setMinimumWidth(m_trafficMinimumWidth);
-    // 左列下限由布局报出：端口条与数据区各自声明下限，左列的 minimumSizeHint 取较大者。
-    // 与 m_trafficMinimumWidth 同一手法——**不手工求和**，免得漏掉某个内边距。
-    // 顺序有讲究：必须在上面设完 dataArea 的下限之后再量，否则量到的是还没被下限约束的宽度。
     m_leftColumnMinimumWidth = leftColumn->minimumSizeHint().width();
-    // 同样挂成硬下限：分栏拖拽时左列不得被压到装不下端口条。
-    leftColumn->setMinimumWidth(m_leftColumnMinimumWidth);
-    updateWindowMinimumWidth();
+    releaseWindowSizeFloor();
 }
 
 void MainWindow::restoreWindowState()
@@ -397,13 +404,27 @@ void MainWindow::restoreWindowState()
     const QByteArray geometry = m_preferences->value(QStringLiteral("window/geometry")).toByteArray();
     // 空值（首次启动，或用户从未退出过）就保持构造时的默认尺寸。
     if (!geometry.isEmpty()) restoreGeometry(geometry);
+    // restoreGeometry 在高 DPI / 离屏窗口上会把逻辑宽度折半。宽高另存一份逻辑像素，
+    // 对不上就改回来。最大化时不能 resize，否则会退出最大化。
+    if (isMaximized() || isFullScreen()) return;
+    const int savedWidth = m_preferences->value(QStringLiteral("window/width")).toInt();
+    const int savedHeight = m_preferences->value(QStringLiteral("window/height")).toInt();
+    if (savedWidth > 0 && savedHeight > 0
+        && (qAbs(width() - savedWidth) > 4 || qAbs(height() - savedHeight) > 4))
+        resize(savedWidth, savedHeight);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     // 几何在**退出时**落盘一次即可：它是低频的用户意图，不需要在每次 resize 里写盘。
     // 存的是 saveGeometry() 的完整状态（大小 + 位置 + 最大化），不只是宽高。
-    if (m_preferences) m_preferences->setValue(QStringLiteral("window/geometry"), saveGeometry());
+    if (m_preferences) {
+        m_preferences->setValue(QStringLiteral("window/geometry"), saveGeometry());
+        if (!isMaximized() && !isFullScreen()) {
+            m_preferences->setValue(QStringLiteral("window/width"), width());
+            m_preferences->setValue(QStringLiteral("window/height"), height());
+        }
+    }
     QMainWindow::closeEvent(event);
 }
 
@@ -558,29 +579,64 @@ void MainWindow::resizeEvent(QResizeEvent *event)
     recordExpandedGeometry();
 }
 
-void MainWindow::updateWindowMinimumWidth()
+QSize MainWindow::minimumSizeHint() const
 {
-    // 窗口最小宽度 = 左右两块面板"内容完整可见"所需宽度之和 + 分栏手柄 + 外边距。
-    // 这条规则的动机（用户钦定）：窗口不够宽时应当**变大窗口**，而不是压缩面板内容
-    // ——后者会让"分组"下拉消失、表格末尾的手柄列被裁掉、过滤条按钮挤成一团。
-    //
-    // 左侧用 **m_leftColumnMinimumWidth**（左列 = 端口条 + 数据区），不是数据区下限：
-    // 分栏的左半边是整列，端口条也在里面，只按数据区算会漏掉它的宽度需求。
-    const int panelWidth = m_commandPanel && m_commandPanel->isExpanded()
-        ? m_commandPanel->expandedMinimumWidth()
-        : 0;
-    const int splitterWidth = m_horizontalSplitter ? m_horizontalSplitter->handleWidth() : 0;
-    const int wanted = m_leftColumnMinimumWidth + panelWidth + splitterWidth;
-    // 下限**完全由内容决定**，不再设那个写死的 1280 地板。
-    //
-    // 地板曾经是"怕面板展开挤压按钮"的保险，现在那件事由内容下限负责，地板就成了
-    // 纯副作用：用户收起面板时窗口想缩到"左列 + 外壳"，却被地板顶住，多出来的宽度
-    // 无处可去、只能塞给左列——正是用户报的"收回时数据区反而变宽"（实测多 28px）。
-    // 内容下限是诚实的，加地板只会让"就地收窄"在某些尺寸下失效。
-    const int minWidth = wanted;
-    if (minimumWidth() != minWidth) setMinimumWidth(minWidth);
-    // 高度下限不变：纵向空间本来就全给数据区，没有"被压缩的分支"要保护。
-    setMinimumHeight(720);
+    // 顶层窗口的有效下限是 minimumSize() 与 minimumSizeHint() 里较大的那个。
+    // 内容再宽，也不拿来挡住手动拖边框。
+    return QSize(0, 0);
+}
+
+bool MainWindow::event(QEvent *event)
+{
+    const bool handled = QMainWindow::event(event);
+    // activate() 在 LayoutRequest 里跑。默认约束会在那里把内容下限写回窗口，
+    // 写完这一下边框就又拖不动了。这里在它返回后把下限清掉。
+    if (event->type() == QEvent::LayoutRequest || event->type() == QEvent::Show) {
+        const bool constrained = layout()
+            && layout()->sizeConstraint() != QLayout::SetNoConstraint;
+        if (constrained || minimumWidth() > 0 || minimumHeight() > 0)
+            releaseWindowSizeFloor();
+    }
+    return handled;
+}
+
+void MainWindow::releaseWindowSizeFloor()
+{
+    setMinimumSize(0, 0);
+    // SetDefaultConstraint 会在每次布局时把内容下限写回窗口，拖小会被弹回去。
+    if (QLayout *page = layout())
+        page->setSizeConstraint(QLayout::SetNoConstraint);
+    if (ui && ui->centralwidget)
+        if (QLayout *page = ui->centralwidget->layout())
+            page->setSizeConstraint(QLayout::SetNoConstraint);
+}
+
+void MainWindow::setStayOnTop(bool on)
+{
+    if (m_stayOnTop) {
+        // 图钉：未置顶是空心，置顶后填实。颜色跟浅色状态栏的静音字和选中字。
+        const QColor color = on ? QColor(0x14, 0x32, 0x6f) : QColor(0x64, 0x75, 0x90);
+        m_stayOnTop->setIcon(tintedIcon(on ? QStringLiteral(":/icons/pin.svg")
+                                           : QStringLiteral(":/icons/pin-outline.svg"),
+            color, 16));
+    }
+    if (windowFlags().testFlag(Qt::WindowStaysOnTopHint) != on) {
+        // 不用 setWindowFlag：它会拆掉原生窗口再新建。高 DPI 下这一下之后
+        // saveGeometry 会把宽度记成一半，下次启动窗口就缩了一截。
+        Qt::WindowFlags flags = windowFlags();
+        flags.setFlag(Qt::WindowStaysOnTopHint, on);
+        overrideWindowFlags(flags);
+#if defined(Q_OS_WIN)
+        if (!testAttribute(Qt::WA_DontShowOnScreen)) {
+            if (HWND hwnd = reinterpret_cast<HWND>(winId())) {
+                ::SetWindowPos(hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+#endif
+    }
+    if (m_preferences)
+        m_preferences->setValue(QStringLiteral("window/stayOnTop"), on);
 }
 
 void MainWindow::updateEndpointStatus()
@@ -637,6 +693,17 @@ void MainWindow::updateRateLabels()
     m_txStatus->setText(tr("TX   %1   ·   %2/s").arg(formatBytes(m_txBytes), formatBytes(txRate)));
 }
 
+void MainWindow::fitSendPane(int height)
+{
+    if (!m_dataSplitter || !m_sender || height <= 0) return;
+    m_sender->setMinimumHeight(height);
+    const int total = qMax(0, m_dataSplitter->height() - m_dataSplitter->handleWidth());
+    const int trafficMin = m_traffic ? m_traffic->minimumSizeHint().height() : 80;
+    const int sendH = qMin(height, qMax(0, total - trafficMin));
+    if (total <= 0) return;
+    m_dataSplitter->setSizes({qMax(0, total - sendH), sendH});
+}
+
 void MainWindow::loadExample() { m_traffic->loadExample(m_ports); }
 
 quint64 MainWindow::sessionRecordCount() const { return m_traffic ? m_traffic->totalAccepted() : 0; }
@@ -659,15 +726,15 @@ void MainWindow::showEvent(QShowEvent *event)
     if (!m_windowStateRestored) {
         m_windowStateRestored = true;
         restoreWindowState();
+        // 恢复几何之后布局会再激活一次，默认约束可能把下限写回来。
+        releaseWindowSizeFloor();
     }
     // 发送区贴着自身内容高度的分配在几何定型后应用一次——setSizes 接收的是绝对像素；
     // 发送区只取最小高度（正文约三行），剩余全部给数据显示区。
     // 放在几何恢复之后：它要用恢复后的分栏高度算绝对像素。
     if (!m_dataRatioApplied) {
         m_dataRatioApplied = true;
-        const int total = qMax(0, m_dataSplitter->height() - m_dataSplitter->handleWidth());
-        const int send = m_sender->minimumSizeHint().height();
-        m_dataSplitter->setSizes({qMax(0, total - send), send});
+        fitSendPane(m_sender->preferredHeight());
     }
     if (!testAttribute(Qt::WA_DontShowOnScreen)) {
         m_autoRefresh->start();

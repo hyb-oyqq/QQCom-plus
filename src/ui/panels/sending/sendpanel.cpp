@@ -1,4 +1,6 @@
 #include "sendpanel.h"
+#include "filetransferwidget.h"
+#include "app/endpointruntime.h"
 #include "ui/common/buttonmetrics.h"
 #include "ui/common/payloadcodec.h"
 #include "persistence/preferencesstore.h"
@@ -11,8 +13,32 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QSpinBox>
+#include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+
+namespace {
+
+// 标签页的 sizeHint 跟当前页走。QTabWidget 默认按最高的那一页占位，
+// 文件页会把手动发送下面撑出一块空白，数据显示区就被永久挤掉。
+class ModeTabs final : public QTabWidget
+{
+public:
+    explicit ModeTabs(QWidget *parent = nullptr) : QTabWidget(parent) {}
+
+    QSize sizeHint() const override
+    {
+        const QWidget *page = currentWidget();
+        QSize hint = page ? page->sizeHint() : QSize();
+        if (page) hint = hint.expandedTo(page->minimumSizeHint());
+        const int bar = tabBar() ? tabBar()->sizeHint().height() : 0;
+        return QSize(qMax(hint.width(), 0), hint.height() + bar + 4);
+    }
+
+    QSize minimumSizeHint() const override { return sizeHint(); }
+};
+
+} // namespace
 
 namespace {
 
@@ -41,12 +67,12 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     // 正文在左，编码 / 定时 / 目标 / 发送收进右侧一列。
     // 原来三行纵向铺开（正文 → 格式+末尾+预览 → 定时+目标+发送）要约 200px 高，
     // 而同样的控件并进右侧三行就装下了——省下的纵向空间全部归数据显示区。
-    auto *root = new QHBoxLayout(this);
+    auto *root = new QVBoxLayout(this);
     // **左右必须是 6**：数据区外边距 6 + 这里 6 = 12，与端口条内容、监视区内容的
     // 左缩进对齐（用户反馈"边框距离内部元素没有对齐"）。上下 8：发送区是自适应的
     // 卡片，贴着内容收紧即可，不必再留原来的 10。
     root->setContentsMargins(6, 8, 6, 8);
-    root->setSpacing(10);
+    root->setSpacing(6);
 
     // 目标：A / B / AB 三选一，沿用数据显示区端点开关那套可勾选按钮（QPushButton:checked 样式）。
     // 用互斥按钮组而不是独立开关：发送必须有一个目标，不留“都不选”的空状态。
@@ -135,8 +161,10 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     // 见 unifyActionWidths()：这里不写死像素，字体/DPI/翻译变化时重算即可。
     m_repeatTimer = new QTimer(this);
 
-    // ---- 组装：左栏（正文 + 预览） / 右栏（编码 / 定时 / 目标 + 发送）----
+    // ---- 组装：手动发送、发送文件、接收文件各是一个标签。方向靠选中的标签表达。 ----
 
+    auto *manualPage = new QWidget;
+    manualPage->setObjectName(QStringLiteral("manualSendPage"));
     auto *leftColumn = new QVBoxLayout;
     leftColumn->setSpacing(6);
     leftColumn->addWidget(m_editor);
@@ -178,8 +206,26 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     rightColumn->addLayout(actionRow);
 
     // 左栏拿全部剩余宽度（正文越宽越少折行），右栏取自身内容宽度。
-    root->addLayout(leftColumn, 1);
-    root->addLayout(rightColumn, 0);
+    auto *content = new QHBoxLayout(manualPage);
+    // 与发送/接收文件页同一上边距，页签下面留出一截空隙。
+    content->setContentsMargins(0, 8, 0, 0);
+    content->setSpacing(10);
+    content->addLayout(leftColumn, 1);
+    content->addLayout(rightColumn, 0);
+
+    m_fileTransfer = new FileTransferWidget(this);
+    m_tabs = new ModeTabs(this);
+    m_tabs->setObjectName(QStringLiteral("sendModeTabs"));
+    m_tabs->setDocumentMode(true);
+    m_tabs->addTab(manualPage, tr("手动发送"));
+    m_tabs->addTab(m_fileTransfer->sendPage(), tr("发送文件"));
+    m_tabs->addTab(m_fileTransfer->receivePage(), tr("接收文件"));
+    root->addWidget(m_tabs, 0);
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) {
+        if (m_tabs) m_tabs->updateGeometry();
+        updateGeometry();
+        emit preferredHeightChanged(preferredHeight());
+    });
 
     // 送进统一宽度：A/B/AB 与「发送」同属这一排，用一个宽度。必须在布局挂好之后调，
     // 这样 sizeHint 才带得上它自己那一身 QSS（内边距/圆角），量出来的宽才是真的。
@@ -249,7 +295,19 @@ void SendPanel::setEndpointOpen(int index, bool open)
 {
     if (index < 0 || index >= 2) return;
     m_openFlags[index] = open;
+    if (m_fileTransfer) m_fileTransfer->setEndpointOpen(index, open);
     updateSendAvailability();
+}
+
+void SendPanel::setRuntime(EndpointRuntime *runtime)
+{
+    if (m_fileTransfer) m_fileTransfer->setRuntime(runtime);
+}
+
+void SendPanel::handleRawDataReceived(int index, const Traffic::Source &source,
+    const QByteArray &payload)
+{
+    if (m_fileTransfer) m_fileTransfer->rawDataReceived(index, source, payload);
 }
 
 void SendPanel::updateTargets()
@@ -347,9 +405,18 @@ void SendPanel::setPayload(const QByteArray &bytes)
     m_editor->setFocus();
 }
 
+int SendPanel::preferredHeight() const
+{
+    const int page = m_tabs && m_tabs->currentWidget() ? m_tabs->currentWidget()->sizeHint().height() : 0;
+    const int bar = m_tabs && m_tabs->tabBar() ? m_tabs->tabBar()->sizeHint().height() : 0;
+    const auto margins = layout() ? layout()->contentsMargins() : QMargins();
+    return page + bar + margins.top() + margins.bottom() + 8;
+}
+
 void SendPanel::setPreferences(PreferencesStore *store)
 {
     m_preferences = store;
+    if (m_fileTransfer) m_fileTransfer->setPreferences(store);
     loadPreferences();
 }
 

@@ -6,10 +6,12 @@ SOURCES += \
     $$PWD/commandformats.cpp \
     $$PWD/commandmanager.cpp \
     $$PWD/endpointruntime.cpp \
+    $$PWD/filetransferservice.cpp \
     $$PWD/receiveframer.cpp
 
 HEADERS += \
     $$PWD/commandformats.h \
     $$PWD/commandmanager.h \
     $$PWD/endpointruntime.h \
+    $$PWD/filetransferservice.h \
     $$PWD/receiveframer.h

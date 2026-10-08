@@ -3,15 +3,19 @@
 
 #include <QWidget>
 #include "domain/portdraft.h"
+#include "domain/trafficmessage.h"
 
 class QCheckBox;
 class QComboBox;
 class QLabel;
 class QPlainTextEdit;
 class PreferencesStore;
+class EndpointRuntime;
+class FileTransferWidget;
 class QPushButton;
 class QResizeEvent;
 class QSpinBox;
+class QTabWidget;
 class QTimer;
 
 // 单个发送区：目标用 A/B/AB 三选一的可勾选按钮表达（与数据显示区端点开关同款样式），
@@ -28,6 +32,10 @@ public:
     void setPayload(const QByteArray &bytes);
     // 组合根注入的偏好存储：编码格式与行尾在会话间保持用户上次的选择。
     void setPreferences(PreferencesStore *store);
+    void setRuntime(EndpointRuntime *runtime);
+    void handleRawDataReceived(int index, const Traffic::Source &source, const QByteArray &payload);
+    // 当前标签页内容撑开所需的高度。文件页比手动发送高，分栏按当前页重新分配。
+    int preferredHeight() const;
 
     // 发送目标的**唯一来源**：位 1 = A，位 2 = B（都选中 = 3）。
     // 旁路发送（指令面板的单点 / 批量发送）必须取它，不得自己另定一套目标规则——
@@ -47,6 +55,7 @@ signals:
     // 定时发送的每一拍也走同一个信号，路径与手动发送完全一致。
     // scheduled 参数表示是否为定时发送（false 为手动发送）
     void sendRequested(const QByteArray &payload, int targetMask, bool scheduled = false);
+    void preferredHeightChanged(int height);
 
 private:
     void updatePreview();
@@ -77,6 +86,8 @@ protected:
     QSpinBox *m_interval;
     QSpinBox *m_times;
     QTimer *m_repeatTimer;
+    QTabWidget *m_tabs = nullptr;
+    FileTransferWidget *m_fileTransfer = nullptr;
     int m_remainingTicks = 0;      // 定时发送剩余次数；0 = 持续
     bool m_openFlags[2] = {false, false};
     bool m_payloadValid = false;

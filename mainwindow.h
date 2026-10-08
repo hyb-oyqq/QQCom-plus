@@ -6,12 +6,14 @@
 #include "ui/panels/portselector/portselectorwidget.h"
 #include "transport/transporttypes.h"
 
+class QEvent;
 class QLabel;
 class QHideEvent;
 class QResizeEvent;
 class QShowEvent;
 class QTimer;
 class QSplitter;
+class QToolButton;
 class QThread;
 class EndpointRuntime;
 class PreferencesStore;
@@ -51,6 +53,10 @@ protected:
     // 窗口缩放会让水平分栏重新分配两块宽度：展开态下把结果记进快照，
     // 收起时才有一个"用户认可的宽度"可依（见 m_expandedColumnWidth 的说明）。
     void resizeEvent(QResizeEvent *event) override;
+    // 不设内容下限：用户要把窗口拖到比面板更小，布局报出的 minimumSizeHint 不能再当成地板。
+    QSize minimumSizeHint() const override;
+    // 布局请求之后若下限被写回，立刻清掉。拖边框看的是这一刻的 minimumSize。
+    bool event(QEvent *event) override;
     // 退出时把窗口几何（大小 + 位置 + 最大化状态）落盘，下次启动恢复。
     void closeEvent(QCloseEvent *event) override;
 
@@ -60,15 +66,17 @@ private:
     // 恢复上次的窗口几何。**首次 showEvent 时调用一次**，不能在构造末尾：
     // 窗口框架要到首次显示才建立，构造期恢复会因为框架还没算而差出一整条标题栏。
     void restoreWindowState();
+    void fitSendPane(int height);
     void saveEndpointDrafts();
     void toggleEndpoint(int index);
     void handleEndpointState(int index, int state, const QString &detail);
     void handleEndpointPeers(int index, const QStringList &peers);
     void handleMessage(const Traffic::Message &message);
     void updateEndpointStatus();
-    // 重算窗口最小宽度：左右两块面板内容完整可见所需的宽度之和（用户钦定——
-    // 窗口放不下时应该变大窗口，而不是压缩"分组"下拉、裁掉表格手柄列）。
-    void updateWindowMinimumWidth();
+    // 清掉窗口最小尺寸，并禁止布局把内容下限写回去。
+    void releaseWindowSizeFloor();
+    // 状态栏「置顶」：切换 WindowStaysOnTopHint，并记入 preferences。
+    void setStayOnTop(bool on);
     // 把"展开态下两块内容的宽度"记进快照。收起指令面板时唯一的依据——信号到达时
     // 面板已被压成 0 宽、分栏也已重分配，那时再读几何拿到的是错误值。
     // 由 showEvent / resizeEvent / splitterMoved / 切换前一刻共同维护。
@@ -110,18 +118,16 @@ private:
     // `QSplitter::handleWidth()`——那个报的是样式默认值（本机 10），而 QSS 把横向手柄
     // 画成 4px，实际只吃掉 4px。信 handleWidth() 会让每次展开把窗口多撑 6px（实测 1849→1855）。
     int m_expandedHandle = 0;
-    // 左侧数据区容器：设置它的最小宽度（= m_trafficMinimumWidth）作为硬下限。
+    // 左侧数据区容器。宽度下限只作测量，不挂到控件上。
     QWidget *m_dataArea = nullptr;
     // 左侧列 = 端口条 + 数据区（水平分栏的左半）。分栏的两个 child 是"左列"与"指令面板"，
     // 所以分栏的 sizes[0] 是**左列**宽度，不是数据区宽度（见 m_expandedColumnWidth）。
     QWidget *m_leftColumn = nullptr;
-    // 数据区（左侧）的宽度下限：展开指令面板时右侧只拿"它自己的最小宽度"，
-    // 左侧不得被压到这条线以下——过滤条在最小窗宽下就靠它保住按钮不被挤压。
-    // 取值 = 过滤条第 1 行全部按钮 + 关键词框下限 恰好铺开所需的宽度（见 .cpp 注释）。
+    // 数据区内容铺开时的宽度（布局 minimumSizeHint）。只给「展开指令面板」当首选宽度，
+    // 不再写成窗口或分栏的硬下限——用户要能把窗口拖得比内容更窄。
     int m_trafficMinimumWidth = 0;
-    // **左侧列**的宽度下限（端口条与数据区各自下限的较大者）。分栏的 sizes[0] 是左列宽度，
-    // 所以"窗口最少要多宽"与"收起时左列不许被压缩"都以它为准——端口条也在左列里，
-    // 只按数据区下限算会让它在窄窗口下被挤。同样由布局自己报出（minimumSizeHint）。
+    // 左侧列内容铺开时的宽度（端口条与数据区各自下限的较大者）。展开面板时，
+    // 若还没有用户拖过的宽度快照，用它当左列的起步宽度。不是窗口最小宽度。
     int m_leftColumnMinimumWidth = 0;
     RouteEditorWidget *m_bridge;
     TrafficPanel *m_traffic;
@@ -145,5 +151,6 @@ private:
     QLabel *m_txStatus = nullptr;
     QLabel *m_trafficStatus = nullptr; // 监视区会话累计条数（面板经 summaryChanged 上报）
     QLabel *m_statusNote = nullptr;
+    QToolButton *m_stayOnTop = nullptr;
 };
 #endif // MAINWINDOW_H

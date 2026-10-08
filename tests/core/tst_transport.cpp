@@ -1,9 +1,15 @@
 #include <QtTest>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include "app/endpointruntime.h"
 #include "app/receiveframer.h"
 #include "app/commandmanager.h"
+#include "app/filetransferservice.h"
 #include "persistence/preferencesstore.h"
 #include "transport/serialtransport.h"
 #include "transport/tcpclienttransport.h"
@@ -14,6 +20,25 @@
 using namespace Qt::StringLiterals;
 
 namespace {
+
+class LoopbackRuntime final : public EndpointRuntime
+{
+    Q_OBJECT
+
+public:
+    explicit LoopbackRuntime(QObject *parent = nullptr) : EndpointRuntime(parent) {}
+
+    FileTransferService *sink = nullptr;
+    QList<QByteArray> sent;
+
+public slots:
+    void sendPayload(int index, const QByteArray &payload, int origin)
+    {
+        Q_UNUSED(origin);
+        sent.append(payload);
+        if (sink) sink->rawDataReceived(index, Traffic::Source{}, payload);
+    }
+};
 
 // 传输层无 UI 核心测试：全部走本机回环，不需要真实串口硬件。
 // 覆盖四种端点的打开/关闭/收发语义，以及 EndpointRuntime 的消息装配。
@@ -252,6 +277,182 @@ private slots:
         QVERIFY(!manager->exportToFile(directory.filePath("missing/commands.json"),
             CommandFormats::Format::QQCom, {group}, error));
         QVERIFY(!error.isEmpty());
+    }
+
+    // VOFA+：外壳 ctx 不建分组；第一级名称是分组；更深的分组只是表里的标题行。
+    void commandFormatsImportVofaTree()
+    {
+        QVERIFY(!CommandFormats::allFormats().contains(CommandFormats::Format::Vofa));
+
+        const char *fixture = R"({
+            "type": "cmds",
+            "ctx": {
+                "name": "group",
+                "is_group": true,
+                "subCmds": [
+                    {
+                        "name": "MG指令",
+                        "is_group": true,
+                        "subCmds": [
+                            {
+                                "name": "控制指令",
+                                "is_group": true,
+                                "subCmds": [
+                                    {
+                                        "name": "复位",
+                                        "hex_on": true,
+                                        "is_group": false,
+                                        "loop_ms": 3000,
+                                        "cmd_hex": "5A A5 01 ",
+                                        "subCmds": []
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "name": "知象转台",
+                        "is_group": true,
+                        "subCmds": [
+                            {
+                                "name": "芯片复位",
+                                "hex_on": false,
+                                "is_group": false,
+                                "cmd_hex": "2B 43 52 2C 52 45 53 45 54 3B",
+                                "subCmds": []
+                            },
+                            {
+                                "name": "航向控制",
+                                "is_group": false,
+                                "subCmds": [
+                                    {
+                                        "name": "航向回零",
+                                        "hex_on": false,
+                                        "is_group": false,
+                                        "cmd_hex": "2B 43 54 2C 54 4F 5A 45 52 4F 3B",
+                                        "subCmds": []
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "name": "裸指令",
+                        "hex_on": false,
+                        "is_group": false,
+                        "cmd_hex": "41 42",
+                        "subCmds": []
+                    }
+                ]
+            }
+        })";
+
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path = directory.filePath("vofa.cmds.json");
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
+        QVERIFY(file.write(fixture) > 0);
+        file.close();
+
+        QList<CommandSet> sets;
+        QString error;
+        CommandFormats::Format detected;
+        QVERIFY2(CommandFormats::parseFile(path, sets, error, &detected), qPrintable(error));
+        QCOMPARE(detected, CommandFormats::Format::Vofa);
+        QCOMPARE(CommandFormats::label(detected), QStringLiteral("VOFA+ (*.json)"));
+        QCOMPARE(sets.size(), 3);
+        QCOMPARE(sets.at(0).name, QStringLiteral("MG指令"));
+        QCOMPARE(sets.at(1).name, QStringLiteral("知象转台"));
+        QCOMPARE(sets.at(2).name, QStringLiteral("未命名分组"));
+        for (const auto &set : sets)
+            QVERIFY(set.name != QStringLiteral("group"));
+
+        const auto &mg = sets.at(0).commands;
+        QCOMPARE(mg.size(), 2);
+        QCOMPARE(mg.at(0).description, QStringLiteral("控制指令"));
+        QCOMPARE(mg.at(0).content, QStringLiteral("控制指令"));
+        QCOMPARE(mg.at(0).enabled, false);
+        QCOMPARE(mg.at(0).isHex, false);
+        QCOMPARE(mg.at(1).description, QStringLiteral("复位"));
+        QCOMPARE(mg.at(1).isHex, true);
+        QCOMPARE(mg.at(1).content, QStringLiteral("5A A5 01"));
+        QCOMPARE(mg.at(1).delayMs, 50); // loop_ms 不进延时
+        QCOMPARE(mg.at(1).enabled, true);
+
+        const auto &turn = sets.at(1).commands;
+        QCOMPARE(turn.size(), 3);
+        QCOMPARE(turn.at(0).description, QStringLiteral("芯片复位"));
+        QCOMPARE(turn.at(0).isHex, false);
+        QCOMPARE(turn.at(0).content, QStringLiteral("+CR,RESET;"));
+        QCOMPARE(turn.at(1).description, QStringLiteral("航向控制"));
+        QCOMPARE(turn.at(1).content, QStringLiteral("航向控制"));
+        QCOMPARE(turn.at(1).enabled, false);
+        QCOMPARE(turn.at(2).content, QStringLiteral("+CT,TOZERO;"));
+
+        QCOMPARE(sets.at(2).commands.at(0).content, QStringLiteral("AB"));
+
+        const CommandItem roundTrip = CommandItem::fromJson(mg.at(0).toJson());
+        QCOMPARE(roundTrip.content, QStringLiteral("控制指令"));
+        QCOMPARE(roundTrip.description, QStringLiteral("控制指令"));
+        QCOMPARE(roundTrip.enabled, false);
+
+        QString exportError;
+        QVERIFY(!CommandFormats::writeFile(directory.filePath("out.json"),
+            CommandFormats::Format::Vofa, sets, exportError));
+        QVERIFY(exportError.contains(QStringLiteral("VOFA+")));
+
+        const QString emptyPath = directory.filePath("empty.json");
+        QFile emptyFile(emptyPath);
+        QVERIFY(emptyFile.open(QIODevice::WriteOnly | QIODevice::Text));
+        emptyFile.write(R"({"type":"cmds","ctx":{"name":"group","subCmds":[]}})");
+        emptyFile.close();
+        QList<CommandSet> emptySets;
+        QVERIFY(!CommandFormats::parseFile(emptyPath, emptySets, error, &detected));
+        QVERIFY(error.contains(QStringLiteral("VOFA+")));
+
+        // 用户给的样本：四组，外壳 "group" 不出现；子级分组只是标题。
+        const QString sample = QStringLiteral("C:/Users/qinjm/OneDrive/Desktop/vofa+.cmds.json");
+        if (QFile::exists(sample)) {
+            QList<CommandSet> real;
+            QVERIFY2(CommandFormats::parseFile(sample, real, error, &detected), qPrintable(error));
+            QCOMPARE(detected, CommandFormats::Format::Vofa);
+            QCOMPARE(real.size(), 4);
+            QCOMPARE(real.at(0).name, QStringLiteral("MG指令"));
+            QCOMPARE(real.at(1).name, QStringLiteral("知象转台"));
+            QCOMPARE(real.at(2).name, QStringLiteral("SharkProtocol"));
+            QCOMPARE(real.at(3).name, QStringLiteral("命令组3"));
+            const QStringList mgTitles = {
+                QStringLiteral("控制指令"), QStringLiteral("波形指令"),
+                QStringLiteral("校准指令"), QStringLiteral("测试指令")};
+            int titles = 0;
+            for (const auto &cmd : real.at(0).commands) {
+                if (!mgTitles.contains(cmd.description)) continue;
+                QCOMPARE(cmd.content, cmd.description);
+                QCOMPARE(cmd.enabled, false);
+                ++titles;
+            }
+            QCOMPARE(titles, mgTitles.size());
+            bool reset = false;
+            bool heading = false;
+            for (const auto &cmd : real.at(1).commands) {
+                if (cmd.description == QStringLiteral("芯片复位")) {
+                    QCOMPARE(cmd.content, QStringLiteral("+CR,RESET;"));
+                    QCOMPARE(cmd.isHex, false);
+                    reset = true;
+                }
+                if (cmd.description == QStringLiteral("航向控制")) {
+                    QCOMPARE(cmd.content, QStringLiteral("航向控制"));
+                    QCOMPARE(cmd.enabled, false);
+                    heading = true;
+                }
+            }
+            QVERIFY(reset);
+            QVERIFY(heading);
+            QVERIFY(!real.at(2).commands.isEmpty());
+            for (const auto &cmd : real.at(2).commands)
+                QVERIFY(!cmd.content.trimmed().isEmpty());
+        }
     }
 
     // 接收组帧器：纯逻辑，不需要端口与事件循环——把字节流片段喂进去，
@@ -747,6 +948,223 @@ private slots:
         // 关闭时的空列表广播用于复位界面显示。
         QVERIFY(!peers.isEmpty());
         QVERIFY(peers.last().at(1).toStringList().isEmpty());
+    }
+
+    void ymodemRoundTripOverRawLoopback()
+    {
+        QTemporaryDir sourceDir;
+        QTemporaryDir destinationDir;
+        QVERIFY(sourceDir.isValid());
+        QVERIFY(destinationDir.isValid());
+
+        const QString sourcePath = sourceDir.filePath(QStringLiteral("firmware.bin"));
+        QFile source(sourcePath);
+        QVERIFY(source.open(QIODevice::WriteOnly));
+        QByteArray expected;
+        expected.reserve(1500);
+        for (int i = 0; i < 1500; ++i) expected.append(char(i & 0xff));
+        QCOMPARE(source.write(expected), qint64(expected.size()));
+        source.close();
+
+        LoopbackRuntime senderRuntime;
+        LoopbackRuntime receiverRuntime;
+        FileTransferService sender;
+        FileTransferService receiver;
+        senderRuntime.sink = &receiver;
+        receiverRuntime.sink = &sender;
+        sender.setRuntime(&senderRuntime);
+        receiver.setRuntime(&receiverRuntime);
+
+        QSignalSpy senderFinished(&sender, &FileTransferService::transferFinished);
+        QSignalSpy receiverFinished(&receiver, &FileTransferService::transferFinished);
+        QSignalSpy failures(&sender, &FileTransferService::transferFailed);
+        QSignalSpy receiverFailures(&receiver, &FileTransferService::transferFailed);
+
+        receiver.startYModemReceive(0, destinationDir.path());
+        sender.startYModemSend(0, sourcePath, 1024);
+        QTest::qWait(3000);
+        QVERIFY(senderFinished.count() == 1 && receiverFinished.count() == 1);
+        QCOMPARE(failures.count(), 0);
+        QCOMPARE(receiverFailures.count(), 0);
+
+        const QString destinationPath = destinationDir.filePath(QStringLiteral("firmware.bin"));
+        QFile destination(destinationPath);
+        QVERIFY(destination.open(QIODevice::ReadOnly));
+        QCOMPARE(destination.readAll(), expected);
+    }
+
+    void rawTransferRunsSideCommandsAndPublishesCrc()
+    {
+        QTemporaryDir sourceDir;
+        QVERIFY(sourceDir.isValid());
+        const QString sourcePath = sourceDir.filePath(QStringLiteral("payload.bin"));
+        QFile source(sourcePath);
+        QVERIFY(source.open(QIODevice::WriteOnly));
+        const QByteArray payload("123456789");
+        QCOMPARE(source.write(payload), qint64(payload.size()));
+        source.close();
+
+        LoopbackRuntime runtime;
+        FileTransferService service;
+        service.setRuntime(&runtime);
+        QSignalSpy finished(&service, &FileTransferService::transferFinished);
+        QSignalSpy failed(&service, &FileTransferService::transferFailed);
+        QSignalSpy stats(&service, &FileTransferService::statsChanged);
+
+        FileTransferSides sides;
+        sides.before = "PRE";
+        sides.beforeDelayMs = 20;
+        sides.after = "POST";
+        sides.afterDelayMs = 20;
+        service.startRawSend(0, sourcePath, sides);
+        QTRY_COMPARE_WITH_TIMEOUT(runtime.sent.size(), 3, 2000);
+        QCOMPARE(runtime.sent.at(0), QByteArray("PRE"));
+        QCOMPARE(runtime.sent.at(1), payload);
+        QCOMPARE(runtime.sent.at(2), QByteArray("POST"));
+        QTRY_COMPARE(finished.count(), 1);
+        QCOMPARE(failed.count(), 0);
+        QVERIFY(!stats.isEmpty());
+        const QList<QVariant> last = stats.last();
+        QCOMPARE(last.at(0).toLongLong(), qint64(payload.size()));
+        QCOMPARE(last.at(2).toInt(), 0);
+        QCOMPARE(last.at(3).toInt(), 0);
+        QCOMPARE(last.at(4).toInt(), 0x31c3);
+        QCOMPARE(last.at(5).toUInt(), 0xcbf43926u);
+    }
+
+    void rawSendUsesRequestedChunkSize()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("payload.bin"));
+        QFile source(path);
+        QVERIFY(source.open(QIODevice::WriteOnly));
+        const QByteArray payload(10, 'A');
+        QCOMPARE(source.write(payload), qint64(payload.size()));
+        source.close();
+
+        LoopbackRuntime runtime;
+        FileTransferService service;
+        service.setRuntime(&runtime);
+        QSignalSpy finished(&service, &FileTransferService::transferFinished);
+        QSignalSpy failed(&service, &FileTransferService::transferFailed);
+        service.startRawSend(0, path, {}, 4);
+        QTRY_COMPARE(finished.count(), 1);
+        QCOMPARE(failed.count(), 0);
+        QCOMPARE(runtime.sent.size(), 3);
+        QCOMPARE(runtime.sent.at(0), QByteArray(4, 'A'));
+        QCOMPARE(runtime.sent.at(1), QByteArray(4, 'A'));
+        QCOMPARE(runtime.sent.at(2), QByteArray(2, 'A'));
+    }
+
+    void rawSendWaitsBetweenChunks()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("payload.bin"));
+        QFile source(path);
+        QVERIFY(source.open(QIODevice::WriteOnly));
+        QCOMPARE(source.write(QByteArray(10, 'A')), qint64(10));
+        source.close();
+
+        LoopbackRuntime runtime;
+        FileTransferService service;
+        service.setRuntime(&runtime);
+        QSignalSpy finished(&service, &FileTransferService::transferFinished);
+        QSignalSpy failed(&service, &FileTransferService::transferFailed);
+        QSignalSpy progress(&service, &FileTransferService::progressChanged);
+        QElapsedTimer clock;
+        clock.start();
+        service.startRawSend(0, path, {}, 4, 80);
+        QVERIFY(!progress.isEmpty());
+        QVERIFY2(clock.elapsed() < 40,
+            qPrintable(QStringLiteral("第一包应马上发出，实际 %1 ms").arg(clock.elapsed())));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 2000);
+        QCOMPARE(failed.count(), 0);
+        QVERIFY2(clock.elapsed() >= 140,
+            qPrintable(QStringLiteral("两包之间应各等 80 ms，实际 %1 ms").arg(clock.elapsed())));
+        QCOMPARE(runtime.sent.size(), 3);
+        QCOMPARE(runtime.sent.at(0), QByteArray(4, 'A'));
+        QCOMPARE(runtime.sent.at(1), QByteArray(4, 'A'));
+        QCOMPARE(runtime.sent.at(2), QByteArray(2, 'A'));
+    }
+
+    void rawReceiveIgnoresBytesDuringSideCommandWait()
+    {
+        QTemporaryDir destinationDir;
+        QVERIFY(destinationDir.isValid());
+        const QString destinationPath = destinationDir.filePath(QStringLiteral("out.bin"));
+
+        LoopbackRuntime runtime;
+        FileTransferService service;
+        service.setRuntime(&runtime);
+        QSignalSpy finished(&service, &FileTransferService::transferFinished);
+        QSignalSpy failed(&service, &FileTransferService::transferFailed);
+
+        FileTransferSides sides;
+        sides.before = "GO";
+        sides.beforeDelayMs = 40;
+        sides.after = "DONE";
+        sides.afterDelayMs = 20;
+        QSignalSpy status(&service, &FileTransferService::statusChanged);
+        service.startRawReceive(0, destinationPath, sides);
+        service.rawDataReceived(0, Traffic::Source{}, QByteArray("NOISE"));
+        QTRY_VERIFY_WITH_TIMEOUT(status.last().at(0).toString().contains(QStringLiteral("正在接收")), 2000);
+        service.rawDataReceived(0, Traffic::Source{}, QByteArray("FILE"));
+        service.stop();
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 2000);
+        QCOMPARE(failed.count(), 0);
+        QTRY_VERIFY(runtime.sent.contains(QByteArray("GO")));
+        QTRY_VERIFY(runtime.sent.contains(QByteArray("DONE")));
+
+        QFile destination(destinationPath);
+        QVERIFY(destination.open(QIODevice::ReadOnly));
+        QCOMPARE(destination.readAll(), QByteArray("FILE"));
+    }
+
+    void elapsedStartsAtFirstDataInteraction()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        LoopbackRuntime runtime;
+        FileTransferService receiver;
+        receiver.setRuntime(&runtime);
+        QSignalSpy receiveStats(&receiver, &FileTransferService::statsChanged);
+        receiver.startRawReceive(0, dir.filePath(QStringLiteral("out.bin")));
+        QTest::qWait(120);
+        QVERIFY(!receiveStats.isEmpty());
+        QCOMPARE(receiveStats.last().at(6).toLongLong(), qint64(0));
+        receiver.rawDataReceived(0, Traffic::Source{}, QByteArray("AB"));
+        QVERIFY(receiveStats.last().at(6).toLongLong() < 80);
+
+        const QString sourcePath = dir.filePath(QStringLiteral("firmware.bin"));
+        QFile source(sourcePath);
+        QVERIFY(source.open(QIODevice::WriteOnly));
+        QCOMPARE(source.write(QByteArray("payload")), qint64(7));
+        source.close();
+
+        FileTransferService sender;
+        sender.setRuntime(&runtime);
+        QSignalSpy sendStats(&sender, &FileTransferService::statsChanged);
+        QSignalSpy status(&sender, &FileTransferService::statusChanged);
+        FileTransferSides sides;
+        sides.before = "PRE";
+        sides.beforeDelayMs = 400;
+        sender.startYModemSend(0, sourcePath, 128, sides);
+        QTRY_VERIFY(status.last().at(0).toString().contains(QStringLiteral("前置指令")));
+        sender.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x43)));
+        QCOMPARE(sendStats.last().at(6).toLongLong(), qint64(0));
+
+        QTRY_VERIFY_WITH_TIMEOUT(
+            status.last().at(0).toString().contains(QStringLiteral("等待接收端")), 2000);
+        QTest::qWait(250);
+        QCOMPARE(sendStats.last().at(6).toLongLong(), qint64(0));
+        sender.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x43)));
+        sender.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x06)));
+        sender.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x43)));
+        QVERIFY(sendStats.last().at(0).toLongLong() > 0);
+        QVERIFY(sendStats.last().at(6).toLongLong() < 200);
+        sender.stop();
     }
 };
 

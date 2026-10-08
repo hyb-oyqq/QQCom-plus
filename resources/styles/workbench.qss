@@ -6,6 +6,9 @@ QWidget {
 }
 QMainWindow, QWidget#centralwidget { background: #e9edf4; }
 QLabel#Muted, QLabel#udpPeerHint, QLabel#StatusNote { color: #5c6880; font-size: 12px; }
+/* 组帧说明与上面的设置同一字号。字号写全：Qt 只写 font-weight 时会把 font-size 清回默认。 */
+QLabel#framingMechanismTitle { font-size: 13px; font-weight: 600; }
+QLabel#framingHint { font-size: 13px; color: #5c6880; }
 /* 字节数的颜色**不在这里**：它与预览文本合并在同一个 QLabel 里、用富文本 span 着色
    （见 sendpanel.cpp 的 ByteCountColor）。QSS 不作用于 span，所以那个值必须写在代码里。 */
 QLabel#EmptyState { background: #fbfcfe; color: #5c6880; border: 1px dashed #c3ccda; border-radius: 5px; }
@@ -49,6 +52,13 @@ QPushButton#commandPanelToggle[collapsed="false"] { background: #1d4ed8; border-
 QPushButton#PrimaryButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
 QPushButton#PrimaryButton:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#PrimaryButton:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }
+QPushButton#fileTransferStart, QPushButton#fileReceiveStart { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
+QPushButton#fileTransferStart:hover, QPushButton#fileReceiveStart:hover { background: #163fb3; border-color: #163fb3; }
+QPushButton#fileTransferStart:disabled, QPushButton#fileReceiveStart:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }
+QPushButton#fileTransferStart[busy="true"], QPushButton#fileReceiveStart[busy="true"] { background: #c0392b; border-color: #a7301f; color: #ffffff; }
+QPushButton#fileTransferStart[busy="true"]:hover, QPushButton#fileReceiveStart[busy="true"]:hover { background: #a7301f; border-color: #a7301f; }
+QProgressBar#fileTransferProgress, QProgressBar#fileReceiveProgress { border: 1px solid #a9b5c9; border-radius: 5px; background: #f4f6fa; text-align: center; color: #182334; }
+QProgressBar#fileTransferProgress::chunk, QProgressBar#fileReceiveProgress::chunk { background: #1d4ed8; border-radius: 4px; margin: 1px; }
 QPushButton#bridgeButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
 QPushButton#bridgeButton:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#endpointAction { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
@@ -109,6 +119,8 @@ QSplitter::handle:hover { background: #d8e3f7; }
 QStatusBar QLabel { font-size: 12px; }
 QStatusBar { background: #ffffff; border-top: 1px solid #b9c4d6; min-height: 24px; }
 QStatusBar::item { border: none; }
+QToolButton#stayOnTop { padding: 2px 4px; min-width: 16px; min-height: 16px; border-radius: 4px; }
+QToolButton#stayOnTop:checked { background: #d7e2f7; border-color: #4d6ba3; }
 /* 颜色与加粗各自保留；**不再写 font-family**——"Segoe UI" 只是 Windows 的默认 UI 字体，
    显式写死会在换系统字体/切换语言时与旁边标签不一致，而这正是"看着没统一"的来源之一。 */
 QLabel#RxStatus { color: #047857; font-weight: 600; }
@@ -194,6 +206,31 @@ CommandPanel QTabBar::tab:selected {
     border-bottom: 2px solid #1d4ed8;
 }
 CommandPanel QTabBar::tab:hover:!selected {
+    background: #e8eefb;
+    color: #14326f;
+}
+SendPanel QTabWidget::pane {
+    border: none;
+    background: transparent;
+    top: 0px;
+}
+SendPanel QTabBar::tab {
+    background: #f4f6fa;
+    border: 1px solid #c8d1e0;
+    border-bottom: none;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+    padding: 4px 12px;
+    margin-right: 2px;
+    color: #5c6880;
+}
+SendPanel QTabBar::tab:selected {
+    background: #ffffff;
+    color: #1d4ed8;
+    font-weight: 600;
+    border-bottom: 2px solid #1d4ed8;
+}
+SendPanel QTabBar::tab:hover:!selected {
     background: #e8eefb;
     color: #14326f;
 }

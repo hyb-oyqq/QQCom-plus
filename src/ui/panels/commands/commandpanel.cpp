@@ -74,10 +74,8 @@ void CommandPanel::setupUi()
     topBar->addWidget(m_importButton);
     topBar->addWidget(m_exportButton);
 
-    // 顶栏这一行必须整体放得下（用户反馈：窗口不够宽时右侧面板的"分组"下拉被压没了、
-    // 按钮也只剩半个）。QHBoxLayout 不会换行，宽度不够时它只能压缩子控件——所以给顶栏
-    // 容器一个"内容铺开所需宽度"的最小宽度，把压力顶回给上层（外侧分栏/窗口）。
-    // 不写死像素：逐个控件取 sizeHint + 实际间距算出来，字体/DPI/翻译变化自动跟随。
+    // 顶栏铺开要多宽，只记下来给「展开面板」当起步宽度。
+    // 不再写成控件下限：下限会经分栏回到主窗口，手动把窗口拖窄时被顶住。
     {
         int wanted = topBar->spacing() * (topBar->count() - 1);
         for (int i = 0; i < topBar->count(); ++i) {
@@ -86,7 +84,6 @@ void CommandPanel::setupUi()
                 if (auto *widget = item->widget()) wanted += widget->sizeHint().width();
             }
         }
-        m_topBarWidget->setMinimumWidth(wanted);
         m_topBarMinimumWidth = wanted;
     }
     m_mainLayout->addWidget(m_topBarWidget);
@@ -138,8 +135,8 @@ void CommandPanel::applyExpandedState()
         const int side = m_mainLayout->contentsMargins().left()
             + m_mainLayout->contentsMargins().right();
         const int wanted = qMax(m_commandTableMinimumWidth, m_topBarMinimumWidth) + side;
-        m_expandedMinimumWidth = qMax(wanted, 520); // 520 只当下限兜底，不再是唯一真源
-        setMinimumWidth(m_expandedMinimumWidth);
+        m_expandedMinimumWidth = qMax(wanted, 520); // 展开时窗口加宽用的首选宽度，不是拖动下限
+        setMinimumWidth(0);
         setMaximumWidth(QWIDGETSIZE_MAX);
     } else {
         setMinimumWidth(0);
@@ -261,7 +258,7 @@ void CommandPanel::onImportClicked()
 {
     QString filePath = StyleDialogs::getOpenFileName(this, tr("导入指令集"),
                                                      QString(),
-                                                     tr("指令集文件 (*.json *.port *.blemsg);;所有文件 (*.*)"));
+                                                     tr("指令集文件，含 VOFA+ (*.json *.port *.blemsg);;所有文件 (*.*)"));
     if (filePath.isEmpty()) return;
 
     QString errorMessage;

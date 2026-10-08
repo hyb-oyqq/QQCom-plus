@@ -8,6 +8,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QSaveFile>
+#include <QStringDecoder>
 #include <QStringList>
 
 namespace {
@@ -252,12 +253,137 @@ QJsonObject toQQCom(const QList<CommandSet> &sets)
     return root;
 }
 
+// ── VOFA+ ───────────────────────────────────────────────────────────────
+// 文件是一棵命令树：{"type":"cmds","ctx":{name,is_group,subCmds:[...]}}。
+// ctx 本身只是外壳（样本里名字就叫 "group"），不建分组。
+// 第一级 subCmds 里的分组 → 一个 CommandSet，名字用这一级的 name。
+// 再往下的分组不再建分组：名字直接填进发送框，默认不勾选。勾上或点发送就按普通文本发出去。
+// 叶子才是原来的指令。hex_on 为真时 cmd_hex 就是要发的字节；为假时 cmd_hex
+// 仍是十六进制，但是文本的字节（如 "2B 43 52 ..." = "+CR,RESET;"）。
+// loop_ms / loop_count 是 VOFA 自己的重复发送，不映射到延时。
+
+bool vofaNodeIsGroup(const QJsonObject &node)
+{
+    if (node.value(QStringLiteral("is_group")).toBool(false)) return true;
+    return !node.value(QStringLiteral("subCmds")).toArray().isEmpty();
+}
+
+QString vofaTextFromHex(const QString &hex)
+{
+    const QByteArray raw = hexTextToBytes(hex);
+    QStringDecoder decoder(QStringDecoder::Utf8);
+    const QString text = decoder.decode(raw);
+    // 文本指令偶发不是 UTF-8。解码失败时按字节原样留下，避免整条丢成空。
+    return decoder.hasError() ? QString::fromLatin1(raw) : text;
+}
+
+CommandItem vofaTitleItem(const QString &name)
+{
+    CommandItem cmd;
+    const QString trimmed = name.trimmed().isEmpty()
+        ? QStringLiteral("未命名") : name.trimmed();
+    cmd.description = trimmed;
+    cmd.content = trimmed; // 发送框里就是分组名，不另做“禁止发送”标记
+    cmd.enabled = false;
+    cmd.isHex = false;
+    cmd.tail = QStringLiteral("无");
+    return cmd;
+}
+
+CommandItem vofaLeafItem(const QJsonObject &node)
+{
+    CommandItem cmd;
+    QString name = node.value(QStringLiteral("name")).toString().trimmed();
+    if (name.isEmpty()) name = node.value(QStringLiteral("intro")).toString().trimmed();
+    cmd.description = name;
+    const bool hexOn = node.value(QStringLiteral("hex_on")).toBool(false);
+    const QString hex = node.value(QStringLiteral("cmd_hex")).toString();
+    cmd.isHex = hexOn;
+    cmd.content = hexOn ? bytesToHexText(hexTextToBytes(hex)) : vofaTextFromHex(hex);
+    cmd.tail = QStringLiteral("无");
+    cmd.delayMs = 50;
+    // 没有正文时，名字本身填进发送框，默认不勾选。有正文的叶子照常勾选。
+    if (cmd.content.trimmed().isEmpty()) {
+        if (!cmd.description.trimmed().isEmpty()) cmd.content = cmd.description;
+        cmd.enabled = false;
+    } else {
+        cmd.enabled = true;
+    }
+    return cmd;
+}
+
+void appendVofaNodes(CommandSet &set, const QJsonArray &nodes)
+{
+    for (const auto &value : nodes) {
+        const QJsonObject node = value.toObject();
+        if (vofaNodeIsGroup(node)) {
+            set.commands.append(vofaTitleItem(node.value(QStringLiteral("name")).toString()));
+            appendVofaNodes(set, node.value(QStringLiteral("subCmds")).toArray());
+            continue;
+        }
+        const CommandItem cmd = vofaLeafItem(node);
+        if (cmd.description.trimmed().isEmpty() && cmd.content.trimmed().isEmpty()) continue;
+        set.commands.append(cmd);
+    }
+}
+
+QString vofaLooseSetName(const QJsonObject &ctx)
+{
+    // 外壳名字 "group" 不是用户起的分组名。第一级若直接是叶子，归到这个兜底分组。
+    const QString name = ctx.value(QStringLiteral("name")).toString().trimmed();
+    if (name.isEmpty() || name.compare(QLatin1String("group"), Qt::CaseInsensitive) == 0)
+        return QStringLiteral("未命名分组");
+    return name;
+}
+
+QList<CommandSet> parseVofa(const QJsonObject &root)
+{
+    const QJsonObject ctx = root.value(QStringLiteral("ctx")).toObject();
+    QList<CommandSet> sets;
+    CommandSet loose;
+    bool looseOpen = false;
+
+    const auto flushLoose = [&]() {
+        if (!looseOpen || loose.commands.isEmpty()) {
+            loose = CommandSet();
+            looseOpen = false;
+            return;
+        }
+        sets.append(loose);
+        loose = CommandSet();
+        looseOpen = false;
+    };
+
+    for (const auto &value : ctx.value(QStringLiteral("subCmds")).toArray()) {
+        const QJsonObject node = value.toObject();
+        if (vofaNodeIsGroup(node)) {
+            flushLoose();
+            CommandSet set;
+            const QString name = node.value(QStringLiteral("name")).toString().trimmed();
+            set.name = name.isEmpty() ? QStringLiteral("未命名分组") : name;
+            appendVofaNodes(set, node.value(QStringLiteral("subCmds")).toArray());
+            sets.append(set);
+            continue;
+        }
+        const CommandItem cmd = vofaLeafItem(node);
+        if (cmd.description.trimmed().isEmpty() && cmd.content.trimmed().isEmpty()) continue;
+        if (!looseOpen) {
+            loose.name = vofaLooseSetName(ctx);
+            looseOpen = true;
+        }
+        loose.commands.append(cmd);
+    }
+    flushLoose();
+    return sets;
+}
+
 } // namespace
 
 namespace CommandFormats {
 
 QList<Format> allFormats()
 {
+    // VOFA+ 只进不导出：树被展平后写不回去，也不能让格式轮转测试去导出它。
     return {Format::QQCom, Format::JCom, Format::BleDebugger};
 }
 
@@ -267,6 +393,7 @@ QString label(Format format)
     case Format::QQCom:   return QCoreApplication::translate("CommandFormats", "QQCom (*.json)");
     case Format::JCom:        return QCoreApplication::translate("CommandFormats", "JCom (*.port)");
     case Format::BleDebugger: return QCoreApplication::translate("CommandFormats", "BLE 调试器 (*.blemsg)");
+    case Format::Vofa:        return QCoreApplication::translate("CommandFormats", "VOFA+ (*.json)");
     }
     return QString();
 }
@@ -277,6 +404,7 @@ QString suffix(Format format)
     case Format::QQCom:   return QStringLiteral("json");
     case Format::JCom:        return QStringLiteral("port");
     case Format::BleDebugger: return QStringLiteral("blemsg");
+    case Format::Vofa:        return QStringLiteral("json");
     }
     return QStringLiteral("json");
 }
@@ -325,10 +453,21 @@ bool parseFile(const QString &filePath, QList<CommandSet> &outSets,
         outSets = parseQQCom(root);
         return true;
     }
+    if (root.value(QStringLiteral("type")).toString() == QLatin1String("cmds")
+        && root.value(QStringLiteral("ctx")).isObject()) {
+        if (detected) *detected = Format::Vofa;
+        outSets = parseVofa(root);
+        if (outSets.isEmpty()) {
+            errorMessage = QCoreApplication::translate(
+                "CommandFormats", "VOFA+ 文件里没有可导入的指令");
+            return false;
+        }
+        return true;
+    }
 
     errorMessage = QCoreApplication::translate(
         "CommandFormats",
-        "无法识别的指令集文件格式（支持 QQCom / JCom / BLE 调试器 三种）");
+        "无法识别的指令集文件格式（支持 QQCom / JCom / BLE 调试器 / VOFA+）");
     return false;
 }
 
@@ -341,6 +480,10 @@ bool writeFile(const QString &filePath, Format format,
     case Format::QQCom:   doc = QJsonDocument(toQQCom(sets)); break;
     case Format::JCom:        doc = QJsonDocument(toJCom(sets));      break;
     case Format::BleDebugger: doc = QJsonDocument(toBle(sets));       break;
+    case Format::Vofa:
+        errorMessage = QCoreApplication::translate(
+            "CommandFormats", "VOFA+ 文件只能导入，不能按该格式导出");
+        return false;
     }
 
     QSaveFile file(filePath);
