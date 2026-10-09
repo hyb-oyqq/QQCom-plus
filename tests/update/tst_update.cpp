@@ -56,6 +56,7 @@ private slots:
     void rejectsProtocolAndPackageFields();
     void packageFileMatchesChecksSizeAndHash();
     void unwrapsGiteeContentsPayload();
+    void loopbackOriginDoesNotWidenProductionUrls();
 };
 
 void UpdateManifestTest::acceptsNewerStableRelease()
@@ -165,6 +166,31 @@ void UpdateManifestTest::packageFileMatchesChecksSizeAndHash()
     QVERIFY(!packageFileMatches(path, bytes.size(), QByteArray(32, '\x11')));
     QVERIFY(!packageFileMatches(path, bytes.size(), QByteArray()));
     QVERIFY(!packageFileMatches(dir.filePath(QStringLiteral("missing.zip")), bytes.size(), hash));
+}
+
+void UpdateManifestTest::loopbackOriginDoesNotWidenProductionUrls()
+{
+    clearLoopbackUpdateOrigin();
+    const QUrl package(QStringLiteral("http://127.0.0.1:9/QQCom-0.1.1-win64.zip"));
+    QVERIFY(!isAllowedUpdateUrl(package));
+    QJsonObject local{{QStringLiteral("download"),
+                       downloadObject({{QStringLiteral("url"), package.toString()},
+                                       {QStringLiteral("size"), 16}})}};
+    QCOMPARE(evaluate(manifestJson(local), QStringLiteral("0.1.0")), ManifestStatus::Rejected);
+
+    setLoopbackUpdateOrigin(QUrl(QStringLiteral("http://127.0.0.1:9/")));
+    QVERIFY(loopbackUpdateOriginActive());
+    QVERIFY(isAllowedUpdateUrl(package));
+    QVERIFY(isAllowedUpdateUrl(QUrl(QStringLiteral("https://gitee.com/qinjmin/qqcom/releases"))));
+    QVERIFY(!isAllowedUpdateUrl(QUrl(QStringLiteral("http://127.0.0.1:10/QQCom.zip"))));
+    QVERIFY(!isAllowedUpdateUrl(QUrl(QStringLiteral("http://127.0.0.1:9/QQCom.zip?x=1"))));
+    QVERIFY(!isAllowedUpdateUrl(QUrl(QStringLiteral("http://localhost:9/QQCom.zip"))));
+    QCOMPARE(evaluate(manifestJson(local), QStringLiteral("0.1.0")), ManifestStatus::UpdateAvailable);
+
+    setLoopbackUpdateOrigin(QUrl(QStringLiteral("http://example.com/")));
+    QVERIFY(!loopbackUpdateOriginActive());
+    QVERIFY(!isAllowedUpdateUrl(package));
+    clearLoopbackUpdateOrigin();
 }
 
 void UpdateManifestTest::unwrapsGiteeContentsPayload()

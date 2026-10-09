@@ -31,6 +31,14 @@ QByteArray unwrapManifestBody(const QByteArray &body);
 
 bool isHttpsUrl(const QUrl &url);
 
+// 正式清单和下载只走 HTTPS。本地自测可以显式打开一个回环源：
+// 只接受 http://127.0.0.1:<端口>/，没有用户名、查询或片段。
+// 这个源只存在于本次进程，不写入配置，也不放宽其它地址。
+void setLoopbackUpdateOrigin(const QUrl &origin);
+void clearLoopbackUpdateOrigin();
+bool loopbackUpdateOriginActive();
+bool isAllowedUpdateUrl(const QUrl &url);
+
 // 大小与 SHA-256 必须同时相符。文件打不开或不匹配都返回 false。
 bool packageFileMatches(const QString &path, qint64 expectedSize, const QByteArray &expectedSha256);
 

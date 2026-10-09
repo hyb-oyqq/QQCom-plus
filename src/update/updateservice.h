@@ -22,6 +22,8 @@ public:
     explicit UpdateService(QString currentVersion, QObject *parent = nullptr);
 
     void checkForUpdates(const QUrl &manifestUrl, CheckMode mode = CheckMode::Automatic);
+    // 本地自测用：发现新版本时不再询问，直接下载。正式启动不调用。
+    void setAcceptUpdatesWithoutPrompt(bool accept);
 
 signals:
     // 不打断当前操作的提示。空文本表示清掉状态栏上的“正在检查”。
@@ -53,6 +55,7 @@ private:
     bool m_busy = false;
     bool m_downloadWriteFailed = false;
     bool m_stallAborted = false;
+    bool m_acceptWithoutPrompt = false;
 };
 
 #endif // UPDATESERVICE_H

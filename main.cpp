@@ -103,6 +103,14 @@ int main(int argc, char *argv[])
     parser.addOption({"auto-open",
         "Open endpoint A from the command line (test-only). Syntax: "
         "tcp-server:<port> | udp:<port> | tcp-client:<host>:<port> | serial:<name>.", "endpoint"});
+    parser.addOption({"local-update-source",
+        "Use a loopback HTTP update fixture for this process only (test-only). "
+        "Syntax: http://127.0.0.1:<port>", "origin"});
+    parser.addOption({"local-update-current-version",
+        "Compare updates against this version instead of the built-in version (test-only).",
+        "version"});
+    parser.addOption({"accept-update",
+        "Download an available update without asking (test-only)."});
     parser.process(a);
     // 程序主图标：exe 内嵌资源（RC_ICONS）管资源管理器，这里管运行中的窗口与任务栏。
 
@@ -138,21 +146,38 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN
     // 自动升级只在正常可见运行时触发；快照和延迟探针不能访问网络或弹窗。
     // QQCOM_DISABLE_UPDATE=1 只关掉启动后的自动检查，状态栏「检查更新」仍然可用。
+    // --local-update-source 只服务本次进程的回环自测，不改正式清单地址，也不写配置。
     if (!parser.isSet("snapshot") && !parser.isSet("latency-probe")) {
-        auto *updates = new UpdateService(QStringLiteral(QQCOM_VERSION_STR), &w);
-        const QString overrideUrl = qEnvironmentVariable("QQCOM_OTA_MANIFEST_URL");
-        const QUrl manifestUrl = overrideUrl.isEmpty()
-                                     ? QUrl(QStringLiteral(
-                                           "https://gitee.com/api/v5/repos/qinjmin/qqcom/contents/"
-                                           "ota/stable.json?ref=master"))
-                                     : QUrl(overrideUrl);
+        const QString simulatedVersion = parser.value("local-update-current-version");
+        const QString currentVersion = simulatedVersion.isEmpty()
+                                           ? QStringLiteral(QQCOM_VERSION_STR)
+                                           : simulatedVersion;
+        auto *updates = new UpdateService(currentVersion, &w);
+        QUrl manifestUrl(QStringLiteral(
+            "https://gitee.com/api/v5/repos/qinjmin/qqcom/contents/ota/stable.json?ref=master"));
+        const QString localSource = parser.value("local-update-source");
+        if (!localSource.isEmpty()) {
+            const QUrl origin(localSource);
+            setLoopbackUpdateOrigin(origin);
+            if (!loopbackUpdateOriginActive()) {
+                qWarning() << "local-update-source: 只接受 http://127.0.0.1:<端口>，已忽略";
+            } else {
+                manifestUrl = QUrl(origin.toString(QUrl::RemovePath | QUrl::RemoveQuery)
+                                   + QStringLiteral("/stable.json"));
+            }
+        } else {
+            const QString overrideUrl = qEnvironmentVariable("QQCOM_OTA_MANIFEST_URL");
+            if (!overrideUrl.isEmpty()) manifestUrl = QUrl(overrideUrl);
+        }
+        if (parser.isSet("accept-update")) updates->setAcceptUpdatesWithoutPrompt(true);
         QObject::connect(&w, &MainWindow::updateCheckRequested, updates, [updates, manifestUrl] {
             updates->checkForUpdates(manifestUrl, UpdateService::CheckMode::Manual);
         });
         QObject::connect(updates, &UpdateService::advisory, &w,
                          [&w](const QString &text, int ms) { w.showStatusNote(text, ms); });
-        if (qEnvironmentVariableIsEmpty("QQCOM_DISABLE_UPDATE")) {
-            QTimer::singleShot(3000, &w, [updates, manifestUrl] {
+        if (qEnvironmentVariableIsEmpty("QQCOM_DISABLE_UPDATE") || !localSource.isEmpty()) {
+            const int delayMs = localSource.isEmpty() ? 3000 : 400;
+            QTimer::singleShot(delayMs, &w, [updates, manifestUrl] {
                 updates->checkForUpdates(manifestUrl, UpdateService::CheckMode::Automatic);
             });
         }

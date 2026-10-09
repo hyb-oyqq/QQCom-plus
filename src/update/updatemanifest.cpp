@@ -59,6 +59,55 @@ bool isHttpsUrl(const QUrl &url)
            && url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0;
 }
 
+namespace {
+
+QUrl loopbackOrigin;
+
+bool isExactLoopbackOrigin(const QUrl &url)
+{
+    if (!url.isValid() || url.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) != 0)
+        return false;
+    if (url.userName().size() || url.password().size() || url.query().size() || url.fragment().size())
+        return false;
+    const QString host = url.host();
+    if (host != QStringLiteral("127.0.0.1")) return false;
+    const int port = url.port();
+    if (port < 1 || port > 65535) return false;
+    const QString path = url.path();
+    if (!path.isEmpty() && path != QStringLiteral("/")) return false;
+    return url.authority() == QStringLiteral("127.0.0.1:%1").arg(port);
+}
+
+} // namespace
+
+void setLoopbackUpdateOrigin(const QUrl &origin)
+{
+    loopbackOrigin = isExactLoopbackOrigin(origin) ? origin : QUrl();
+    if (loopbackOrigin.isValid())
+        loopbackOrigin.setPath(QString());
+}
+
+void clearLoopbackUpdateOrigin()
+{
+    loopbackOrigin.clear();
+}
+
+bool loopbackUpdateOriginActive()
+{
+    return loopbackOrigin.isValid();
+}
+
+bool isAllowedUpdateUrl(const QUrl &url)
+{
+    if (isHttpsUrl(url)) return true;
+    if (!loopbackOrigin.isValid() || !url.isValid()) return false;
+    if (url.userName().size() || url.password().size() || url.query().size() || url.fragment().size())
+        return false;
+    if (url.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) != 0) return false;
+    if (url.host() != QStringLiteral("127.0.0.1") || url.port() != loopbackOrigin.port()) return false;
+    return url.authority() == loopbackOrigin.authority();
+}
+
 bool packageFileMatches(const QString &path, qint64 expectedSize, const QByteArray &expectedSha256)
 {
     if (expectedSize <= 0
@@ -122,8 +171,11 @@ ManifestStatus evaluateUpdateManifest(const QByteArray &json, const QString &cur
         return status;
     }
     const QUrl packageUrl(download.value(QStringLiteral("url")).toString());
-    if (!isHttpsUrl(packageUrl)) {
-        reject(reason, QStringLiteral("下载地址必须是 HTTPS。"), &status);
+    if (!isAllowedUpdateUrl(packageUrl)) {
+        reject(reason, loopbackUpdateOriginActive()
+                           ? QStringLiteral("下载地址必须是 HTTPS，或本次测试源的回环地址。")
+                           : QStringLiteral("下载地址必须是 HTTPS。"),
+               &status);
         return status;
     }
     const QJsonValue sizeValue = download.value(QStringLiteral("size"));

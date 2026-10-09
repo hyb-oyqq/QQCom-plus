@@ -31,7 +31,7 @@ https://gitee.com/qinjmin/qqcom/releases/download/v0.2.0/QQCom-0.2.0-win64.zip
 
 客户端处理规则：
 
-1. 只接受 HTTPS、`product=QQCom`、已知 `schema` 和 `type=zip`。
+1. 只接受 HTTPS、`product=QQCom`、已知 `schema` 和 `type=zip`。本地自测可以用 `--local-update-source http://127.0.0.1:<端口>` 打开本次进程的回环源；这个源不写入配置，也不能把下载地址改到其它主机或端口。
 2. 目标版本不高于当前版本时忽略；不支持降级。
 3. 下载到 `%TEMP%\QQCom-update\<version>\`，校验文件大小和 SHA-256。
 4. 校验成功后启动更新器，主程序退出；校验失败删除临时文件并提示用户。
@@ -83,6 +83,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate_ota_manifes
   -PackagePath build/ota/QQCom-0.2.0-win64.zip
 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_ota.ps1
+
+# 用当前 Release 跑真实检查、下载、覆盖和重启。不访问 Gitee，也不改用户配置。
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/local_update_test.ps1 `
+  -BinaryDir build/release/release
 ```
 
 ## 分阶段落地

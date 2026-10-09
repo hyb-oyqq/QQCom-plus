@@ -25,7 +25,7 @@ namespace {
 // 清单检查必须很快结束。下载允许更长的静默，但只要这段时间没有任何字节，就中止，
 // 避免断网时进度框或“正在检查”一直挂着。
 constexpr int ManifestTimeoutMs = 10 * 1000;
-constexpr int DownloadStallMs = 20 * 1000;
+constexpr int DownloadStallMs = 60 * 1000;
 constexpr int StatusNoteMs = 8 * 1000;
 
 QNetworkRequest httpsRequest(const QUrl &url, const QString &userAgent, int timeoutMs)
@@ -52,8 +52,8 @@ void logReplyProblem(QNetworkReply *reply, bool stalled)
     if (http > 0) parts << QStringLiteral("HTTP %1").arg(http);
     if (reply->error() != QNetworkReply::NoError && !reply->errorString().isEmpty())
         parts << reply->errorString();
-    else if (reply->error() == QNetworkReply::NoError && !isHttpsUrl(reply->url()))
-        parts << QStringLiteral("final URL is not HTTPS");
+    else if (reply->error() == QNetworkReply::NoError && !isAllowedUpdateUrl(reply->url()))
+        parts << QStringLiteral("final URL is not an allowed update URL");
     logUpdateProblem(parts.join(QLatin1Char(' ')));
 }
 
@@ -83,8 +83,8 @@ void UpdateService::checkForUpdates(const QUrl &manifestUrl, CheckMode mode)
         return;
     }
     m_mode = mode;
-    if (!isHttpsUrl(manifestUrl)) {
-        logUpdateProblem(QStringLiteral("manifest URL is not HTTPS"));
+    if (!isAllowedUpdateUrl(manifestUrl)) {
+        logUpdateProblem(QStringLiteral("manifest URL is not an allowed update URL"));
         const bool automatic = mode == CheckMode::Automatic;
         fail(automatic ? tr("检查更新失败") : tr("检查更新失败。"), automatic);
         return;
@@ -112,7 +112,7 @@ void UpdateService::checkForUpdates(const QUrl &manifestUrl, CheckMode mode)
 
 void UpdateService::handleManifest(QNetworkReply *reply)
 {
-    if (reply->error() != QNetworkReply::NoError || !isHttpsUrl(reply->url())) {
+    if (reply->error() != QNetworkReply::NoError || !isAllowedUpdateUrl(reply->url())) {
         logReplyProblem(reply, m_stallAborted);
         m_stallAborted = false;
         const bool automatic = m_mode == CheckMode::Automatic;
@@ -144,17 +144,24 @@ void UpdateService::handleManifest(QNetworkReply *reply)
     }
 
     emit advisory(QString(), 1);
-    const QString text = tr("发现新版本 %1（%2）。是否现在更新？")
-                             .arg(offer.version, formatSize(offer.size));
-    QWidget *host = qobject_cast<QWidget *>(parent());
-    QMessageBox box(QMessageBox::Information, tr("发现新版本"), text,
-                    QMessageBox::Yes | QMessageBox::No, host ? host : QApplication::activeWindow());
-    if (!offer.notesUrl.isEmpty()) box.setInformativeText(offer.notesUrl);
-    if (box.exec() != QMessageBox::Yes) {
-        m_busy = false;
-        return;
+    if (!m_acceptWithoutPrompt) {
+        const QString text = tr("发现新版本 %1（%2）。是否现在更新？")
+                                 .arg(offer.version, formatSize(offer.size));
+        QWidget *host = qobject_cast<QWidget *>(parent());
+        QMessageBox box(QMessageBox::Information, tr("发现新版本"), text,
+                        QMessageBox::Yes | QMessageBox::No, host ? host : QApplication::activeWindow());
+        if (!offer.notesUrl.isEmpty()) box.setInformativeText(offer.notesUrl);
+        if (box.exec() != QMessageBox::Yes) {
+            m_busy = false;
+            return;
+        }
     }
     startDownload(offer);
+}
+
+void UpdateService::setAcceptUpdatesWithoutPrompt(bool accept)
+{
+    m_acceptWithoutPrompt = accept;
 }
 
 void UpdateService::startDownload(const UpdateOffer &offer)
@@ -255,7 +262,7 @@ void UpdateService::finishDownload(QNetworkReply *reply)
         m_busy = false;
         return;
     }
-    if (reply->error() != QNetworkReply::NoError || !isHttpsUrl(reply->url())) {
+    if (reply->error() != QNetworkReply::NoError || !isAllowedUpdateUrl(reply->url())) {
         discardDownload();
         logReplyProblem(reply, false);
         fail(tr("下载失败。"));
@@ -288,13 +295,17 @@ void UpdateService::finishDownload(QNetworkReply *reply)
         fail(tr("无法完成更新。"));
         return;
     }
-    const QStringList args = {QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"),
-                              QStringLiteral("Bypass"), QStringLiteral("-WindowStyle"),
-                              QStringLiteral("Hidden"), QStringLiteral("-File"), script,
-                              QStringLiteral("-ProcessId"), QString::number(QCoreApplication::applicationPid()),
-                              QStringLiteral("-Package"), m_downloadPath,
-                              QStringLiteral("-InstallDir"), QCoreApplication::applicationDirPath(),
-                              QStringLiteral("-Restart"), QCoreApplication::applicationFilePath()};
+    QStringList args = {QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"),
+                        QStringLiteral("Bypass"), QStringLiteral("-WindowStyle"),
+                        QStringLiteral("Hidden"), QStringLiteral("-File"), script,
+                        QStringLiteral("-ProcessId"), QString::number(QCoreApplication::applicationPid()),
+                        QStringLiteral("-Package"), m_downloadPath,
+                        QStringLiteral("-InstallDir"), QCoreApplication::applicationDirPath(),
+                        QStringLiteral("-Restart"), QCoreApplication::applicationFilePath()};
+    const QString logOverride = qEnvironmentVariable("QQCOM_UPDATE_LOG");
+    if (!logOverride.isEmpty()) args << QStringLiteral("-LogPath") << logOverride;
+    const QString userDataOverride = qEnvironmentVariable("QQCOM_UPDATE_USER_DATA");
+    if (!userDataOverride.isEmpty()) args << QStringLiteral("-UserDataDir") << userDataOverride;
     if (!QProcess::startDetached(QStringLiteral("powershell.exe"), args)) {
         QFile::remove(m_downloadPath);
         logUpdateProblem(QStringLiteral("failed to start updater"));
