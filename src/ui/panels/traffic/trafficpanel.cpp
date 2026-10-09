@@ -469,10 +469,8 @@ void TrafficPanel::loadExample(const QList<PortDraft> &ports)
             Traffic::makeSource(port, index), i % 3 == 0 ? Traffic::Direction::Transmit : Traffic::Direction::Receive,
             data.at(i), framing);
         // 串口与 TCP Client 是字节流，一条记录只是一段，标注它还有后续片段。
-        if (framing == Traffic::Framing::Stream && i + 1 < data.size()) {
-            message.fragmentIndex = 0;
+        if (framing == Traffic::Framing::Stream && i + 1 < data.size())
             message.hasMoreFragments = true;
-        }
         if (port.kind == PortDraft::TcpServer || port.kind == PortDraft::Udp)
             message.source.peerAddress = QStringLiteral("127.0.0.1:%1").arg(52000 + index);
         records.append(message);

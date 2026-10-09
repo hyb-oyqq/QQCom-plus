@@ -905,11 +905,10 @@ private slots:
         QCOMPARE(tx.state, Traffic::State::LocalCompleted);
         QVERIFY(tx.id != 0 && tx.monotonicNs > 0);
         // RX：轮询重查 spy（QTRY 的表达式每次迭代都重新执行 findMessage）。
-        QTRY_VERIFY(!findMessage(Traffic::Direction::Receive, 0, "ping").frameId.isNull());
+        QTRY_VERIFY(findMessage(Traffic::Direction::Receive, 0, "ping").id != 0);
         const auto rx = findMessage(Traffic::Direction::Receive, 0, "ping");
         QCOMPARE(rx.framing, Traffic::Framing::Datagram);
         QVERIFY(!rx.source.peerAddress.isEmpty());
-        QVERIFY(!rx.frameId.isNull());
 
         // UDP 没有连接事件：首次收到每个来源时，运行时要把来源传给界面，
         // 同时留下不会自动修改发送目标的明确提示。
@@ -932,7 +931,7 @@ private slots:
         };
         QCOMPARE(peerNotices(), 1);
         runtime.sendPayload(1, "ping-again", int(Traffic::Origin::Manual));
-        QTRY_VERIFY(!findMessage(Traffic::Direction::Receive, 0, "ping-again").frameId.isNull());
+        QTRY_VERIFY(findMessage(Traffic::Direction::Receive, 0, "ping-again").id != 0);
         QCOMPARE(peerNotices(), 1); // 同一来源不重复刷状态日志
 
         // 仅接收端点（已打开但没有发送目标）发送：显式 Failed，不静默丢弃。

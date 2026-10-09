@@ -91,7 +91,6 @@ bool TrafficFilter::Matcher::accepts(const Traffic::Message &r) const
     if (settled(r.source.peerAddress)) return !rejected;
     if (settled(r.source.endpointName)) return !rejected;
     if (settled(r.statusText)) return !rejected;
-    if (settled(r.detail)) return !rejected;
     const QString rendered = PayloadCodec::render(r.raw, m_format);
     if (settled(rendered)) return !rejected;
     if (m_format != PayloadCodec::Format::Utf8

@@ -1180,10 +1180,6 @@ private slots:
         message.rawLength = 4096; // 真实长度远大于保留的预览
         message.truncated = true;
         message.state = Traffic::State::Partial;
-        message.requestId = QUuid::createUuid();
-        message.routeId = QUuid::createUuid();
-        message.frameId = QUuid::createUuid();
-        message.durationUs = 1500;
 
         // 语义查询：方向、来源、发送状态互不干扰。
         QVERIFY(message.isData());

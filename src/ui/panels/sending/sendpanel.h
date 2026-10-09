@@ -86,14 +86,11 @@ protected:
     QLabel *m_preview;
     bool m_previewError = false;
     QPushButton *m_sendButton;
-    QLabel *m_connectionHint;
     QCheckBox *m_repeat;
     QSpinBox *m_interval;
-    QSpinBox *m_times;
     QTimer *m_repeatTimer;
     QTabWidget *m_tabs = nullptr;
     FileTransferWidget *m_fileTransfer = nullptr;
-    int m_remainingTicks = 0;      // 定时发送剩余次数；0 = 持续
     bool m_openFlags[2] = {false, false};
     bool m_payloadValid = false;
     QByteArray m_payloadBytes;

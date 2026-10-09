@@ -135,7 +135,6 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
                 auto message = makeMessage(index, Traffic::Direction::Receive,
                     Traffic::Origin::Automatic, payload, Traffic::Framing(framing));
                 message.source = source; // 传输层带 peer/代次的完整来源
-                message.frameId = QUuid::createUuid();
                 publish(std::move(message));
                 return;
             }
@@ -194,7 +193,6 @@ void EndpointRuntime::sendPayload(int index, const QByteArray &payload, int orig
     if (index < 0 || index >= EndpointCount) return;
     auto message = makeMessage(index, Traffic::Direction::Transmit,
         Traffic::Origin(origin), payload, Traffic::Framing::Message);
-    message.requestId = QUuid::createUuid();
 
     auto *transport = m_transports[index];
     // 写入同步返回"本地接受"的字节数：全部接受记 LocalCompleted（仅代表
@@ -235,7 +233,6 @@ void EndpointRuntime::feedFramer(int index, const Traffic::Source &source, const
         auto message = makeMessage(index, Traffic::Direction::Receive, Traffic::Origin::Automatic,
             payload, Traffic::Framing::Message);
         message.source = source;
-        message.frameId = QUuid::createUuid();
         publish(std::move(message));
         return;
     }
@@ -276,7 +273,6 @@ void EndpointRuntime::publishFrames(int index, const Traffic::Source &source,
         auto message = makeMessage(index, Traffic::Direction::Receive, Traffic::Origin::Automatic,
             frame.bytes, frame.complete ? Traffic::Framing::Message : Traffic::Framing::Stream);
         message.source = source;
-        message.frameId = QUuid::createUuid();
         if (!frame.complete) message.hasMoreFragments = true;
         publish(std::move(message));
         // 提示日志：只有开关打开且这次输出有话要说才发，正常定界不产生噪声。

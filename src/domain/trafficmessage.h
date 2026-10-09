@@ -104,27 +104,17 @@ struct Message
 
     // ---- 边界 ----
     Framing framing = Framing::Stream;
-    quint32 fragmentIndex = 0;      // 同一消息的第几个片段，从 0 起
     bool hasMoreFragments = false;  // 后面还有同源片段；组帧器在收齐后回填
-
-    // ---- 关联 ----
-    // 三者构成一条可追溯的链：收到的字节 → 触发的路由 → 写出的请求。
-    // 排障时需要从一行 TX 反查是哪次 RX 经哪条规则转出来的。
-    QUuid frameId;    // 源侧接收帧
-    QUuid requestId;  // 发送请求
-    QUuid routeId;    // 路由规则
 
     // ---- 字节 ----
     QByteArray raw;        // 保留的原始字节，可能是完整消息也可能被截断
     qint64 rawLength = 0;  // 事件的真实字节数；与 raw.size() 不等即发生了截断
     bool truncated = false;
-    qint64 durationUs = -1;// 发送类消息从准入到落地的本地耗时
 
     // ---- 展示辅助 ----
     // 自由文本，只放机器放不进去的说明：分包器名称、错误码含义、停止原因。
     // 能用枚举表达的一律用枚举，别往这里塞可枚举的状态。
     QString statusText;
-    QString detail;
 
     bool isValid() const { return id != 0 || !raw.isEmpty() || !source.endpointId.isNull(); }
     bool isData() const { return direction == Direction::Receive || direction == Direction::Transmit; }
