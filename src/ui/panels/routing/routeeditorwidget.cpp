@@ -11,11 +11,11 @@
 namespace {
 
 // The bridge button keeps its text; the glyph rides beside it like on the action buttons.
-constexpr int BridgeIconSize = 16;
+constexpr int BridgeIconSize = 14;
 
 // The direction options carry a pictogram each: the text arrows depend on font fallback and
 // come out faint, while the icons state the direction unambiguously.
-constexpr int DirectionIconSize = 16;
+constexpr int DirectionIconSize = 14;
 
 } // namespace
 
@@ -34,7 +34,7 @@ RouteEditorWidget::RouteEditorWidget(QWidget *parent) : QWidget(parent)
     // measuring anything.
     auto *directionRow = new QWidget;
     auto *directionLayout = new QVBoxLayout(directionRow);
-    directionLayout->setContentsMargins(10, 5, 10, 5);
+    directionLayout->setContentsMargins(8, 2, 8, 2);
 
     // Direction is the summary: the options name the pair themselves, so no title or label is
     // needed. Each option carries a pictogram because the text arrows render faintly
@@ -61,7 +61,7 @@ RouteEditorWidget::RouteEditorWidget(QWidget *parent) : QWidget(parent)
 
     auto *bridgeRow = new QWidget;
     auto *bridgeLayout = new QVBoxLayout(bridgeRow);
-    bridgeLayout->setContentsMargins(10, 5, 10, 5);
+    bridgeLayout->setContentsMargins(8, 2, 8, 2);
     m_bridge = new QPushButton(tr("建立桥接"));
     m_bridge->setObjectName("bridgeButton");
     m_bridge->setIconSize(QSize(BridgeIconSize, BridgeIconSize));

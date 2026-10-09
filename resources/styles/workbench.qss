@@ -1,14 +1,20 @@
 QWidget {
     font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI";
-    /* Typography scale: body 13px, secondary 12px, section 15px, page 18px. */
-    font-size: 13px;
+    /* 控件 12px，次要说明与状态栏 11px。数据显示区单独锁在 13px，不跟控件一起缩。 */
+    font-size: 12px;
     color: #182334;
 }
+/* 监视区、发送正文、字节预览是数据，不是按钮。字号停在原来的 13px。 */
+QPlainTextEdit#trafficText,
+QPlainTextEdit#sendEditor,
+QLabel#payloadPreview {
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI";
+    font-size: 13px;
+}
 QMainWindow, QWidget#centralwidget { background: #e9edf4; }
-QLabel#Muted, QLabel#udpPeerHint, QLabel#StatusNote { color: #5c6880; font-size: 12px; }
-/* 组帧说明与上面的设置同一字号。字号写全：Qt 只写 font-weight 时会把 font-size 清回默认。 */
-QLabel#framingMechanismTitle { font-size: 13px; font-weight: 600; }
-QLabel#framingHint { font-size: 13px; color: #5c6880; }
+QLabel#Muted, QLabel#udpPeerHint, QLabel#StatusNote { color: #5c6880; font-size: 11px; }
+/* 组帧说明与上面的设置同一字号。字号写全：Qt 只写 font-size 时才不会被父级规则清掉。 */
+QLabel#framingHint { font-size: 12px; color: #5c6880; }
 /* 字节数的颜色**不在这里**：它与预览文本合并在同一个 QLabel 里、用富文本 span 着色
    （见 sendpanel.cpp 的 ByteCountColor）。QSS 不作用于 span，所以那个值必须写在代码里。 */
 QLabel#EmptyState { background: #fbfcfe; color: #5c6880; border: 1px dashed #c3ccda; border-radius: 5px; }
@@ -20,19 +26,23 @@ QWidget#Surface { background: #ffffff; border: 1px solid #c8d1e0; border-radius:
 QFrame#EndpointBar { background: #ffffff; border: 1px solid #c8d1e0; border-radius: 8px; }
 QFrame#EndpointDivider { color: #d9e0ea; max-height: 1px; }
 QFrame#BridgeDivider { color: #c8d1e0; max-width: 1px; }
-QLabel#EndpointBadge { background: #1d4ed8; color: #ffffff; border: 1px solid #1a45c0; border-radius: 12px; font-weight: 700; }
+QLabel#EndpointBadge { background: #1d4ed8; color: #ffffff; border: 1px solid #1a45c0; border-radius: 10px; font-size: 12px; font-weight: 700; }
 /* 端点行自己**不再铺白底**：它铺满端口条整宽，自绘背景会把父级的 8px 圆角盖成直角
    ——圆角只有背景层能画，子控件不透明就等于把它擦掉了。白底统一由 EndpointBar 提供。 */
 PortSelectorWidget { background: transparent; }
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: #ffffff; }
-QPushButton, QToolButton { background: #f4f6fa; border: 1px solid #a9b5c9; border-radius: 5px; padding: 4px 11px; min-height: 18px; color: #1f2a3d; }
+QPushButton, QToolButton { background: #f4f6fa; border: 1px solid #a9b5c9; border-radius: 4px; padding: 2px 8px; min-height: 16px; color: #1f2a3d; }
 QPushButton:hover, QToolButton:hover { color: #14326f; border-color: #6d87b8; background: #e8eefb; }
 QPushButton:pressed, QToolButton:pressed { background: #d7e2f7; border-color: #4d6ba3; }
-QPushButton:checked { background: #fde8c0; border-color: #c79a46; color: #70511c; }
+/* 勾选态的黄与「扩展」收起态同一套（#fbbf24），不要再另用一档浅琥珀。
+   带 id 的蓝按钮（A/B、展开中的「扩展」）写在后面，特异性更高，不会被这里盖掉。 */
+QPushButton:checked { background: #fbbf24; border-color: #b45309; color: #7a3f00; }
+QPushButton:checked:hover { background: #f5b016; border-color: #92400e; color: #5c2f00; }
+QPushButton:checked:pressed { background: #e09f0a; border-color: #7a3f00; }
 QPushButton:disabled { background: #eceff5; border-color: #c3ccda; color: #7a8599; }
 /* A/B 端点开关：选中=实心蓝（该端点数据显示中），未选中=灰（已停用），对比强、状态一眼可辨。 */
-QPushButton#showPortA, QPushButton#showPortB { font-weight: 700; min-width: 26px; }
+QPushButton#showPortA, QPushButton#showPortB { font-size: 12px; font-weight: 700; min-width: 22px; }
 QPushButton#showPortA:checked, QPushButton#showPortB:checked { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; }
 QPushButton#showPortA:checked:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#showPortA:checked:pressed { background: #12369c; }
@@ -41,38 +51,47 @@ QPushButton#showPortA:!checked:hover { border-color: #9aa7bd; color: #6b7690; }
 /* 指令面板「扩展」开关：展开时实心蓝（面板在位），收起时换成琥珀"提醒色"——
    面板被收走后按钮仍在，必须比常态更显眼，用户才会想起它还在那儿（用户钦定）。
    图标随勾选态在 C++ 里手动换（白箭头 / 深琥珀箭头），QSS 只管底色与文字色。 */
-QPushButton#commandPanelToggle:checked { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
+QPushButton#commandPanelToggle:checked { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
 QPushButton#commandPanelToggle:checked:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#commandPanelToggle:checked:pressed { background: #12369c; }
-QPushButton#commandPanelToggle:!checked { background: #fbbf24; border-color: #b45309; color: #7a3f00; font-weight: 600; }
+QPushButton#commandPanelToggle:!checked { background: #fbbf24; border-color: #b45309; color: #7a3f00; font-size: 12px; font-weight: 600; }
 QPushButton#commandPanelToggle:!checked:hover { background: #f5b016; border-color: #92400e; color: #5c2f00; }
 QPushButton#commandPanelToggle:!checked:pressed { background: #e09f0a; border-color: #7a3f00; }
-QPushButton#commandPanelToggle[collapsed="true"] { background: #fbbf24; border-color: #b45309; color: #7a3f00; font-weight: 600; }
-QPushButton#commandPanelToggle[collapsed="false"] { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
-QPushButton#PrimaryButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
+QPushButton#commandPanelToggle[collapsed="true"] { background: #fbbf24; border-color: #b45309; color: #7a3f00; font-size: 12px; font-weight: 600; }
+QPushButton#commandPanelToggle[collapsed="false"] { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
+/* 清空会丢掉当前会话。旁边的滚动、扩展都是高对比色，纯灰按钮会淹没在里面。
+   字号和字重写在一起，避免只写字重时字号被清回默认。 */
+QPushButton#clearTraffic { background: #fdecea; border-color: #e7b2ab; color: #a7301f; font-size: 12px; font-weight: 600; }
+QPushButton#clearTraffic:hover { background: #f8d6d1; border-color: #c0392b; color: #8e2618; }
+QPushButton#clearTraffic:pressed { background: #f3c4bd; border-color: #a7301f; color: #8e2618; }
+QPushButton#clearTraffic:disabled { background: #eceff5; border-color: #c3ccda; color: #7a8599; }
+/* 发送是这一排的主操作。高度与同排的 A/B、下拉框一致，只靠颜色和字重区分，
+   避免按钮高低不齐。横向仍加宽。
+   字号必须和字重一起写：Qt 只写 font-weight 时会把 font-size 清回默认。 */
+QPushButton#PrimaryButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; min-height: 16px; padding: 2px 14px; }
 QPushButton#PrimaryButton:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#PrimaryButton:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }
-QPushButton#fileTransferStart, QPushButton#fileReceiveStart { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
+QPushButton#fileTransferStart, QPushButton#fileReceiveStart { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
 QPushButton#fileTransferStart:hover, QPushButton#fileReceiveStart:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#fileTransferStart:disabled, QPushButton#fileReceiveStart:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }
 QPushButton#fileTransferStart[busy="true"], QPushButton#fileReceiveStart[busy="true"] { background: #c0392b; border-color: #a7301f; color: #ffffff; }
 QPushButton#fileTransferStart[busy="true"]:hover, QPushButton#fileReceiveStart[busy="true"]:hover { background: #a7301f; border-color: #a7301f; }
 QProgressBar#fileTransferProgress, QProgressBar#fileReceiveProgress { border: 1px solid #a9b5c9; border-radius: 5px; background: #f4f6fa; text-align: center; color: #182334; }
 QProgressBar#fileTransferProgress::chunk, QProgressBar#fileReceiveProgress::chunk { background: #1d4ed8; border-radius: 4px; margin: 1px; }
-QPushButton#bridgeButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
+QPushButton#bridgeButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
 QPushButton#bridgeButton:hover { background: #163fb3; border-color: #163fb3; }
-QPushButton#endpointAction { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-weight: 600; }
+QPushButton#endpointAction { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
 QPushButton#endpointAction:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#endpointAction:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }
 QPushButton#endpointAction[open="true"] { background: #c0392b; border-color: #a7301f; }
 QPushButton#endpointAction[open="true"]:hover { background: #a7301f; border-color: #a7301f; }
 QPushButton#bridgeButton:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }
 QToolButton::menu-indicator { width: 0px; }
-QToolButton#advancedToggle { border: none; background: transparent; color: #647590; padding: 4px 2px; }
+QToolButton#advancedToggle { border: none; background: transparent; color: #647590; padding: 1px 2px; }
 QToolButton#advancedToggle:hover { color: #3465d5; background: transparent; }
 QToolButton#advancedToggle:checked { color: #3465d5; background: transparent; }
 QWidget#advancedPanel { background: #f1f4fa; border-top: 1px solid #dde3ed; }
-QLineEdit, QComboBox, QSpinBox { background: #ffffff; border: 1px solid #a9b5c9; border-radius: 5px; padding: 4px 7px; min-height: 18px; selection-background-color: #1d4ed8; selection-color: #ffffff; }
+QLineEdit, QComboBox, QSpinBox { background: #ffffff; border: 1px solid #a9b5c9; border-radius: 4px; padding: 2px 6px; min-height: 16px; selection-background-color: #1d4ed8; selection-color: #ffffff; }
 /* 可编辑下拉框的 QLineEdit 位于 QComboBox 已经计算好的编辑区内。若它继续继承
    通用输入框的边框和内边距，内容区会被重复缩小，短值也可能向左滚动而裁掉首位。 */
 QComboBox QLineEdit { background: transparent; border: none; border-radius: 0; padding: 0; min-height: 0; }
@@ -80,15 +99,15 @@ QLineEdit:hover, QComboBox:hover, QSpinBox:hover { border-color: #76869f; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus { border-color: #1d4ed8; }
 QLineEdit[invalid="true"], QComboBox[invalid="true"], QSpinBox[invalid="true"] { border-color: #c0392b; background: #fdf4f3; }
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { background: #eceff5; color: #7a8599; border-color: #c3ccda; }
-QComboBox { padding-right: 24px; }
-QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 22px; border: none; }
+QComboBox { padding-right: 20px; }
+QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 18px; border: none; }
 QComboBox::down-arrow { image: url(:/icons/chevron-down.xpm); width: 10px; height: 6px; }
 QComboBox QAbstractItemView { background: white; selection-background-color: #1d4ed8; selection-color: #ffffff; border: 1px solid #a9b5c9; outline: none; }
 QPlainTextEdit { background: #ffffff; border: 1px solid #a9b5c9; border-radius: 5px; padding: 9px; selection-background-color: #1d4ed8; selection-color: #ffffff; }
-QCheckBox { spacing: 6px; color: #1f2a3d; }
+QCheckBox { spacing: 4px; color: #1f2a3d; }
 /* 勾选态必须是"看得见的勾"而不是一块纯色块：用户反馈只填蓝底时分不清有没有勾上。
    勾画成三段折线的 SVG 内联图（data URI），随底色一起缩放，不依赖外部资源。 */
-QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #8b99b0; border-radius: 4px; background: #ffffff; }
+QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #8b99b0; border-radius: 3px; background: #ffffff; }
 QCheckBox::indicator:hover { border-color: #1d4ed8; }
 QCheckBox::indicator:checked {
     background: #1d4ed8;
@@ -103,9 +122,9 @@ QCheckBox::indicator:disabled { background: #eceff5; border-color: #c3ccda; }
    色值刻意避开 RX 的 #047857，免得在监视区旁边被读成"接收"。 */
 QCheckBox[sendState="sending"]::indicator:checked { background: #f59e0b; border-color: #b45309; }
 QCheckBox[sendState="sent"]::indicator:checked { background: #059669; border-color: #036c50; }
-/* 正在发送的那一行，发送按钮也换成琥珀强调底，视线不必来回找。 */
-QPushButton[sending="true"] { background: #fde8c0; border-color: #c79a46; color: #70511c; font-weight: 600; }
-QPushButton[sending="true"]:hover { background: #fbdca4; border-color: #b45309; }
+/* 正在发送的那一行，发送按钮换成与「扩展」同一套琥珀，视线不必来回找。 */
+QPushButton[sending="true"] { background: #fbbf24; border-color: #b45309; color: #7a3f00; font-size: 12px; font-weight: 600; }
+QPushButton[sending="true"]:hover { background: #f5b016; border-color: #92400e; color: #5c2f00; }
 QWidget#BridgeRow { background: #eef2f9; }
 QSplitter::handle { background: transparent; }
 /* 监视区卡片与发送区卡片之间的缝：两张卡片各有 1px 边框，6px 已经足够分开，
@@ -113,21 +132,55 @@ QSplitter::handle { background: transparent; }
 QSplitter::handle:vertical { height: 6px; }
 QSplitter::handle:horizontal { width: 4px; }
 QSplitter::handle:hover { background: #d8e3f7; }
-/* 状态栏里所有文字**统一字号**：统计行（RX/TX/条数/桥接）、端点状态、右侧提示，原来只有
-   StatusNote 写了 12px、其余继承默认字号，并排看就是大小不一（用户反馈）。
-   这里按容器统一下发，新增状态栏标签自动跟随，不用逐个记得补字号。 */
-QStatusBar QLabel { font-size: 12px; }
-QStatusBar { background: #ffffff; border-top: 1px solid #b9c4d6; min-height: 24px; }
+/* 状态栏里所有文字**统一字号**：原来只有 StatusNote 写了 12px、其余继承默认字号。
+   按容器统一下发，新增标签自动跟随。凡是下面再写 font-weight 的规则，必须把
+   font-size 一起写上——Qt 只写字重时会把字号清回默认。 */
+QStatusBar QLabel { font-size: 11px; }
+QStatusBar { background: #ffffff; border-top: 1px solid #d5deea; min-height: 26px; }
 QStatusBar::item { border: none; }
-QToolButton#stayOnTop { padding: 2px 4px; min-width: 16px; min-height: 16px; border-radius: 4px; }
-QToolButton#stayOnTop:checked { background: #d7e2f7; border-color: #4d6ba3; }
-/* 颜色与加粗各自保留；**不再写 font-family**——"Segoe UI" 只是 Windows 的默认 UI 字体，
-   显式写死会在换系统字体/切换语言时与旁边标签不一致，而这正是"看着没统一"的来源之一。 */
-QLabel#RxStatus { color: #047857; font-weight: 600; }
-QLabel#TxStatus { color: #1d4ed8; font-weight: 600; }
-QLabel#TrafficStatus { color: #5c6880; }
+QFrame#StatusSep { background: #d5deea; border: none; }
+QWidget#EndpointChip { background: #f4f6fa; border: 1px solid #e1e7f0; border-radius: 4px; }
+QFrame#StatusDot { background: #94a2b8; border: none; border-radius: 3px; }
+QFrame#StatusDot[state="open"] { background: #047857; }
+QFrame#StatusDot[state="opening"] { background: #d97706; }
+QFrame#StatusDot[state="closed"] { background: #94a2b8; }
+/* 检查更新与置顶共用一条规则，高度由代码里的固定尺寸锁死，这里不再各写各的 padding。 */
+QStatusBar QToolButton#checkUpdate, QStatusBar QToolButton#stayOnTop {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 0;
+    margin: 0;
+    min-height: 0;
+    min-width: 0;
+    font-size: 11px;
+    color: #3d4c66;
+}
+QStatusBar QToolButton#checkUpdate { padding: 0 8px; }
+QStatusBar QToolButton#checkUpdate:hover, QStatusBar QToolButton#stayOnTop:hover {
+    background: #e8eefb;
+    border-color: #c9d6ee;
+    color: #14326f;
+}
+QStatusBar QToolButton#checkUpdate:pressed, QStatusBar QToolButton#stayOnTop:pressed,
+QStatusBar QToolButton#stayOnTop:checked {
+    background: #d7e2f7;
+    border-color: #8aa4d4;
+    color: #14326f;
+}
+QLabel#StatusKey, QLabel#StatusKeyRx, QLabel#StatusKeyTx, QLabel#EndpointName {
+    font-size: 11px;
+    font-weight: 600;
+}
+QLabel#StatusKey { color: #5c6880; }
+QLabel#StatusKeyRx { color: #047857; }
+QLabel#StatusKeyTx { color: #1d4ed8; }
+QLabel#EndpointName { color: #182334; }
+QLabel#RxStatus, QLabel#TxStatus { color: #182334; font-size: 11px; font-weight: 600; }
+QLabel#StatusRate, QLabel#TrafficStatus, QLabel#RouteStatus, QLabel#EndpointState { color: #5c6880; }
+QLabel#RouteStatus[active="true"] { color: #1d4ed8; font-size: 11px; font-weight: 600; }
 QMenu { background: white; border: 1px solid #a9b5c9; padding: 4px; }
-QMenu::item { padding: 8px 20px; }
+QMenu::item { padding: 4px 14px; }
 QMenu::item:selected { background: #d3e0fa; color: #14326f; }
 QToolTip { color: #f4f6fa; background: #26324a; border: 1px solid #26324a; padding: 5px; }
 QScrollBar:vertical { background: #e4eaf4; width: 9px; margin: 0; }
@@ -146,7 +199,7 @@ QFrame#FilterDivider { color: #d9e0ea; max-width: 1px; }
 QPushButton#filterRx, QPushButton#filterTx,
 QPushButton#viewPureData, QPushButton#viewHexEcho, QPushButton#viewLineWrap,
 QPushButton#filterCaseSensitive, QPushButton#filterRegex,
-QPushButton#filterRebuild { padding: 4px 8px; }
+QPushButton#filterRebuild { padding: 2px 6px; }
 
 /* 指令面板样式 */
 CommandPanel { background: #ffffff; border-left: 1px solid #c8d1e0; }
@@ -169,7 +222,8 @@ CommandPanel QHeaderView::section {
     border: none;
     border-right: 1px solid #e4eaf4;
     border-bottom: 1px solid #c8d1e0;
-    padding: 6px 4px;
+    padding: 4px 4px;
+    font-size: 12px;
     font-weight: 600;
     color: #5c6880;
 }
@@ -177,6 +231,7 @@ CommandPanel QPushButton#primaryButton {
     background: #1d4ed8;
     border-color: #1a45c0;
     color: #ffffff;
+    font-size: 12px;
     font-weight: 600;
 }
 CommandPanel QPushButton#primaryButton:hover {
@@ -195,13 +250,15 @@ CommandPanel QTabBar::tab {
     border-bottom: none;
     border-top-left-radius: 5px;
     border-top-right-radius: 5px;
-    padding: 6px 12px;
+    padding: 3px 10px;
     margin-right: 2px;
+    font-size: 12px;
     color: #5c6880;
 }
 CommandPanel QTabBar::tab:selected {
     background: #ffffff;
     color: #1d4ed8;
+    font-size: 12px;
     font-weight: 600;
     border-bottom: 2px solid #1d4ed8;
 }
@@ -220,13 +277,15 @@ SendPanel QTabBar::tab {
     border-bottom: none;
     border-top-left-radius: 5px;
     border-top-right-radius: 5px;
-    padding: 4px 12px;
+    padding: 2px 10px;
     margin-right: 2px;
+    font-size: 12px;
     color: #5c6880;
 }
 SendPanel QTabBar::tab:selected {
     background: #ffffff;
     color: #1d4ed8;
+    font-size: 12px;
     font-weight: 600;
     border-bottom: 2px solid #1d4ed8;
 }

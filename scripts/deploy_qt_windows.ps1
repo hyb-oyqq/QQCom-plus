@@ -34,4 +34,10 @@ if ($IncludeOffscreen) {
     Copy-Item -LiteralPath $offscreen -Destination (Join-Path $platformDir $offscreenName) -Force
 }
 
+$updater = Join-Path $PSScriptRoot 'qqcom-updater.ps1'
+if (-not (Test-Path -LiteralPath $updater -PathType Leaf)) {
+    throw "Cannot find the updater script: $updater"
+}
+Copy-Item -LiteralPath $updater -Destination (Join-Path (Split-Path -Parent $binaryPath) 'qqcom-updater.ps1') -Force
+
 Write-Host "Qt $Configuration runtime deployed to $((Split-Path -Parent $binaryPath))"

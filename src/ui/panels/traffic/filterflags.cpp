@@ -8,7 +8,7 @@
 namespace {
 
 // 与顶栏其余按钮同一套字形尺寸：同一行并排出现，尺寸不一致会一眼看出来。
-constexpr int GlyphSize = 16;
+constexpr int GlyphSize = 14;
 
 } // namespace
 
@@ -17,7 +17,7 @@ FilterFlags::FilterFlags(QWidget *parent) : QWidget(parent)
     setObjectName("filterFlags");
     auto *row = new QHBoxLayout(this);
     row->setContentsMargins(0, 0, 0, 0);
-    row->setSpacing(6);
+    row->setSpacing(4);
 
     m_rx = makeFlag(QStringLiteral("filterRx"), QStringLiteral(":/icons/arrow-down-bold.svg"),
         tr("RX"), tr("显示接收 RX"));

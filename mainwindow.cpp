@@ -22,6 +22,7 @@
 #include <QResizeEvent>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QStyle>
 #if defined(Q_OS_WIN)
 #include <qt_windows.h>
 #pragma comment(lib, "user32.lib")
@@ -37,6 +38,26 @@ namespace {
 constexpr int SerialAutoRefreshMs = 2000;
 // 收发速率的采样节拍：状态栏数字每秒跳一次足够可读，也更省 GUI 时间。
 constexpr int RateTickMs = 1000;
+// 状态栏右侧动作（检查更新、置顶）与端点状态块共用这一高度，中线才对齐。
+constexpr int StatusControlHeight = 20;
+
+// 动态属性变了必须重新套样式，否则 QSS 的 [state="open"] 这类选择器不会刷新。
+void restyleProperty(QWidget *widget, const char *name, const QVariant &value)
+{
+    if (!widget || widget->property(name) == value) return;
+    widget->setProperty(name, value);
+    widget->style()->unpolish(widget);
+    widget->style()->polish(widget);
+}
+
+QFrame *makeStatusSeparator()
+{
+    auto *line = new QFrame;
+    line->setObjectName(QStringLiteral("StatusSep"));
+    line->setFrameShape(QFrame::NoFrame);
+    line->setFixedSize(1, 14);
+    return line;
+}
 
 // 端点草稿 ↔ QVariantMap：preferences.ini 的存取都吃 QVariantMap，
 // 领域值对象在这里做唯一一次形状转换，存取两侧共用同一份字段名。
@@ -54,6 +75,10 @@ ReceiveFraming framingFromVariant(const QVariantMap &m)
     f.delimiter = m.value("delimiter").toByteArray();
     f.idleTimeoutMs = m.value("idle", f.idleTimeoutMs).toInt();
     f.bufferThresholdBytes = m.value("threshold", f.bufferThresholdBytes).toInt();
+    // 300 字节和 2048 KB 都是改默认之前写进草稿的出厂值。用户没改过它们，
+    // 读到时换成 2048 字节。改过的其他阈值保持原样。
+    if (f.bufferThresholdBytes == 300 || f.bufferThresholdBytes == 2048 * 1024)
+        f.bufferThresholdBytes = ReceiveFraming{}.bufferThresholdBytes;
     f.includeDelimiter = m.value("includeDelimiter", f.includeDelimiter).toBool();
     f.includeLengthPrefix = m.value("includeLengthPrefix", f.includeLengthPrefix).toBool();
     f.logHints = m.value("logHints", f.logHints).toBool();
@@ -87,7 +112,7 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle(QStringLiteral(QQCOM_APP_TITLE));
     // 不设最小尺寸。默认布局约束会把内容的 minimumSizeHint 写回窗口，边框就拖不下去。
     releaseWindowSizeFloor();
-    resize(1440, 920);
+    resize(1280, 860);
     ui->menubar->hide();
 
     auto *root = new QVBoxLayout(ui->centralwidget);
@@ -197,10 +222,8 @@ MainWindow::MainWindow(QWidget *parent)
     // 这里若再给左右边距，卡片外框就会比端口条底色更靠内，右上角与右下角错开
     //（用户反馈"端口选择区与数据显示区没有对齐"——上一轮只对齐了内容、漏了外框）。
     // 内容左边缘 = 左列 6 + 这里 0 + 卡片内边距 6 = 12，与端口条内容的缩进一致。
-    // 上下留 8px：这一层是纯留白，收紧后纵向多出的空间全给数据显示区。
-    // 上下 6px：端口条卡片与数据区卡片之间的缝。两张卡片各有 1px 边框，6px 足够分开；
-    // 再宽就像"两块板子中间空一块"（用户反馈区域之间要窄一些）。
-    dataLayout->setContentsMargins(0, 6, 0, 6);
+    // 上下 4px：端口条卡片与数据区卡片之间的缝。两张卡片各有 1px 边框，4px 足够分开。
+    dataLayout->setContentsMargins(0, 4, 0, 4);
     dataLayout->addWidget(dataSplitter);
 
     // 左侧列 = 端口条 + 数据区（纵向堆叠）。
@@ -309,45 +332,155 @@ MainWindow::MainWindow(QWidget *parent)
 
     root->addWidget(horizontalSplitter, 1);
 
+    // 整条状态栏放进同一个布局，再按垂直居中摆。
+    // 以前「检查更新」和置顶是两个 permanent widget，QStatusBar 各自排版，
+    // 文字按钮和 16px 图标的高度不一样，中线就错开了。
     ui->statusbar->setSizeGripEnabled(true);
     auto *status = new QWidget;
+    status->setObjectName(QStringLiteral("StatusStrip"));
     auto *statusLayout = new QHBoxLayout(status);
-    statusLayout->setContentsMargins(12, 2, 12, 2);
-    statusLayout->setSpacing(22);
-    m_rxStatus = new QLabel(tr("RX   0 B   ·   0 B/s"));
-    m_rxStatus->setObjectName("RxStatus");
-    m_txStatus = new QLabel(tr("TX   0 B   ·   0 B/s"));
-    m_txStatus->setObjectName("TxStatus");
+    statusLayout->setContentsMargins(12, 0, 8, 0);
+    statusLayout->setSpacing(0);
+    const auto addCentered = [statusLayout](QWidget *widget, int stretch = 0) {
+        statusLayout->addWidget(widget, stretch, Qt::AlignVCenter);
+    };
+    const auto addGap = [statusLayout](int pixels) { statusLayout->addSpacing(pixels); };
+    const auto addSep = [&] {
+        addGap(12);
+        addCentered(makeStatusSeparator());
+        addGap(12);
+    };
+    const auto makeKey = [](const QString &text, const QString &name) {
+        auto *label = new QLabel(text);
+        label->setObjectName(name);
+        label->setAlignment(Qt::AlignVCenter);
+        return label;
+    };
+    const auto makeFigure = [](const QString &text, const QString &name) {
+        auto *label = new QLabel(text);
+        label->setObjectName(name);
+        label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        return label;
+    };
+
+    const QString zeroBytes = formatBytes(0);
+    const QString zeroRate = tr("%1/s").arg(zeroBytes);
+    addCentered(makeKey(QStringLiteral("RX"), QStringLiteral("StatusKeyRx")));
+    addGap(8);
+    m_rxStatus = makeFigure(zeroBytes, QStringLiteral("RxStatus"));
+    addCentered(m_rxStatus);
+    addGap(10);
+    m_rxRate = makeFigure(zeroRate, QStringLiteral("StatusRate"));
+    addCentered(m_rxRate);
+    addSep();
+    addCentered(makeKey(QStringLiteral("TX"), QStringLiteral("StatusKeyTx")));
+    addGap(8);
+    m_txStatus = makeFigure(zeroBytes, QStringLiteral("TxStatus"));
+    addCentered(m_txStatus);
+    addGap(10);
+    m_txRate = makeFigure(zeroRate, QStringLiteral("StatusRate"));
+    addCentered(m_txRate);
+    addSep();
     m_trafficStatus = new QLabel(tr("共 0 条"));
-    m_trafficStatus->setObjectName("TrafficStatus");
-    statusLayout->addWidget(m_rxStatus);
-    statusLayout->addWidget(m_txStatus);
-    statusLayout->addWidget(m_trafficStatus);
-    m_routeStatus = new QLabel(tr("桥接  未启动"));
-    m_routeStatus->setObjectName("RouteStatus");
-    statusLayout->addWidget(m_routeStatus);
-    statusLayout->addStretch();
-    m_statusNote = new QLabel(tr("所有端口未连接"));
+    m_trafficStatus->setObjectName(QStringLiteral("TrafficStatus"));
+    m_trafficStatus->setAlignment(Qt::AlignVCenter);
+    addCentered(m_trafficStatus);
+    addSep();
+    addCentered(makeKey(tr("桥接"), QStringLiteral("StatusKey")));
+    addGap(8);
+    m_routeStatus = new QLabel(tr("未启动"));
+    m_routeStatus->setObjectName(QStringLiteral("RouteStatus"));
+    m_routeStatus->setAlignment(Qt::AlignVCenter);
+    addCentered(m_routeStatus);
+
+    // 弹簧把连接状态和动作顶到右边。临时提示插在弹簧和状态块之间，隐藏时不占位。
+    auto *spring = new QWidget;
+    spring->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    spring->setMinimumWidth(16);
+    addCentered(spring, 1);
+    m_statusNote = new QLabel;
     // 语义身份而不是样式名：工作区里有多处标签共用 "Muted"，拿它定位是脆的。
     // 样式不丢——QSS 里 `QLabel#Muted, QLabel#StatusNote` 是同一条规则（见 styles/*.qss）。
-    m_statusNote->setObjectName("StatusNote");
-    statusLayout->addWidget(m_statusNote);
-    ui->statusbar->addWidget(status, 1);
+    m_statusNote->setObjectName(QStringLiteral("StatusNote"));
+    m_statusNote->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_statusNote->setMaximumWidth(420);
+    m_statusNote->hide();
+    addGap(12);
+    addCentered(m_statusNote);
+
+    for (int index = 0; index < 2; ++index) {
+        addGap(index == 0 ? 12 : 6);
+        auto *chip = new QWidget;
+        chip->setObjectName(QStringLiteral("EndpointChip"));
+        chip->setFixedHeight(StatusControlHeight);
+        auto *chipLayout = new QHBoxLayout(chip);
+        chipLayout->setContentsMargins(6, 0, 6, 0);
+        chipLayout->setSpacing(6);
+        auto *dot = new QFrame;
+        dot->setObjectName(QStringLiteral("StatusDot"));
+        dot->setFrameShape(QFrame::NoFrame);
+        dot->setFixedSize(6, 6);
+        dot->setProperty("state", QStringLiteral("closed"));
+        m_endpointDot[index] = dot;
+        auto *name = new QLabel(QString(QLatin1Char('A' + char(index))));
+        name->setObjectName(QStringLiteral("EndpointName"));
+        name->setAlignment(Qt::AlignVCenter);
+        auto *state = new QLabel(tr("未连接"));
+        state->setObjectName(QStringLiteral("EndpointState"));
+        state->setAlignment(Qt::AlignVCenter);
+        m_endpointState[index] = state;
+        chipLayout->addWidget(dot, 0, Qt::AlignVCenter);
+        chipLayout->addWidget(name, 0, Qt::AlignVCenter);
+        chipLayout->addWidget(state, 0, Qt::AlignVCenter);
+        addCentered(chip);
+    }
+
+    addGap(10);
+    addCentered(makeStatusSeparator());
+    addGap(8);
+
+    // 两个动作放进同一个盒子、同一高度，避免状态栏再把它们拆开排。
+    auto *actions = new QWidget;
+    actions->setObjectName(QStringLiteral("StatusActions"));
+    auto *actionsLayout = new QHBoxLayout(actions);
+    actionsLayout->setContentsMargins(0, 0, 0, 0);
+    actionsLayout->setSpacing(4);
+    const auto prepareAction = [](QToolButton *button) {
+        button->setFixedHeight(StatusControlHeight);
+        button->setAutoRaise(false);
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setCursor(Qt::PointingHandCursor);
+    };
+#ifdef Q_OS_WIN
+    // 没有独立设置页。检查更新放在状态栏，和置顶一样是窗口级动作。
+    auto *checkUpdate = new QToolButton;
+    checkUpdate->setObjectName(QStringLiteral("checkUpdate"));
+    checkUpdate->setText(tr("检查更新"));
+    checkUpdate->setToolTip(tr("检查更新（当前 %1）").arg(QStringLiteral(QQCOM_VERSION_STR)));
+    checkUpdate->setAccessibleName(tr("检查更新"));
+    checkUpdate->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    prepareAction(checkUpdate);
+    actionsLayout->addWidget(checkUpdate, 0, Qt::AlignVCenter);
+    connect(checkUpdate, &QToolButton::clicked, this, &MainWindow::updateCheckRequested);
+#endif
     m_stayOnTop = new QToolButton;
     m_stayOnTop->setObjectName(QStringLiteral("stayOnTop"));
     m_stayOnTop->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    m_stayOnTop->setIconSize(QSize(16, 16));
+    m_stayOnTop->setIconSize(QSize(14, 14));
+    m_stayOnTop->setFixedSize(StatusControlHeight, StatusControlHeight);
     m_stayOnTop->setCheckable(true);
     m_stayOnTop->setToolTip(tr("窗口置顶"));
     m_stayOnTop->setAccessibleName(tr("置顶"));
-    m_stayOnTop->setAutoRaise(true);
-    // 永久部件：showMessage 不会把它藏掉，也贴在尺寸握把左边。
-    ui->statusbar->addPermanentWidget(m_stayOnTop);
+    prepareAction(m_stayOnTop);
+    actionsLayout->addWidget(m_stayOnTop, 0, Qt::AlignVCenter);
+    addCentered(actions);
     connect(m_stayOnTop, &QToolButton::toggled, this, &MainWindow::setStayOnTop);
     if (preferences->value(QStringLiteral("window/stayOnTop"), false).toBool())
         m_stayOnTop->setChecked(true);
     else
         setStayOnTop(false);
+
+    ui->statusbar->addWidget(status, 1);
 
     // 通信运行时：对象搬进 I/O 线程，GUI 只通过队列信号与它往来。
     // 线程结束时运行时在 I/O 线程内自我销毁，串口/socket 的收尾不落在 GUI。
@@ -382,7 +515,9 @@ MainWindow::MainWindow(QWidget *parent)
                         Q_ARG(int, index), Q_ARG(QByteArray, payload), Q_ARG(int, origin));
         });
     connect(m_bridge, &RouteEditorWidget::draftCountChanged, this, [this](int count) {
-        m_routeStatus->setText(count > 0 ? tr("桥接  已建立 · 预览") : tr("桥接  未启动"));
+        const bool active = count > 0;
+        m_routeStatus->setText(active ? tr("已建立 · 预览") : tr("未启动"));
+        restyleProperty(m_routeStatus, "active", active);
     });
 
     // 速率节拍：与串口扫描一样只在窗口真实显示时运行。
@@ -641,12 +776,6 @@ void MainWindow::setStayOnTop(bool on)
 
 void MainWindow::updateEndpointStatus()
 {
-    // 有临时提示（showStatusNote）正在显示时，它"借走"了右端这一格：此处不得覆盖。
-    // 否则紧随状态上报而来的摘要会立刻把刚播出的提示顶掉——实测"打开失败"时，
-    // errorOccurred 播出的原因在同一个事件循环里就被随后 stateChanged→ 本函数重算的
-    // "A 未连接 · B 未连接"覆盖，用户根本来不及看到。提示到时由 m_statusNoteTimer 的
-    // 回调再次调用本函数，那一刻计时器已停、本守卫放行，摘要照常恢复（复原路径不变）。
-    if (m_statusNoteTimer && m_statusNoteTimer->isActive()) return;
     const auto stateText = [this](int index) {
         const int kind = m_ports.value(index).kind;
         switch (m_endpointStates[index]) {
@@ -666,7 +795,24 @@ void MainWindow::updateEndpointStatus()
         }
         return tr("未连接");
     };
-    m_statusNote->setText(tr("A %1 · B %2").arg(stateText(0), stateText(1)));
+    for (int index = 0; index < 2; ++index) {
+        if (!m_endpointState[index]) continue;
+        const QString text = stateText(index);
+        m_endpointState[index]->setText(text);
+        m_endpointState[index]->setToolTip(
+            tr("端点 %1：%2").arg(QString(QLatin1Char('A' + char(index))), text));
+        const char *dot = "closed";
+        if (m_endpointStates[index] == Transport::State::Opening) dot = "opening";
+        else if (m_endpointStates[index] == Transport::State::Open) dot = "open";
+        restyleProperty(m_endpointDot[index], "state", QString::fromLatin1(dot));
+    }
+    // 临时提示自己占一格。计时没结束时不能清掉它——打开失败时，error 播出的原因
+    // 会在同一个事件循环里被随后的 stateChanged 跟过来，清掉的话用户来不及看见。
+    if (m_statusNoteTimer && m_statusNoteTimer->isActive()) return;
+    if (!m_statusNote) return;
+    m_statusNote->clear();
+    m_statusNote->setToolTip({});
+    m_statusNote->hide();
 }
 
 void MainWindow::showStatusNote(const QString &text, int ms)
@@ -675,11 +821,12 @@ void MainWindow::showStatusNote(const QString &text, int ms)
     if (!m_statusNoteTimer) {
         m_statusNoteTimer = new QTimer(this);
         m_statusNoteTimer->setSingleShot(true);
-        // 复原走 updateEndpointStatus()：它是"A/B 连接状态汇总"的唯一计算点，
-        // 这里复用它而不是另写一句文案，免得两处措辞各自漂移。
+        // 到时清掉提示，并顺手刷新 A/B 状态块。连接文案只在 updateEndpointStatus 里写。
         connect(m_statusNoteTimer, &QTimer::timeout, this, &MainWindow::updateEndpointStatus);
     }
     m_statusNote->setText(text);
+    m_statusNote->setToolTip(text);
+    m_statusNote->setVisible(!text.isEmpty());
     m_statusNoteTimer->start(qMax(1, ms));
 }
 
@@ -689,8 +836,10 @@ void MainWindow::updateRateLabels()
     const auto txRate = qMax<qint64>(0, m_txBytes - m_txBytesAtTick);
     m_rxBytesAtTick = m_rxBytes;
     m_txBytesAtTick = m_txBytes;
-    m_rxStatus->setText(tr("RX   %1   ·   %2/s").arg(formatBytes(m_rxBytes), formatBytes(rxRate)));
-    m_txStatus->setText(tr("TX   %1   ·   %2/s").arg(formatBytes(m_txBytes), formatBytes(txRate)));
+    m_rxStatus->setText(formatBytes(m_rxBytes));
+    m_txStatus->setText(formatBytes(m_txBytes));
+    m_rxRate->setText(tr("%1/s").arg(formatBytes(rxRate)));
+    m_txRate->setText(tr("%1/s").arg(formatBytes(txRate)));
 }
 
 void MainWindow::fitSendPane(int height)

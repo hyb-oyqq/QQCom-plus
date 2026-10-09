@@ -29,14 +29,14 @@ void ExportGroupsDialog::applyDialogStyle()
         }
         QLabel {
             color: #182334;
-            font-size: 13px;
+            font-size: 12px;
         }
         QPushButton {
             background: #f4f6fa;
             border: 1px solid #a9b5c9;
-            border-radius: 5px;
-            padding: 6px 16px;
-            min-height: 18px;
+            border-radius: 4px;
+            padding: 2px 12px;
+            min-height: 16px;
             min-width: 70px;
             color: #1f2a3d;
         }
@@ -53,6 +53,7 @@ void ExportGroupsDialog::applyDialogStyle()
             background: #1d4ed8;
             border-color: #1a45c0;
             color: #ffffff;
+            font-size: 12px;
             font-weight: 600;
         }
         QPushButton:default:hover {
@@ -62,9 +63,9 @@ void ExportGroupsDialog::applyDialogStyle()
         QComboBox {
             background: #ffffff;
             border: 1px solid #a9b5c9;
-            border-radius: 5px;
-            padding: 4px 7px;
-            min-height: 18px;
+            border-radius: 4px;
+            padding: 2px 6px;
+            min-height: 16px;
         }
         QComboBox:hover {
             border-color: #76869f;
@@ -78,7 +79,7 @@ void ExportGroupsDialog::applyDialogStyle()
             border-radius: 5px;
         }
         QListWidget::item {
-            padding: 6px 8px;
+            padding: 4px 8px;
         }
         QListWidget::item:hover {
             background: #e8eefb;
@@ -88,12 +89,12 @@ void ExportGroupsDialog::applyDialogStyle()
             color: #14326f;
         }
         QCheckBox {
-            spacing: 6px;
+            spacing: 4px;
             color: #1f2a3d;
         }
         QCheckBox::indicator {
-            width: 16px;
-            height: 16px;
+            width: 14px;
+            height: 14px;
             border: 1px solid #8b99b0;
             border-radius: 4px;
             background: #ffffff;

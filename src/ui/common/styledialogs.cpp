@@ -33,14 +33,14 @@ void applyDialogStyle(QWidget *dialog)
         }
         QLabel {
             color: #182334;
-            font-size: 13px;
+            font-size: 12px;
         }
         QPushButton {
             background: #f4f6fa;
             border: 1px solid #a9b5c9;
-            border-radius: 5px;
-            padding: 6px 16px;
-            min-height: 18px;
+            border-radius: 4px;
+            padding: 2px 12px;
+            min-height: 16px;
             min-width: 70px;
             color: #1f2a3d;
         }
@@ -57,6 +57,7 @@ void applyDialogStyle(QWidget *dialog)
             background: #1d4ed8;
             border-color: #1a45c0;
             color: #ffffff;
+            font-size: 12px;
             font-weight: 600;
         }
         QPushButton:default:hover, QPushButton[text="确定"]:hover, QPushButton[text="导出"]:hover {
@@ -66,8 +67,8 @@ void applyDialogStyle(QWidget *dialog)
         QLineEdit, QPlainTextEdit, QTextEdit {
             background: #ffffff;
             border: 1px solid #a9b5c9;
-            border-radius: 5px;
-            padding: 4px 7px;
+            border-radius: 4px;
+            padding: 2px 6px;
             color: #182334;
             selection-background-color: #1d4ed8;
             selection-color: #ffffff;
@@ -78,9 +79,9 @@ void applyDialogStyle(QWidget *dialog)
         QComboBox {
             background: #ffffff;
             border: 1px solid #a9b5c9;
-            border-radius: 5px;
-            padding: 4px 7px;
-            min-height: 18px;
+            border-radius: 4px;
+            padding: 2px 6px;
+            min-height: 16px;
         }
         QComboBox:hover {
             border-color: #76869f;
@@ -101,12 +102,12 @@ void applyDialogStyle(QWidget *dialog)
             color: #14326f;
         }
         QCheckBox {
-            spacing: 6px;
+            spacing: 4px;
             color: #1f2a3d;
         }
         QCheckBox::indicator {
-            width: 16px;
-            height: 16px;
+            width: 14px;
+            height: 14px;
             border: 1px solid #8b99b0;
             border-radius: 4px;
             background: #ffffff;
@@ -223,6 +224,20 @@ QString getSaveFileName(QWidget *parent, const QString &caption,
 {
     QFileDialog dialog(safeParent(parent), caption, dir, filter);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
+    applyDialogStyle(&dialog);
+
+    if (dialog.exec() == QDialog::Accepted) {
+        const QStringList files = dialog.selectedFiles();
+        return files.isEmpty() ? QString() : files.first();
+    }
+    return QString();
+}
+
+QString getExistingDirectory(QWidget *parent, const QString &caption, const QString &dir)
+{
+    QFileDialog dialog(safeParent(parent), caption, dir);
+    dialog.setFileMode(QFileDialog::Directory);
+    dialog.setOption(QFileDialog::ShowDirsOnly, true);
     applyDialogStyle(&dialog);
 
     if (dialog.exec() == QDialog::Accepted) {

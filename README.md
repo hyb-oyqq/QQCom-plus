@@ -13,7 +13,7 @@ QQCom 是一个基于 Qt Widgets 的 Windows 通信调试工作台，支持串�
 - 文件收发面板：RAW 直接字节流收发，以及兼容常见 BLE 调试助手/YMODEM 工具的 CRC16 文件收发。
 - Windows x64 发布目录自动部署 Qt DLL 和插件，版本由 `version/version.json` 统一管理。
 
-桥接转发和后台日志轮转仍在演进中；Windows 自动升级已经接入第一版检查、下载和覆盖流程，协议和发布流程见 [OTA 方案](docs/OTA.md)。
+桥接转发和后台日志轮转仍在演进中；Windows 自动升级已经接入第一版检查、下载和覆盖流程。启动后会检查清单，状态栏「检查更新」可以手动再查。协议和发布流程见 [OTA 方案](docs/OTA.md)。
 
 ## 快速开始
 

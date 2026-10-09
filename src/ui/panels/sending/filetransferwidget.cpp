@@ -7,6 +7,7 @@
 #include "persistence/preferencesstore.h"
 #include "ui/common/bytesformat.h"
 #include "ui/common/payloadcodec.h"
+#include "ui/common/tintedicon.h"
 
 #include <QButtonGroup>
 #include <QComboBox>
@@ -52,6 +53,8 @@ QString scopedName(const QString &prefix, const QString &suffix)
 {
     return prefix + suffix;
 }
+
+constexpr int GlyphSize = 14;
 
 QString tailKeyFromCommand(const QString &tail)
 {
@@ -202,7 +205,7 @@ void FileTransferWidget::buildPage(Page *page)
 
     auto *root = new QVBoxLayout(page->root);
     // 上边距把页签和第一行控件拉开。页签底边原来几乎贴着端点行。
-    root->setContentsMargins(0, 8, 0, 0);
+    root->setContentsMargins(0, 4, 0, 0);
     root->setSpacing(2);
 
     page->endpointA = new QPushButton(QStringLiteral("A"));
@@ -228,7 +231,7 @@ void FileTransferWidget::buildPage(Page *page)
     pinFixed(page->mode);
 
     auto *topRow = new QHBoxLayout;
-    topRow->setSpacing(6);
+    topRow->setSpacing(4);
     topRow->addWidget(new QLabel(tr("端点")));
     topRow->addWidget(page->endpointA);
     topRow->addWidget(page->endpointB);
@@ -281,13 +284,15 @@ void FileTransferWidget::buildPage(Page *page)
     page->path->setObjectName(scopedName(prefix, QStringLiteral("Path")));
     page->browse = new QPushButton;
     page->browse->setObjectName(scopedName(prefix, QStringLiteral("Browse")));
+    page->browse->setIcon(mutedIcon(QStringLiteral(":/icons/folder.svg"), GlyphSize));
+    page->browse->setIconSize(QSize(GlyphSize, GlyphSize));
     pinFixed(page->browse);
     topRow->addWidget(page->path, 1);
     topRow->addWidget(page->browse);
     root->addLayout(topRow);
 
     auto *commandRow = new QHBoxLayout;
-    commandRow->setSpacing(6);
+    commandRow->setSpacing(4);
     const auto addCommand = [&](const QString &title, QComboBox **format, QLineEdit **text,
                                  QSpinBox **delay, const QString &suffix,
                                  const QString &delaySuffix, const QString &delayLabel) {
@@ -331,6 +336,11 @@ void FileTransferWidget::buildPage(Page *page)
 
     page->startButton = new QPushButton(page->sending ? tr("发送文件") : tr("接收文件"));
     page->startButton->setObjectName(scopedName(prefix, QStringLiteral("Start")));
+    page->startButton->setIcon(actionStateIcon(
+        page->sending ? QStringLiteral(":/icons/file-upload.svg")
+                      : QStringLiteral(":/icons/file-download.svg"),
+        GlyphSize));
+    page->startButton->setIconSize(QSize(GlyphSize, GlyphSize));
     page->startButton->setToolTip(page->sending
             ? tr("先发前置指令，再把文件发到所选端点，最后发后置指令")
             : tr("先发前置指令，再把端点上的数据保存到本机，最后发后置指令"));
@@ -345,7 +355,7 @@ void FileTransferWidget::buildPage(Page *page)
     page->startButton->setFixedHeight(actionHeight);
     page->progress->setFixedHeight(actionHeight);
     auto *actionRow = new QHBoxLayout;
-    actionRow->setSpacing(6);
+    actionRow->setSpacing(4);
     actionRow->addWidget(page->progress, 1);
     actionRow->addWidget(page->startButton);
     root->addLayout(actionRow);
@@ -786,6 +796,11 @@ void FileTransferWidget::updatePage(Page *page)
     page->afterDelay->setEnabled(!busy);
     const QString idleText = page->sending ? tr("发送文件") : tr("接收文件");
     page->startButton->setText(busy ? tr("停止") : idleText);
+    page->startButton->setIcon(actionStateIcon(
+        busy ? QStringLiteral(":/icons/stop.svg")
+             : (page->sending ? QStringLiteral(":/icons/file-upload.svg")
+                              : QStringLiteral(":/icons/file-download.svg")),
+        GlyphSize));
     page->startButton->setEnabled(busy || (ready && hasPath));
     if (page->startButton->property("busy").toBool() != busy) {
         page->startButton->setProperty("busy", busy);

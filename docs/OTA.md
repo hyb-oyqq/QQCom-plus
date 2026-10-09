@@ -9,7 +9,7 @@ QQCom 采用 Windows 桌面程序常见的 Release + zip + 独立更新器方案
 Gitee 仓库只保存源码和清单模板，二进制放在 Release 附件：
 
 ```text
-https://gitee.com/qinjmin/qqcom/raw/master/ota/stable.json
+https://gitee.com/api/v5/repos/qinjmin/qqcom/contents/ota/stable.json?ref=master
 https://gitee.com/qinjmin/qqcom/releases/download/v0.2.0/QQCom-0.2.0-win64.zip
 ```
 
@@ -35,6 +35,7 @@ https://gitee.com/qinjmin/qqcom/releases/download/v0.2.0/QQCom-0.2.0-win64.zip
 2. 目标版本不高于当前版本时忽略；不支持降级。
 3. 下载到 `%TEMP%\QQCom-update\<version>\`，校验文件大小和 SHA-256。
 4. 校验成功后启动更新器，主程序退出；校验失败删除临时文件并提示用户。
+5. 启动约 3 秒后自动检查。有新版本时询问是否下载；下载过程显示进度，可以取消。状态栏只显示简短状态：「正在检查更新」「已是最新版本」或「检查更新失败」。不展示 HTTP 码、路径或清单字段。自动检查失败不弹窗。手动检查使用同样的状态文案。`QQCOM_DISABLE_UPDATE=1` 只关闭自动检查。
 
 SHA-256 不是发布者签名，但可以发现 CDN/网络传输损坏。生产环境还应对 `QQCom.exe` 做 Windows Authenticode 签名；如果未来接入独立 CDN 或公开分发，再增加清单签名字段，不改变上述基本流程。
 
@@ -56,7 +57,7 @@ powershell.exe -File qqcom-updater.ps1 \
 2. 创建唯一 staging 目录并解压 zip。
 3. 确认 staging 内存在 `QQCom.exe`，再把 staging 文件直接复制到安装目录并覆盖同名文件。
 4. 保留 `%LOCALAPPDATA%\QQCom\QQCom` 下的用户配置、日志和导出文件，不从 zip 删除这些目录。
-5. 写入 `update.log`，启动新的 QQCom，更新器退出。
+5. 把结果追加到 `%TEMP%\QQCom-update\update.log`，启动新的 QQCom，更新器退出。失败时保留这份日志和下载包，不回滚已经覆盖的文件。
 
 覆盖时只处理发布包中的文件，不执行 zip 内脚本。安装目录建议使用用户可写的 `%LOCALAPPDATA%\Programs\QQCom`，这样普通用户可以完成升级；如果采用 `Program Files`，更新器需要管理员权限或单独安装器。
 
@@ -80,12 +81,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate_ota_manifest.ps1 `
   -ManifestPath build/ota/manifest.json `
   -PackagePath build/ota/QQCom-0.2.0-win64.zip
+
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_ota.ps1
 ```
 
 ## 分阶段落地
 
 1. **发布基础**：版本清单、打包脚本、校验脚本和 Release 约定。
-2. **客户端检查**：加入 Qt `QNetworkAccessManager`，启动后延迟检查清单，设置页提供“检查更新”。
+2. **客户端检查**：加入 Qt `QNetworkAccessManager`，启动后延迟检查清单，状态栏提供「检查更新」。
 3. **下载和更新器**：下载 zip、校验 SHA-256、启动 updater、退出主程序、覆盖并重启。
 4. **运营增强**：增加 beta 通道、强制升级、下载进度、代理/超时设置和错误日志上传（仍不上传用户通信数据）。
 

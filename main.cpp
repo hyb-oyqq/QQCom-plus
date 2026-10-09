@@ -137,18 +137,25 @@ int main(int argc, char *argv[])
 
 #ifdef Q_OS_WIN
     // 自动升级只在正常可见运行时触发；快照和延迟探针不能访问网络或弹窗。
-    // 可用 QQCOM_DISABLE_UPDATE=1 关闭本机检查，便于离线开发和自动化测试。
-    if (!parser.isSet("snapshot") && !parser.isSet("latency-probe")
-        && qEnvironmentVariableIsEmpty("QQCOM_DISABLE_UPDATE")) {
+    // QQCOM_DISABLE_UPDATE=1 只关掉启动后的自动检查，状态栏「检查更新」仍然可用。
+    if (!parser.isSet("snapshot") && !parser.isSet("latency-probe")) {
         auto *updates = new UpdateService(QStringLiteral(QQCOM_VERSION_STR), &w);
         const QString overrideUrl = qEnvironmentVariable("QQCOM_OTA_MANIFEST_URL");
         const QUrl manifestUrl = overrideUrl.isEmpty()
                                      ? QUrl(QStringLiteral(
-                                           "https://gitee.com/qinjmin/qqcom/raw/master/ota/stable.json"))
+                                           "https://gitee.com/api/v5/repos/qinjmin/qqcom/contents/"
+                                           "ota/stable.json?ref=master"))
                                      : QUrl(overrideUrl);
-        QTimer::singleShot(3000, &w, [updates, manifestUrl] {
-            updates->checkForUpdates(manifestUrl);
+        QObject::connect(&w, &MainWindow::updateCheckRequested, updates, [updates, manifestUrl] {
+            updates->checkForUpdates(manifestUrl, UpdateService::CheckMode::Manual);
         });
+        QObject::connect(updates, &UpdateService::advisory, &w,
+                         [&w](const QString &text, int ms) { w.showStatusNote(text, ms); });
+        if (qEnvironmentVariableIsEmpty("QQCOM_DISABLE_UPDATE")) {
+            QTimer::singleShot(3000, &w, [updates, manifestUrl] {
+                updates->checkForUpdates(manifestUrl, UpdateService::CheckMode::Automatic);
+            });
+        }
     }
 #endif
 

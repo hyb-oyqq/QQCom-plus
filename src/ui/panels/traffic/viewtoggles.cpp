@@ -9,7 +9,7 @@
 namespace {
 
 // 与顶栏其余按钮同一套字形尺寸：同一行并排出现，尺寸不一致会一眼看出来。
-constexpr int GlyphSize = 16;
+constexpr int GlyphSize = 14;
 
 // 按钮 ↔ 命令 的桥。QPushButton 没有 QToolButton::setDefaultAction，而这里正需要那套
 // 语义：命令是唯一真源，按钮只是它在顶栏的门面。
@@ -56,7 +56,7 @@ ViewToggles::ViewToggles(QWidget *parent) : QWidget(parent)
     setObjectName("viewToggles");
     auto *row = new QHBoxLayout(this);
     row->setContentsMargins(0, 0, 0, 0);
-    row->setSpacing(6);
+    row->setSpacing(4);
 
     // 文案与提示都在 bind 里由命令侧覆盖；这里只保证构造期按钮是可用的形状。
     m_pure = makeToggle(this, QStringLiteral("viewPureData"),

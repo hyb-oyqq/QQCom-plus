@@ -46,6 +46,12 @@ public:
     quint64 totalAccepted() const { return m_totalAccepted; }
     // 组合根注入的偏好存储；为空时全部显示选项不落盘（示例预览等场景）。
     void setPreferences(PreferencesStore *store);
+    // 日志实际写入的目录。未手动指定时是程序目录下的 log 文件夹。
+    QString logDirectory() const;
+    // 改日志目录。文件名模板（基名、扩展名）保持不变，正在记录时立刻换一个新文件。
+    void setLogDirectory(const QString &directory);
+    // 忘掉手动指定的目录，回到程序目录下的 log 文件夹。
+    void resetLogDirectory();
     void setCommandPanelToggle(bool expanded);
     // 头两行（顶栏 + 过滤条）"最少要多宽"没有独立的访问器：行里的控件各自声明下限
     // （见 `ui/common/rowmetrics.h`），布局据此算出 minimumSizeHint，主窗口直接用它。
@@ -128,9 +134,13 @@ private:
     // 写失败的统一收口：先说出原因（沿用既有文案「日志写入失败，记录已停止」），
     // 再关闭文件、复位勾选。收口只此一处，数据批与元信息行走同一条路径。
     void stopLogOnFailure(const QString &reason);
-    // 把当前实际写入的文件名放进「记录到文件」的 tooltip（未记录时恢复原说明）：
-    // 用户需要知道"重开了、这次写到哪个文件"，而不是只看到一个勾。
+    // 把当前目录和实际写入的文件名放进「记录到文件」的 tooltip。
+    // 未记录时说明目录在哪、从哪里改；记录中保留「正在写 文件名」，测试靠这句定位文件。
     void refreshRecordTooltip();
+    // 「日志位置」的说明和「恢复默认位置」是否可点，跟着当前目录走。
+    void refreshLogLocation();
+    // 空的 m_logPath 表示用程序目录下的 log。这里给出真正用来开文件的模板路径。
+    QString logTemplatePath() const;
     // 摘要经 summaryChanged 上报；内容不变就不重发，状态栏不做无效刷新。
     void reportSummary(const QString &text);
     // 显示选项持久化：变更即写（QSettings 延迟落盘），析构时兜底再存一次。
@@ -170,6 +180,8 @@ private:
     QAction *m_pureAction;    // 纯数据视图：无一切前缀
     QAction *m_wrapAction;    // 自动换行
     QAction *m_recordAction;  // 记录到文件：按当前显示格式持续写日志
+    QAction *m_logLocationAction = nullptr;       // 日志位置：改目录
+    QAction *m_resetLogDirectoryAction = nullptr; // 恢复默认位置
     QSet<QUuid> m_visibleEndpoints;
     QPushButton *m_follow;
     QStackedWidget *m_stack;
@@ -212,9 +224,9 @@ private:
     PreferencesStore *m_preferences = nullptr;
     bool m_loading = false; // 加载偏好期间联动触发的保存要抑制，否则半成品状态会覆盖已存值
     QFile *m_logFile = nullptr;   // 打开期间持续写入；关闭开关、重开或析构时收口
-    // 用户选定的**模板**路径（不含时间戳），随开关状态一起持久化：它只用来定
-    // "目录 + 基名 + 扩展名"，实际文件名每次带时间戳另起。存模板而不是实际路径，
-    // 是为了避免重启后时间戳层层叠加（traffic-2026...-20261004....txt）。
+    // 用户选定的**模板**路径（不含时间戳）。空表示还没手动指定，用程序目录下的
+    // log/QQCom-log.txt。它只用来定"目录 + 基名 + 扩展名"，实际文件名每次带时间戳另起。
+    // 存模板而不是实际路径，是为了避免重启后时间戳层层叠加。
     QString m_logPath;
     // 本次实际写入的完整路径（带时间戳），仅供 tooltip 显示"正在写哪个文件"。
     QString m_logFilePath;

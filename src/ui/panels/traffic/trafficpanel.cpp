@@ -15,6 +15,7 @@
 #include <QApplication>
 #include <QBoxLayout>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -28,7 +29,6 @@
 #include <QScrollBar>
 #include <QShortcut>
 #include <QStackedWidget>
-#include <QStandardPaths>
 #include <QStyle>
 #include <QTextStream>
 #include <QTimer>
@@ -38,7 +38,19 @@
 namespace {
 
 // 顶栏与过滤条的字形尺寸，与动作按钮一致；两行并排出现，尺寸必须一样。
-constexpr int BarIconSize = 16;
+constexpr int BarIconSize = 14;
+
+// 目录比较不要求文件夹已经存在。QDir 的相等判断会先做 canonical，不存在就判成不等。
+bool sameDirectory(const QString &a, const QString &b)
+{
+    return QDir::cleanPath(a).compare(QDir::cleanPath(b), Qt::CaseInsensitive) == 0;
+}
+
+// 没手动指定时的模板：程序目录/log/QQCom-log.txt。实际文件名另外加时间戳。
+QString defaultLogTemplate()
+{
+    return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("log/QQCom-log.txt"));
+}
 
 // 重投影的防抖窗口。连点开关、连续切换只做一次重投影；50 ms 短于人能察觉的
 // "卡一下"，又足够把同一轮操作里的多次变化合成一次。
@@ -66,23 +78,23 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     setAttribute(Qt::WA_StyledBackground, true);
     setObjectName("Surface");
     auto *layout = new QVBoxLayout(this);
-    // 内边距与行距按"紧凑布局、空间全给数据显示区"收紧：四周从 16/14 收到 6/8，
-    // 头块与文本台之间从 12 收到 8。仍保留可见留白，不与卡片边框糊在一起。
+    // 内边距与行距按"紧凑布局、空间全给数据显示区"收紧。左右仍是 6，
+    // 上下与行距是 4。仍保留可见留白，不与卡片边框糊在一起。
     // **左右必须是 6**：数据区外边距 6 + 这里 6 = 12，与端口条内容的缩进对齐
     //（用户反馈"边框距离内部元素没有对齐"）——改这一项要同步核对那两个数。
-    layout->setContentsMargins(6, 8, 6, 8);
-    layout->setSpacing(8);
+    layout->setContentsMargins(6, 4, 6, 4);
+    layout->setSpacing(4);
 
     // 两行头：第一行是原顶栏（A/B、编码、过滤折叠按钮、显示设置、导出、滚动到底、清空），
-    // 第二行是过滤条件条。两行同属一个头块，行距压到 6px——它们是"一次头"，
+    // 第二行是过滤条件条。两行同属一个头块，行距压到 4px——它们是"一次头"，
     // 不是两块独立面板。数据区高度只被这一条头带走两行控件的高度。
     auto *head = new QWidget(this);
     auto *headLayout = new QVBoxLayout(head);
     headLayout->setContentsMargins(0, 0, 0, 0);
-    headLayout->setSpacing(6);
+    headLayout->setSpacing(4);
 
     auto *top = new QHBoxLayout;
-    top->setSpacing(6);
+    top->setSpacing(4);
 
     // A/B 端点开关直接放在选项栏里：点哪个看哪个，都点看全部，无需进菜单。
     const auto portToggle = [this](const QString &letter, const QString &name) {
@@ -113,7 +125,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_filterToggle->setObjectName("filterToggle");
     m_filterToggle->setCheckable(true);
     m_filterToggle->setChecked(true);
-    m_filterToggle->setIcon(mutedIcon(QStringLiteral(":/icons/filter-variant.svg"), BarIconSize));
+    bindToggleIcon(m_filterToggle, QStringLiteral(":/icons/filter-variant.svg"), BarIconSize);
     m_filterToggle->setToolTip(tr("展开 / 收起过滤条件条（Ctrl+Shift+F）；Ctrl+F 直接聚焦关键词"));
     connect(m_filterToggle, &QPushButton::toggled, this, &TrafficPanel::setFilterExpanded);
     top->addWidget(m_filterToggle);
@@ -156,8 +168,10 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 只说「换行」会被读成"给指令加换行符"，那是另一件事。
     m_hexAction = rowToggle("showHex", tr("HEX 同显"), false);
     m_hexAction->setToolTip(tr("同时显示 HEX：数据行之后另起一行显示 HEX 对照（HEX 显示格式下自动省略）"));
-    m_pureAction = rowToggle("pureData", tr("纯数据"), false);
-    m_pureAction->setToolTip(tr("纯数据模式：移除行号、时间、方向等一切前缀，只显示数据本身"));
+    // 顶栏只放三个字。「纯数据」看不出在管什么；「是否显示前缀」又太长。
+    // 点亮即去掉行号、时间、方向、长度，日志里只留数据。
+    m_pureAction = rowToggle("pureData", tr("无前缀"), false);
+    m_pureAction->setToolTip(tr("去掉行号、时间、方向和长度，日志里只留数据本身"));
     // 纯数据开启时，行前缀开关全部失效置灰，状态一目了然。
     connect(m_pureAction, &QAction::toggled, this, [this](bool pure) {
         for (auto *action : {m_numberAction, m_timestampAction, m_directionAction, m_lengthAction,
@@ -198,28 +212,44 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_recordAction = displayMenu->addAction(tr("记录到文件"));
     m_recordAction->setObjectName("recordTraffic");
     m_recordAction->setCheckable(true);
-    m_recordAction->setToolTip(tr("把新到达的消息按当前显示格式持续写入日志文件"));
     connect(m_recordAction, &QAction::toggled, this, [this](bool enabled) {
         toggleLogRecording(enabled);
         savePreferences();
     });
+    // 路径一旦写入偏好，再次勾选就不再询问，所以改目录必须有自己的入口。
+    // 选的是文件夹：每次记录仍另存为带时间戳的新文件，基名和扩展名沿用当前模板。
+    m_logLocationAction = displayMenu->addAction(tr("日志位置…"));
+    m_logLocationAction->setObjectName(QStringLiteral("chooseLogDirectory"));
+    connect(m_logLocationAction, &QAction::triggered, this, [this] {
+        const QString dir = StyleDialogs::getExistingDirectory(this, tr("日志位置"), logDirectory());
+        if (!dir.isEmpty()) setLogDirectory(dir);
+    });
+    m_resetLogDirectoryAction = displayMenu->addAction(tr("恢复默认位置"));
+    m_resetLogDirectoryAction->setObjectName(QStringLiteral("resetLogDirectory"));
+    m_resetLogDirectoryAction->setToolTip(tr("改回程序目录下的 log 文件夹"));
+    connect(m_resetLogDirectoryAction, &QAction::triggered, this, &TrafficPanel::resetLogDirectory);
+    refreshLogLocation();
     settings->setMenu(displayMenu);
     top->addWidget(settings);
 
     auto *exportButton = new QPushButton(tr("导出"));
     exportButton->setObjectName("exportTraffic");
+    exportButton->setIcon(mutedIcon(QStringLiteral(":/icons/export.svg"), BarIconSize));
     top->addWidget(exportButton);
 
     m_follow = new QPushButton(tr("滚动到底"));
     m_follow->setObjectName("followTraffic");
     m_follow->setCheckable(true);
     m_follow->setChecked(true);
-    m_follow->setIcon(mutedIcon(QStringLiteral(":/icons/arrow-down.svg"), BarIconSize));
+    bindToggleIcon(m_follow, QStringLiteral(":/icons/arrow-down.svg"), BarIconSize);
     m_follow->setToolTip(tr("始终滚动到最新记录；向上翻阅时自动取消"));
     top->addWidget(m_follow);
 
     auto *clear = new QPushButton(tr("清空"));
     clear->setObjectName("clearTraffic");
+    // 垃圾桶用和按钮文字同一档红。灰图标放在红字旁边会看成没画完。
+    clear->setIcon(tintedIcon(QStringLiteral(":/icons/delete-outline.svg"),
+                              QColor(0xa7, 0x30, 0x1f), BarIconSize));
     top->addWidget(clear);
 
     // 右侧指令面板的开关，紧挨"清空"（用户钦定把面板的收起/展开放在这里）。
@@ -520,19 +550,8 @@ void TrafficPanel::toggleLogRecording(bool enabled)
         closeLogFile();
         return;
     }
-    if (m_logPath.isEmpty()) {
-        // 首次开启才选模板路径；之后重开沿用同一模板（目录+基名+扩展名），
-        // 模板本身不带时间戳——存的是"选定过的位置"，不是某一次的文件名。
-        m_logPath = StyleDialogs::getSaveFileName(this, tr("选择日志文件"),
-            QStringLiteral("QQCom-log.txt"), tr("文本文件 (*.txt *.log *.tsv)"));
-        if (m_logPath.isEmpty()) {
-            // 用户取消 = 不开启；阻断信号复位勾选，避免显示与实际状态不一致。
-            const QSignalBlocker blocker(m_recordAction);
-            m_recordAction->setChecked(false);
-            return;
-        }
-    }
-    // 拿到模板路径后无条件重开：新文件带时间戳、从零开始写，绝不追加到旧文件。
+    // 不再弹保存对话框。没手动指定目录时写到程序目录下的 log；
+    // 要换地方走显示设置里的「日志位置」。
     openNewLogFile();
 }
 
@@ -541,16 +560,17 @@ bool TrafficPanel::openNewLogFile()
     // 同一时刻只会有一个打开的文件：重开即换新的，先把上一个收口（幂等）。
     closeLogFile();
 
-    // 模板路径为空是异常情形（例如偏好里没有 recordPath 又走到启动恢复）：
-    // 退到「文档」目录，保证这次记录一定能落下，而不是静默地什么都不写。
-    QString templatePath = m_logPath;
-    if (templatePath.isEmpty()) {
-        const QString dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-        templatePath = QDir(dir).filePath(QStringLiteral("QQCom-log.txt"));
+    // 没手动指定时用程序目录下的 log。目录不存在就建；建不了就说清原因，让用户改到可写的位置。
+    const QString templatePath = logTemplatePath();
+    const QFileInfo info(templatePath);
+    if (!QDir().mkpath(info.absolutePath())) {
+        reportSummary(tr("日志目录无法创建：%1").arg(QDir::toNativeSeparators(info.absolutePath())));
+        const QSignalBlocker blocker(m_recordAction);
+        m_recordAction->setChecked(false);
+        return false;
     }
     // 只取模板的"目录 + 基名 + 扩展名"，实际文件名 = 基名 + -yyyyMMdd-HHmmss + 扩展名。
     // 无扩展名的模板按约定补 .txt。
-    const QFileInfo info(templatePath);
     const QString dir = info.absolutePath();
     const QString base = info.completeBaseName().isEmpty() ? QStringLiteral("QQCom-log")
                                                            : info.completeBaseName();
@@ -606,10 +626,73 @@ void TrafficPanel::stopLogOnFailure(const QString &reason)
 
 void TrafficPanel::refreshRecordTooltip()
 {
-    // 记录中显示"正在写哪个文件"，用户才知道重开后落到了哪里；未记录时恢复原说明。
+    // 「正在写 文件名」这一句保持在 tooltip 末尾：测试用它定位当前文件。
+    // 目录写在前面，记录开着或关着都能看出文件落在哪。
+    if (!m_recordAction) return;
+    const QString dir = QDir::toNativeSeparators(logDirectory());
     m_recordAction->setToolTip(m_logFile
-            ? tr("记录到文件 · 正在写 %1").arg(QFileInfo(m_logFilePath).fileName())
-            : tr("把新到达的消息按当前显示格式持续写入日志文件"));
+            ? tr("记录到文件 · 目录 %1 · 正在写 %2")
+                  .arg(dir, QFileInfo(m_logFilePath).fileName())
+            : tr("把新到达的消息按当前显示格式持续写入日志文件。目录：%1。可在「日志位置」中修改")
+                  .arg(dir));
+}
+
+QString TrafficPanel::logTemplatePath() const
+{
+    return m_logPath.isEmpty() ? defaultLogTemplate() : m_logPath;
+}
+
+QString TrafficPanel::logDirectory() const
+{
+    return QFileInfo(logTemplatePath()).absolutePath();
+}
+
+void TrafficPanel::refreshLogLocation()
+{
+    if (m_logLocationAction) {
+        m_logLocationAction->setToolTip(
+            tr("当前目录：%1。每次记录另存为带时间戳的新文件").arg(QDir::toNativeSeparators(logDirectory())));
+    }
+    if (m_resetLogDirectoryAction) {
+        const bool custom = !sameDirectory(logDirectory(), QFileInfo(defaultLogTemplate()).absolutePath());
+        m_resetLogDirectoryAction->setEnabled(custom);
+    }
+    refreshRecordTooltip();
+}
+
+void TrafficPanel::setLogDirectory(const QString &directory)
+{
+    const QString dir = QDir::cleanPath(directory.trimmed());
+    if (dir.isEmpty()) return;
+    const QFileInfo info(logTemplatePath());
+    const QString base = info.completeBaseName().isEmpty() ? QStringLiteral("QQCom-log")
+                                                           : info.completeBaseName();
+    const QString suffix = info.suffix().isEmpty() ? QStringLiteral("txt") : info.suffix();
+    const QString next = QDir(dir).filePath(base + QLatin1Char('.') + suffix);
+    if (QDir::cleanPath(next).compare(QDir::cleanPath(logTemplatePath()), Qt::CaseInsensitive) == 0) {
+        refreshLogLocation();
+        return;
+    }
+    m_logPath = next;
+    savePreferences();
+    refreshLogLocation();
+    if (m_recordAction && m_recordAction->isChecked() && !openNewLogFile()) return;
+    reportSummary(tr("日志目录已改为 %1").arg(QDir::toNativeSeparators(logDirectory())));
+}
+
+void TrafficPanel::resetLogDirectory()
+{
+    if (m_logPath.isEmpty()
+        && sameDirectory(logDirectory(), QFileInfo(defaultLogTemplate()).absolutePath())) {
+        refreshLogLocation();
+        return;
+    }
+    m_logPath.clear();
+    // 空路径表示默认。只清内存不够：savePreferences 在路径为空时不会删掉旧键。
+    if (m_preferences) m_preferences->remove(QStringLiteral("traffic/recordPath"));
+    refreshLogLocation();
+    if (m_recordAction && m_recordAction->isChecked() && !openNewLogFile()) return;
+    reportSummary(tr("日志目录已恢复为程序目录下的 log 文件夹"));
 }
 
 void TrafficPanel::writeLog(const QList<Traffic::Message> &messages)
@@ -706,11 +789,12 @@ void TrafficPanel::loadPreferences()
     m_portAButton->setChecked(m_preferences->value("traffic/portA", true).toBool());
     m_portBButton->setChecked(m_preferences->value("traffic/portB", true).toBool());
     m_logPath = m_preferences->value("traffic/recordPath").toString();
+    refreshLogLocation();
     // 折叠状态先落位（此时仍在抑制保存），再统一应用一次。
     m_filterToggle->setChecked(m_preferences->value("filter/expanded", true).toBool());
-    // 启动恢复"记录到文件"：用 QSignalBlocker 拦住 toggled，避免走 toggleLogRecording
-    // 弹出文件对话框（用户钦定启动不打扰，直接开新文件）。勾选先于 m_loading 复位，
-    // 好让随后的 updateFilter→savePreferences 把 record=true 原样写回。
+    // 启动恢复"记录到文件"：用 QSignalBlocker 拦住 toggled，避免在格式还没落定前
+    // 就开文件。勾选先于 m_loading 复位，好让随后的 updateFilter→savePreferences
+    // 把 record=true 原样写回。
     const bool recordOn = m_preferences->value("traffic/record", false).toBool();
     if (recordOn) {
         const QSignalBlocker blocker(m_recordAction);
@@ -721,7 +805,7 @@ void TrafficPanel::loadPreferences()
     updatePortVisibility();
     updateFilter(); // 恢复完成后统一刷新一次过滤
     // 恢复完成后才真正开文件：此时显示格式已从偏好落位，元信息头能记下正确格式。
-    // m_logPath 为空的异常情形由 openNewLogFile 兜底到「文档」目录。
+    // 没保存过目录时，openNewLogFile 写到程序目录下的 log。
     if (recordOn) openNewLogFile();
 }
 

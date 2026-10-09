@@ -13,12 +13,10 @@
 namespace {
 
 // 与顶栏同一套字形尺寸：两行并排出现，尺寸不一致会一眼看出来。
-constexpr int BarIconSize = 16;
+constexpr int BarIconSize = 14;
 
-// **输入框的前导图标比顶栏按钮的 16 略大**：输入框本身更高（QSS 的 padding 4px + min-height
-// 18px，实到约 37 逻辑像素），16 的图标在里面显小、与 placeholder 文字（约 19 逻辑像素高）
-// 也不成比例（用户反馈"调整大小到合适的尺寸"）。按钮行仍用 16——那是另一行，不跟着改。
-constexpr int FilterInputIconSize = 18;
+// 过滤输入框与顶栏按钮现在同高（约 22px）。前导图标取 14，和框内 12px 文字成比例。
+constexpr int FilterInputIconSize = 14;
 
 // 关键词框（整行唯一的**弹性项**）的宽度下限，用半角字符数表示：它会被剩余空间撑开，
 // 下限只要保证"看得见自己写的两三个条件"就够了（约 15 个半角字符 ≈ 七八个汉字）。
@@ -48,7 +46,7 @@ FilterBar::FilterBar(QWidget *parent) : QWidget(parent)
     // 恒为一行：容器自己不换行也不滚动，纵向尺寸就是一行控件的高度。
     auto *row = new QHBoxLayout(this);
     row->setContentsMargins(0, 0, 0, 0);
-    row->setSpacing(6);
+    row->setSpacing(4);
 
     // 关键词输入是整条唯一的弹性项，吸收全部剩余宽度。
     // 输入框不带清除按钮：clearButton 的 ✕ 与"回车即生效"两个入口会互相干扰，

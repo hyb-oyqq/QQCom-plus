@@ -20,7 +20,11 @@ if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     throw "QQCom.exe was not found in release directory: $binaryRoot"
 }
 
-$outputRoot = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $OutputDir))
+if ([System.IO.Path]::IsPathRooted($OutputDir)) {
+    $outputRoot = [System.IO.Path]::GetFullPath($OutputDir)
+} else {
+    $outputRoot = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $OutputDir))
+}
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 
 $packageName = "QQCom-$Version-win64.zip"
@@ -50,6 +54,23 @@ $manifest = [ordered]@{
         sha256 = $hash
     }
     notesUrl = "https://gitee.com/qinjmin/qqcom/releases/tag/v$Version"
+}
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
+try {
+    $names = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+} finally {
+    $zip.Dispose()
+}
+if ($names -notcontains 'QQCom.exe') {
+    throw 'Package does not contain QQCom.exe at the archive root.'
+}
+foreach ($name in $names) {
+    $parts = $name.Split('/')
+    if ($name.StartsWith('/') -or $name.Contains(':') -or ($parts -contains '..')) {
+        throw "Unsafe package entry: $name"
+    }
 }
 
 $manifestPath = Join-Path $outputRoot 'manifest.json'

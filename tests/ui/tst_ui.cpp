@@ -683,6 +683,8 @@ private slots:
                  QStringLiteral("followTraffic"), QStringLiteral("clearTraffic"),
                  QStringLiteral("commandPanelToggle")})
             QVERIFY2(row->findChild<QWidget *>(name), qPrintable(QStringLiteral("缺顶栏元素：") + name));
+        QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("exportTraffic"))->icon().isNull());
+        QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("clearTraffic"))->icon().isNull());
         const auto crowded = overlapInRow(row);
         QVERIFY2(crowded.isEmpty(), qPrintable(crowded));
     }
@@ -855,10 +857,11 @@ private slots:
             if (button->property("row").isValid()) rowSends.append(button);
         QCOMPARE(rowSends.size(), 2);
 
-        // 发送区目标：A / B / AB 三个键里选中的那个就是唯一目标来源。
-        // 默认是 A；先只留 B，验证"指令发去了发送区选的那个口"。
-        if (sendA->isChecked()) sendA->click();
+        // 发送区目标是 A、B 两个独立开关，当前选中的就是唯一目标来源。
+        // 默认只勾着 A；先勾上 B 再取消 A，只留 B，验证指令发去了发送区选的那个口。
         if (!sendB->isChecked()) sendB->click();
+        if (sendA->isChecked()) sendA->click();
+        QVERIFY(!sendA->isChecked() && sendB->isChecked());
 
         int rowsSeen = model->rowCount();
         rowSends.at(0)->click(); // 文本指令 → B
@@ -1854,7 +1857,7 @@ private slots:
         // 用户选定的是"模板路径"：实际文件名每次带时间戳另起，模板本身不写。
         const auto templatePath = directory.filePath(QStringLiteral("traffic.log"));
         PreferencesStore store(nullptr, directory.filePath(QStringLiteral("preferences.ini")));
-        // 预置路径：记录开关开启时若无路径会弹文件对话框，注入路径绕开交互。
+        // 预置路径：没手动指定时会写到程序目录下的 log，这里改到临时目录。
         store.setValue(QStringLiteral("traffic/recordPath"), templatePath);
         TrafficPanel panel;
         panel.setPreferences(&store);
@@ -2127,6 +2130,90 @@ private slots:
             QCOMPARE(record3->isChecked(), false);
             QCOMPARE(countFiles(), 1); // 文件数不变
         }
+    }
+
+    // 没手动指定目录时，日志写到程序目录下的 log，不再弹保存对话框。
+    // 指定过的目录留在偏好里，显示设置里的「日志位置」和「恢复默认位置」可以再改。
+    void logDirectoryDefaultsToProgramFolderAndCanChange()
+    {
+        const QString programLog = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("log"));
+        QStringList created;
+        struct Guard {
+            QStringList *files;
+            ~Guard()
+            {
+                for (const auto &path : *files) QFile::remove(path);
+            }
+        } guard{&created};
+        const auto currentLogPath = [](QAction *record, const QString &directory) {
+            const QString marker = QStringLiteral("正在写 ");
+            const int at = record->toolTip().indexOf(marker);
+            if (at < 0) return QString();
+            return QDir(directory).filePath(record->toolTip().mid(at + marker.size()).trimmed());
+        };
+
+        QTemporaryDir iniDir;
+        QVERIFY(iniDir.isValid());
+        PreferencesStore store(nullptr, iniDir.filePath(QStringLiteral("preferences.ini")));
+        store.setValue(QStringLiteral("traffic/record"), true);
+        TrafficPanel panel;
+        panel.setPreferences(&store);
+        auto *record = panel.findChild<QAction *>(QStringLiteral("recordTraffic"));
+        auto *choose = panel.findChild<QAction *>(QStringLiteral("chooseLogDirectory"));
+        auto *reset = panel.findChild<QAction *>(QStringLiteral("resetLogDirectory"));
+        QVERIFY(record && choose && reset);
+        QVERIFY(record->isChecked());
+        QVERIFY(!reset->isEnabled());
+        QCOMPARE(QDir::cleanPath(panel.logDirectory()), QDir::cleanPath(programLog));
+        QVERIFY(choose->toolTip().contains(QDir::toNativeSeparators(programLog)));
+        const QString first = currentLogPath(record, programLog);
+        QVERIFY2(!first.isEmpty(), qPrintable(record->toolTip()));
+        QVERIFY(QFileInfo(first).fileName().startsWith(QStringLiteral("QQCom-log-")));
+        QVERIFY(QFileInfo(first).fileName().endsWith(QStringLiteral(".txt")));
+        QVERIFY(QFile::exists(first));
+        QVERIFY(!QFile::exists(QDir(programLog).filePath(QStringLiteral("QQCom-log.txt"))));
+        QVERIFY(store.value(QStringLiteral("traffic/recordPath")).toString().isEmpty());
+        created.append(first);
+
+        QTemporaryDir custom;
+        QVERIFY(custom.isValid());
+        panel.setLogDirectory(custom.path());
+        QVERIFY(reset->isEnabled());
+        QVERIFY(record->isChecked());
+        QCOMPARE(QDir::cleanPath(panel.logDirectory()), QDir::cleanPath(custom.path()));
+        QCOMPARE(QDir::cleanPath(store.value(QStringLiteral("traffic/recordPath")).toString()),
+                 QDir::cleanPath(QDir(custom.path()).filePath(QStringLiteral("QQCom-log.txt"))));
+        const QString moved = currentLogPath(record, custom.path());
+        QVERIFY(QFile::exists(moved));
+        QVERIFY(QFileInfo(moved).fileName().startsWith(QStringLiteral("QQCom-log-")));
+        QVERIFY(QFile::exists(first)); // 换目录另起新文件，旧文件留在原地
+
+        panel.resetLogDirectory();
+        QVERIFY(!reset->isEnabled());
+        QVERIFY(record->isChecked());
+        QCOMPARE(QDir::cleanPath(panel.logDirectory()), QDir::cleanPath(programLog));
+        QVERIFY(store.value(QStringLiteral("traffic/recordPath")).toString().isEmpty());
+        const QString restored = currentLogPath(record, programLog);
+        QVERIFY(restored != first);
+        QVERIFY(QFile::exists(restored));
+        created.append(restored);
+
+        // 换目录只改文件夹，基名和扩展名留着。
+        QTemporaryDir namedIni;
+        QTemporaryDir namedDest;
+        QVERIFY(namedIni.isValid() && namedDest.isValid());
+        PreferencesStore namedStore(nullptr, namedIni.filePath(QStringLiteral("preferences.ini")));
+        namedStore.setValue(QStringLiteral("traffic/recordPath"),
+                            namedIni.filePath(QStringLiteral("session.log")));
+        TrafficPanel named;
+        named.setPreferences(&namedStore);
+        QVERIFY(named.findChild<QAction *>(QStringLiteral("resetLogDirectory"))->isEnabled());
+        named.setLogDirectory(namedDest.path());
+        QCOMPARE(QDir::cleanPath(namedStore.value(QStringLiteral("traffic/recordPath")).toString()),
+                 QDir::cleanPath(namedDest.filePath(QStringLiteral("session.log"))));
+        named.findChild<QAction *>(QStringLiteral("recordTraffic"))->setChecked(true);
+        const auto produced = QDir(namedDest.path()).entryList({QStringLiteral("session-*.log")}, QDir::Files);
+        QCOMPARE(produced.size(), 1);
     }
 
     void portControlsShowTheirOwnContent()
@@ -2481,7 +2568,7 @@ private slots:
         auto *panel = window.findChild<SendPanel *>();
         auto *portA = window.findChild<QPushButton *>("showPortA");
         QVERIFY(panel && portA);
-        // 目标只有 A／B／AB 三个按钮：端口默认目标下拉框已删除。
+        // 目标只有 A、B 两个可同时选中的开关，没有单独的 AB。
         // 手动发送页的格式/末尾仍是那两个下拉框；文件页另有模式和前后指令下拉框。
         QCOMPARE(panel->findChildren<QComboBox *>(QStringLiteral("sendFormat")).size(), 1);
         QCOMPARE(panel->findChildren<QComboBox *>(QStringLiteral("sendSuffix")).size(), 1);
@@ -2493,25 +2580,29 @@ private slots:
         for (int i = 0; i < formats.size(); ++i)
             QCOMPARE(sendFormat->itemText(i), PayloadCodec::formatName(formats.at(i)));
         QVERIFY(panel->findChildren<QRadioButton *>().isEmpty());
+        QVERIFY(!window.findChild<QPushButton *>("sendTargetAB"));
         const QList<QPushButton *> targets{window.findChild<QPushButton *>("sendTargetA"),
-                                           window.findChild<QPushButton *>("sendTargetB"),
-                                           window.findChild<QPushButton *>("sendTargetAB")};
+                                           window.findChild<QPushButton *>("sendTargetB")};
         for (auto *button : targets) {
             QVERIFY(button && button->isCheckable());
             // 与数据显示区端点开关同款形态：同为可勾选按钮、同样高度，
             // 勾选态因此共用同一条 QPushButton:checked 样式，不受系统深色调色板影响。
             QCOMPARE(button->sizeHint().height(), portA->sizeHint().height());
         }
-        // 三选一：点新目标即取消旧目标；重复点当前目标不会把目标清空。
+        // A、B 各自独立：可以同时选中，两个都选中的掩码是 3。
+        // 不能把最后一个也取消，发送必须有目标。
         QVERIFY(targets.at(0)->isChecked());
+        QVERIFY(!targets.at(1)->isChecked());
+        QCOMPARE(panel->targetMask(), 1);
         targets.at(1)->click();
-        QVERIFY(!targets.at(0)->isChecked() && targets.at(1)->isChecked() && !targets.at(2)->isChecked());
-        targets.at(2)->click();
-        QVERIFY(!targets.at(0)->isChecked() && !targets.at(1)->isChecked() && targets.at(2)->isChecked());
-        targets.at(2)->click();
-        int checked = 0;
-        for (auto *button : targets) checked += button->isChecked() ? 1 : 0;
-        QCOMPARE(checked, 1);
+        QVERIFY(targets.at(0)->isChecked() && targets.at(1)->isChecked());
+        QCOMPARE(panel->targetMask(), 3);
+        targets.at(0)->click();
+        QVERIFY(!targets.at(0)->isChecked() && targets.at(1)->isChecked());
+        QCOMPARE(panel->targetMask(), 2);
+        targets.at(1)->click();
+        QVERIFY(targets.at(1)->isChecked());
+        QCOMPARE(panel->targetMask(), 2);
         // 新布局（用户钦定"发送按钮放到发送框的右边，定时发送、编码选择也集成到右边"）：
         // 编码 / 定时 / 目标 / 发送全部落在正文**右侧一列**，不再铺在正文下方。
         auto *editor = window.findChild<QPlainTextEdit *>("sendEditor");
@@ -2533,7 +2624,7 @@ private slots:
             qPrintable(QStringLiteral("定时发送应在正文右侧：x=%1，正文右缘=%2")
                            .arg(repeat->mapTo(&window, QPoint()).x())
                            .arg(editorRight)));
-        // 发送按钮在正文右侧；目标 A/B/AB 与它**同一行**、且位于它左侧
+        // 发送按钮在正文右侧；目标 A/B 与它同一行、且位于它左侧
         //（这一排的语义就是"发给谁 + 发出去"，拆行会读不出关系）。
         auto *send = window.findChild<QPushButton *>("PrimaryButton");
         QVERIFY(send);
@@ -2546,11 +2637,63 @@ private slots:
         QVERIFY2(qAbs(targetMid - sendMid) <= 2,
                  qPrintable(QStringLiteral("目标与发送应在同一行：目标中心 %1 vs 发送中心 %2")
                                 .arg(targetMid).arg(sendMid)));
-        QVERIFY2(targets.at(2)->mapTo(&window, QPoint()).x() + targets.at(2)->width()
+        QVERIFY2(targets.at(1)->mapTo(&window, QPoint()).x() + targets.at(1)->width()
                      <= send->mapTo(&window, QPoint()).x(),
-                 qPrintable(QStringLiteral("AB right edge %1 vs send left %2")
-                                .arg(targets.at(2)->mapTo(&window, QPoint()).x() + targets.at(2)->width())
+                 qPrintable(QStringLiteral("B right edge %1 vs send left %2")
+                                .arg(targets.at(1)->mapTo(&window, QPoint()).x() + targets.at(1)->width())
                                 .arg(send->mapTo(&window, QPoint()).x())));
+        QCOMPARE(send->height(), targets.at(0)->height());
+        QCOMPARE(targets.at(0)->height(), targets.at(1)->height());
+        QVERIFY2(send->width() > targets.at(0)->width(),
+                 qPrintable(QStringLiteral("发送按钮应比目标开关更宽：发送 %1，目标 %2")
+                                .arg(send->width()).arg(targets.at(0)->width())));
+        // 格式、末尾、间隔、A/B、发送是同一条控制带：同高，右缘对齐，
+        // 三行之间的空隙相等，首行贴着正文上沿，末行与预览同一中线。
+        auto *suffixBox = window.findChild<QComboBox *>(QStringLiteral("sendSuffix"));
+        auto *intervalBox = window.findChild<QSpinBox *>(QStringLiteral("repeatInterval"));
+        auto *preview = window.findChild<QLabel *>(QStringLiteral("payloadPreview"));
+        QVERIFY(suffixBox && intervalBox && preview);
+        const auto centerY = [](const QWidget *widget, const QWidget *origin) {
+            return widget->mapTo(origin, QPoint()).y() + widget->height() / 2;
+        };
+        const auto edgeRight = [](const QWidget *widget, const QWidget *origin) {
+            return widget->mapTo(origin, QPoint()).x() + widget->width();
+        };
+        QCOMPARE(sendFormat->height(), send->height());
+        QCOMPARE(suffixBox->height(), send->height());
+        QCOMPARE(intervalBox->height(), send->height());
+        QVERIFY2(qAbs(sendFormat->mapTo(&window, QPoint()).y() - editor->mapTo(&window, QPoint()).y()) <= 2,
+            "格式行应贴着正文上沿");
+        QVERIFY2(qAbs(centerY(preview, &window) - centerY(send, &window)) <= 2,
+            "预览应与发送按钮同一高度");
+        QVERIFY2(qAbs(edgeRight(suffixBox, &window) - edgeRight(send, &window)) <= 2,
+            "末尾下拉框应与发送按钮右缘对齐");
+        QVERIFY2(qAbs(edgeRight(intervalBox, &window) - edgeRight(suffixBox, &window)) <= 2,
+            "间隔框应与末尾下拉框右缘对齐");
+        QVERIFY2(qAbs(intervalBox->width() - suffixBox->width()) <= 2,
+            "间隔框应与末尾下拉框同宽");
+        const int formatGap = intervalBox->mapTo(&window, QPoint()).y()
+            - (sendFormat->mapTo(&window, QPoint()).y() + sendFormat->height());
+        const int actionGap = send->mapTo(&window, QPoint()).y()
+            - (intervalBox->mapTo(&window, QPoint()).y() + intervalBox->height());
+        QVERIFY2(qAbs(formatGap - actionGap) <= 2,
+            qPrintable(QStringLiteral("右栏行距不均：格式到定时 %1，定时到发送 %2")
+                           .arg(formatGap).arg(actionGap)));
+        // 三页都是内容撑开的高度，而且一样高。切换标签不再改发送区高度。
+        auto *manualPage = window.findChild<QWidget *>(QStringLiteral("manualSendPage"));
+        auto *fileSendPage = window.findChild<QWidget *>(QStringLiteral("fileSendPage"));
+        auto *fileReceivePage = window.findChild<QWidget *>(QStringLiteral("fileReceivePage"));
+        QVERIFY(manualPage && fileSendPage && fileReceivePage);
+        QVERIFY2(qAbs(manualPage->sizeHint().height() - fileSendPage->sizeHint().height()) <= 2,
+            qPrintable(QStringLiteral("手动发送 %1，发送文件 %2")
+                           .arg(manualPage->sizeHint().height())
+                           .arg(fileSendPage->sizeHint().height())));
+        QVERIFY2(qAbs(manualPage->sizeHint().height() - fileReceivePage->sizeHint().height()) <= 2,
+            qPrintable(QStringLiteral("手动发送 %1，接收文件 %2")
+                           .arg(manualPage->sizeHint().height())
+                           .arg(fileReceivePage->sizeHint().height())));
+        const int paneH = panel->height();
+        const int preferred = panel->preferredHeight();
         const auto artifactDir = qEnvironmentVariable("QQCOM_UI_ARTIFACT_DIR");
         if (!artifactDir.isEmpty()) {
             QDir().mkpath(artifactDir);
@@ -2558,6 +2701,8 @@ private slots:
         }
         tabs->setCurrentIndex(1);
         QTest::qWait(30);
+        QCOMPARE(panel->height(), paneH);
+        QCOMPARE(panel->preferredHeight(), preferred);
         if (!artifactDir.isEmpty())
             QVERIFY(window.grab().save(artifactDir + QStringLiteral("/file-send.png")));
         auto *stats = window.findChild<QLabel *>(QStringLiteral("fileTransferStats"));
@@ -2599,7 +2744,8 @@ private slots:
         QVERIFY2(qAbs(midY(chunk, &window) - midY(chunkGap, &window)) <= 2,
             "分包大小与包间隔应在同一行");
         const int tabBottom = tabs->tabBar()->mapTo(&window, QPoint(0, tabs->tabBar()->height())).y();
-        QVERIFY2(sendMode->mapTo(&window, QPoint()).y() - tabBottom >= 6,
+        // 页顶边距是 4。间距小于它，说明页签和第一行贴在一起了。
+        QVERIFY2(sendMode->mapTo(&window, QPoint()).y() - tabBottom >= 4,
             qPrintable(QStringLiteral("页签与下方内容间距过小：%1")
                            .arg(sendMode->mapTo(&window, QPoint()).y() - tabBottom)));
         QCOMPARE(chunk->buttonSymbols(), QAbstractSpinBox::NoButtons);
@@ -2656,6 +2802,8 @@ private slots:
         QVERIFY(!stats->text().contains(QStringLiteral("B/s")));
         tabs->setCurrentIndex(2);
         QTest::qWait(30);
+        QCOMPARE(panel->height(), paneH);
+        QCOMPARE(panel->preferredHeight(), preferred);
         auto *receiveMode = window.findChild<QComboBox *>(QStringLiteral("fileReceiveMode"));
         auto *receivePath = window.findChild<QLineEdit *>(QStringLiteral("fileReceivePath"));
         QVERIFY(receiveMode && receivePath && receivePath->isVisibleTo(&window));
@@ -2698,9 +2846,7 @@ private slots:
         tabs->setCurrentIndex(0);
     }
 
-    // 发送区四个按钮（目标 A/B/AB + 发送）宽度必须取齐，且都不能把文字截断（用户反馈）：
-    // 并排按钮一长一短很难看，"发送"被压到只剩两个字更糟。这里量实际几何而不是读
-    // minimumWidth——布局是否真的按最小宽度铺开，只有几何说了算。
+    // 目标 A、B 宽度取齐且不截断文字；发送按钮比它们更宽更高，文字同样不被截断。
     void sendActionButtonsShareOneWidth()
     {
         clearEndpointDrafts();
@@ -2710,15 +2856,15 @@ private slots:
         window.show();
         QTest::qWait(30);
 
-        const QList<QPushButton *> row{window.findChild<QPushButton *>("sendTargetA"),
-                                       window.findChild<QPushButton *>("sendTargetB"),
-                                       window.findChild<QPushButton *>("sendTargetAB"),
-                                       window.findChild<QPushButton *>("PrimaryButton")};
-        int width = -1;
-        for (auto *button : row) {
-            QVERIFY2(button && button->isVisibleTo(&window), "发送区按钮缺失");
-            if (width < 0) width = button->width();
-            QCOMPARE(button->width(), width);
+        QVERIFY(!window.findChild<QPushButton *>("sendTargetAB"));
+        auto *targetA = window.findChild<QPushButton *>("sendTargetA");
+        auto *targetB = window.findChild<QPushButton *>("sendTargetB");
+        auto *send = window.findChild<QPushButton *>("PrimaryButton");
+        QVERIFY2(targetA && targetB && send && targetA->isVisibleTo(&window)
+                     && targetB->isVisibleTo(&window) && send->isVisibleTo(&window),
+                 "发送区按钮缺失");
+        QCOMPARE(targetA->width(), targetB->width());
+        for (auto *button : {targetA, targetB, send}) {
             // 宽度必须撑得下完整文字：QPushButton 放不下会在文字中间插省略号，
             // 用 sizeHint()（含图标/内边距的完整需求）当判据。
             QVERIFY2(button->width() >= button->sizeHint().width(),
@@ -2727,11 +2873,25 @@ private slots:
                                .arg(button->sizeHint().width())
                                .arg(button->width())));
         }
-        // 正文必须够高：五行才能把常见的中等长度指令（带空格的 HEX）完整摆在眼前。
+        QCOMPARE(send->height(), targetA->height());
+        QCOMPARE(targetA->height(), targetB->height());
+        auto *tabs = window.findChild<QTabWidget *>(QStringLiteral("sendModeTabs"));
+        QVERIFY(tabs);
+        QCOMPARE(tabs->count(), 3);
+        for (int i = 0; i < tabs->count(); ++i)
+            QVERIFY2(!tabs->tabIcon(i).isNull(), qPrintable(tabs->tabText(i)));
+        QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("fileTransferBrowse"))->icon().isNull());
+        QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("fileReceiveBrowse"))->icon().isNull());
+        QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("fileTransferStart"))->icon().isNull());
+        QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("fileReceiveStart"))->icon().isNull());
+        QVERIFY2(send->width() > targetA->width(),
+            qPrintable(QStringLiteral("发送按钮应比目标开关更宽：发送 %1，目标 %2")
+                           .arg(send->width()).arg(targetA->width())));
+        // 正文跟着文件页一起自适应，至少留得下一行，不能被压成一条缝。
         auto *editor = window.findChild<QPlainTextEdit *>("sendEditor");
         QVERIFY(editor);
         const int lineSpacing = editor->fontMetrics().lineSpacing();
-        QVERIFY2(editor->height() >= lineSpacing * 4,
+        QVERIFY2(editor->height() >= lineSpacing * 2,
             qPrintable(QStringLiteral("正文只有 %1 行").arg(editor->height() / qMax(1, lineSpacing))));
     }
 
@@ -2758,19 +2918,23 @@ private slots:
         auto *send = window.findChild<QPushButton *>(QStringLiteral("PrimaryButton"));
         auto *editor = window.findChild<QPlainTextEdit *>(QStringLiteral("sendEditor"));
         auto *model = window.findChild<TrafficModel *>();
+        auto *panel = window.findChild<SendPanel *>();
+        auto *targetA = window.findChild<QPushButton *>(QStringLiteral("sendTargetA"));
         auto *targetB = window.findChild<QPushButton *>(QStringLiteral("sendTargetB"));
         auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
         auto *repeat = window.findChild<QCheckBox *>(QStringLiteral("repeatSending"));
-        QVERIFY(send && editor && model && targetB && b && repeat);
+        QVERIFY(send && editor && model && panel && targetA && targetB && b && repeat);
 
         // 没有端点连上时按钮必须是禁用的——"可用性"是双向契约，
         // 修 bug 时很容易顺手改成无条件启用，那等于把"能不能发"变成"点了才知道"。
         QVERIFY2(!send->isEnabled(), "未连接端点时发送按钮不该可用");
 
-        // 目标是"发送区选中的那个口"。默认是 A（串口），这里切到 B（TCP 服务器，
-        // 不需要真实硬件），顺带验证目标切换会刷新可用性。
-        targetB->click();
-        QVERIFY(targetB->isChecked());
+        // 目标是发送区当前选中的端点。默认只勾着 A（串口）。这里改成只勾 B
+        //（TCP 服务器，不需要真实硬件），顺带验证目标切换会刷新可用性。
+        if (!targetB->isChecked()) targetB->click();
+        if (targetA->isChecked()) targetA->click();
+        QVERIFY(!targetA->isChecked() && targetB->isChecked());
+        QCOMPARE(panel->targetMask(), 2);
 
         // 打开 B：走端点动作按钮，与用户操作同一条路 → runtime 监听 → 状态回传。
         auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
@@ -2801,6 +2965,24 @@ private slots:
         QCOMPARE(sent.source.endpointIndex, 1);       // 发去了选中的 B，不是默认的 A
         QCOMPARE(sent.origin, Traffic::Origin::Manual); // 手点 = 手动
         QCOMPARE(sent.raw, QByteArray("+CR,GO;\r\n")); // 末尾真的追加在字节末尾
+
+        // 两个都选中：同一拍发到 A 和 B。A 没打开，也要留下一条失败记录。
+        targetA->click();
+        QCOMPARE(panel->targetMask(), 3);
+        const int rowsBeforeBoth = model->rowCount();
+        send->click();
+        QTRY_VERIFY(model->rowCount() >= rowsBeforeBoth + 2);
+        bool sawA = false;
+        bool sawB = false;
+        for (int row = rowsBeforeBoth; row < model->rowCount(); ++row) {
+            const auto record = model->record(row);
+            if (record.direction != Traffic::Direction::Transmit) continue;
+            if (record.source.endpointIndex == 0) sawA = true;
+            if (record.source.endpointIndex == 1) sawB = true;
+        }
+        QVERIFY2(sawA && sawB, "两个都选中时应同时发到 A 和 B");
+        targetA->click();
+        QCOMPARE(panel->targetMask(), 2);
 
         // 定时发送：勾选即发第一拍，且**来源标记必须是 Scheduled**。
         // 这个参数以前在 sendRequested 的 lambda 里被丢掉了（形参只声明了两个），
@@ -3204,7 +3386,7 @@ private slots:
         QVERIFY(bridge->toolTip().contains(QStringLiteral("B · TCP 服务器")));
         bridge->click();
         QCOMPARE(bridge->text(), QStringLiteral("停止桥接"));
-        QCOMPARE(window.findChild<QLabel *>("RouteStatus")->text(), QStringLiteral("桥接  已建立 · 预览"));
+        QCOMPARE(window.findChild<QLabel *>("RouteStatus")->text(), QStringLiteral("已建立 · 预览"));
         QVERIFY(!direction->isEnabled());
         bridge->click();
         QCOMPARE(bridge->text(), QStringLiteral("建立桥接"));
@@ -3361,7 +3543,7 @@ private slots:
         QVERIFY(defaults.isValid());
         QCOMPARE(defaults.mode, Framing::Passthrough); // 默认仅兜底输出，不改逐包语义
         QCOMPARE(defaults.idleTimeoutMs, 10);
-        QCOMPARE(defaults.bufferThresholdBytes, 300);
+        QCOMPARE(defaults.bufferThresholdBytes, 2048);
         QVERIFY(!defaults.includeDelimiter);           // 结束符默认剥离
         QVERIFY(defaults.includeLengthPrefix);         // 长度前缀默认保留帧头
 
@@ -3989,7 +4171,7 @@ private slots:
         auto *pinAgain = again.findChild<QToolButton *>(QStringLiteral("stayOnTop"));
         QVERIFY(pinAgain && pinAgain->isChecked());
         QVERIFY(again.windowFlags().testFlag(Qt::WindowStaysOnTopHint));
-        // 默认尺寸是 1440×920，且不再有 900×720 的下限；恢复后必须贴近"上次"，
+        // 默认尺寸是 1280×860，且不再有 900×720 的下限；恢复后必须贴近"上次"，
         // 而不是退回默认——这是本用例要守的东西。
         //
         // 容差不一致是**故意的**：宽度逐像素（实测只差 2px），高度给 ±32。
@@ -3997,7 +4179,7 @@ private slots:
         // 算作 0，restoreGeometry 恢复时却按"有标题栏"折算，于是客户区差出约 26px
         //（实测 800 → 774，正是标题栏那一段）。这是测试环境的固有换算差异，不是功能缺陷
         // ——同一份几何用 saveGeometry 再存一遍，只有 1px 出入（1222/798 vs 1223/799）。
-        // 默认值 920 与 774 差 146，这个容差不会把"根本没恢复"放过去。
+        // 默认高度 860 与恢复后的 774 差 86，大于 ±32，这个容差不会把"根本没恢复"放过去。
         QVERIFY2(qAbs(again.width() - savedWidth) <= 4,
             qPrintable(QStringLiteral("窗口宽度应恢复到上次：实际 %1，上次 %2")
                            .arg(again.width()).arg(savedWidth)));
@@ -4028,12 +4210,18 @@ private slots:
         QVERIFY2(interval->isEnabled(),
             "未勾选定时发送时间隔框也必须可输入（用户钦定：方便先设好再勾）");
         // 只收数字：它是 QSpinBox，非数字键会被自带校验器挡掉。
-        // （键盘事件直接发给 spinbox —— 它内部的 lineEdit 是 protected，测试拿不到。）
+        // 单位是框内后缀，不进入数值。（键盘事件直接发给 spinbox
+        // —— 它内部的 lineEdit 是 protected，测试拿不到。）
+        QCOMPARE(interval->suffix(), QStringLiteral(" ms"));
         interval->clear();
         QTest::keyClicks(interval, QStringLiteral("abc"));
-        for (const QChar &ch : interval->text()) {
+        QString numeric = interval->text();
+        if (numeric.endsWith(interval->suffix()))
+            numeric.chop(interval->suffix().size());
+        numeric = numeric.trimmed();
+        for (const QChar &ch : numeric) {
             QVERIFY2(ch.isDigit(),
-                qPrintable(QStringLiteral("间隔框只应含数字，实际是「%1」").arg(interval->text())));
+                qPrintable(QStringLiteral("间隔框数值只应含数字，实际是「%1」").arg(interval->text())));
         }
         interval->clear();
         QTest::keyClicks(interval, QStringLiteral("250"));
@@ -4547,6 +4735,12 @@ private slots:
         auto *keepBoundary = selector->findChild<QCheckBox *>(QStringLiteral("framingKeepBoundary"));
         auto *logHints = selector->findChild<QCheckBox *>(QStringLiteral("framingLogHints"));
         QVERIFY(mode && delimiter && idle && threshold && keepBoundary && logHints);
+        QCOMPARE(threshold->minimum(), 16);
+        QCOMPARE(threshold->maximum(), 65536);
+        QCOMPARE(threshold->value(), 2048);
+        QCOMPARE(selector->draft().framing.bufferThresholdBytes, 2048);
+        QCOMPARE(selector->findChild<QLabel *>(QStringLiteral("framingThresholdUnit"))->text(),
+                 QStringLiteral("字节"));
         // 组帧设置收成一行：开关、判定、兜底参数共用同一个父控件。
         auto *framingControls = selector->findChild<QWidget *>(QStringLiteral("framingControls"));
         QVERIFY(framingControls);
@@ -4555,7 +4749,7 @@ private slots:
         QCOMPARE(threshold->parentWidget(), framingControls);
         QCOMPARE(logHints->parentWidget(), framingControls);
         QCOMPARE(keepBoundary->parentWidget(), framingControls);
-        // 标签与输入框同一字号。Muted 是 12px，组帧行不能再用它。
+        // 标签与输入框同一字号。Muted 是 11px，组帧行不能再用它。
         QFile framingStyle(QStringLiteral(":/styles/workbench.qss"));
         QVERIFY(framingStyle.open(QIODevice::ReadOnly));
         const QString previousFramingStyle = qApp->styleSheet();

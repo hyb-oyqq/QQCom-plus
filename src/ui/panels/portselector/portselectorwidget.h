@@ -72,8 +72,7 @@ private:
     QSpinBox *m_framingThreshold = nullptr;
     QCheckBox *m_framingKeepBoundary = nullptr;
     QCheckBox *m_framingLogHints = nullptr;
-    QLabel *m_framingMechanismTitle = nullptr;
-    QLabel *m_framingHint = nullptr; // 组帧模式的白话说明（跟随模式切换）
+    QLabel *m_framingHint = nullptr; // 当前组帧方式的一行说明
     ReceiveFraming::Mode m_framingRememberedMode = ReceiveFraming::IdleTimeout;
     PortDraft m_draft;
     bool m_loading = false;

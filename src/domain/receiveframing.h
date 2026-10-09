@@ -26,8 +26,8 @@ struct ReceiveFraming
 
     Mode mode = Passthrough;
     QByteArray delimiter;           // mode == Delimiter 时的结束符字节序列
-    int idleTimeoutMs = 10;         // 空闲输出超时：超过该时长无新数据即输出缓冲
-    int bufferThresholdBytes = 300; // 缓冲输出阈值：缓冲达到该字节数即强制输出
+    int idleTimeoutMs = 10;                  // 空闲超时：超过该时长无新数据即输出缓冲
+    int bufferThresholdBytes = 2048;  // 缓冲阈值，字节。达到后提前输出
     // 以下两项对齐参考实现：帧内容是否携带定界结构本身。
     // Delimiter 拆分默认剥离结束符（协议帧通常不含定界符）；
     // 长度前缀默认保留帧头（下游解析器常需要它定位 payload）。

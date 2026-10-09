@@ -14,12 +14,15 @@ class EndpointRuntime;
 class FileTransferWidget;
 class QPushButton;
 class QResizeEvent;
+class QShowEvent;
 class QSpinBox;
 class QTabWidget;
 class QTimer;
 
-// 单个发送区：目标用 A/B/AB 三选一的可勾选按钮表达（与数据显示区端点开关同款样式），
-// 正文固定约三行，格式/末尾贴在正文下方。格式列表与数据显示区共用 PayloadCodec。
+// 单个发送区：目标是 A、B 两个可同时选中的开关，都选中就发到两端。
+// 正文高度跟文件收发页对齐，三页一样高，切换标签时发送区不再跳。
+// 格式、末尾、定时、目标、发送收在右侧：三行同高、行距相等，
+// 首行贴着正文上沿，末行与字节预览同一高度。格式列表与数据显示区共用 PayloadCodec。
 // 发送内容经 PayloadCodec 严格解析后整体发出；目标端点的连接状态由组合根注入。
 class SendPanel : public QWidget
 {
@@ -34,7 +37,7 @@ public:
     void setPreferences(PreferencesStore *store);
     void setRuntime(EndpointRuntime *runtime);
     void handleRawDataReceived(int index, const Traffic::Source &source, const QByteArray &payload);
-    // 当前标签页内容撑开所需的高度。文件页比手动发送高，分栏按当前页重新分配。
+    // 三个标签页里最高的那一页。高度不跟当前页走，切换时分栏不用重分配。
     int preferredHeight() const;
 
     // 发送目标的**唯一来源**：位 1 = A，位 2 = B（都选中 = 3）。
@@ -61,20 +64,22 @@ private:
     void updatePreview();
     void updateTargets();
     void updateSendAvailability();
-    // 目标 A/B/AB 与「发送」四个按钮取同一个宽度（跟随其中 sizeHint 最宽者）。
-    // 不写死像素：字体/DPI/翻译变化时重算即可自动跟随（见 buttonmetrics.h）。
+    // 目标 A、B 同宽。格式、末尾、间隔、A、B、发送共用一个高度；
+    // 发送按钮只在宽度上伸展，不再单独加高。
     void unifyActionWidths();
+    // 手动发送页的正文跟着文件页的 sizeHint 长高或缩短，三页一样高。
+    void syncManualToFilePages();
     void issueSend(bool scheduled = false);
     void loadPreferences();
     void savePreferences();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 
     QList<PortDraft> m_ports;
     QPushButton *m_targetA;
     QPushButton *m_targetB;
-    QPushButton *m_targetBoth;
     QComboBox *m_format;
     QComboBox *m_suffix;
     QPlainTextEdit *m_editor;
@@ -94,6 +99,8 @@ protected:
     QByteArray m_payloadBytes;
     PreferencesStore *m_preferences = nullptr;
     bool m_loading = false; // 加载偏好期间联动触发的保存要抑制，与 TrafficPanel 同一模式
+    bool m_syncingHeight = false;
+    int m_appliedHeight = 0;
 };
 
 #endif

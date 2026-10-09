@@ -7,6 +7,7 @@
 #include "transport/transporttypes.h"
 
 class QEvent;
+class QFrame;
 class QLabel;
 class QHideEvent;
 class QResizeEvent;
@@ -45,6 +46,16 @@ public:
     // 压测探针对账用的会话累计值：接收记录条数（含示例）与 RX 原始字节数。
     quint64 sessionRecordCount() const;
     qint64 sessionRxBytes() const;
+    // 状态栏里的临时提示：单独占一格，到时清空。不覆盖 A/B 连接状态，也不动统计。
+    // 空文本会把这一格藏起来。
+    //
+    // 不要改用 QStatusBar::showMessage()：它会把所有 addWidget() 挂上的普通部件一并隐藏
+    // （permanent widget 才不受影响）。整条状态栏都是 addWidget，一条临时消息就会让
+    // RX/TX/条数/桥接整行消失，反复出错时计时器一直被重置，看起来像统计数据丢了。
+    void showStatusNote(const QString &text, int ms);
+
+signals:
+    void updateCheckRequested();
 
 protected:
     // 轮询只在窗口真实显示时运行；离屏实例（快照、自动化测试）不扫描硬件。
@@ -82,15 +93,6 @@ private:
     // 由 showEvent / resizeEvent / splitterMoved / 切换前一刻共同维护。
     void recordExpandedGeometry();
     void updateRateLabels();
-    // 状态栏右端的**临时提示**：借用 m_statusNote 这一格显示一段短消息，到时自动
-    // 恢复成"A 已连接 · B 未连接"的汇总。
-    //
-    // 为什么不用 QStatusBar::showMessage()：它会把所有 `addWidget()` 加的**普通**部件
-    // 一并隐藏（Qt 的既定语义，permanent widget 才不受影响）。而统计行正是用 addWidget
-    // 挂上去的，于是任何一条临时消息一出现，RX/TX/条数/桥接整行就消失，5 秒后才回来；
-    // 反复连接时每次都重置那个 5 秒计时器，看起来就是"统计数据不显示了，很久才恢复"
-    // （用户反馈）。提示与统计各有各的位置，不该互相顶掉。
-    void showStatusNote(const QString &text, int ms);
     void handleCommandSend(const CommandItem &command);
 
     Ui::MainWindow *ui;
@@ -149,8 +151,13 @@ private:
     QTimer *m_statusNoteTimer = nullptr;
     QLabel *m_rxStatus = nullptr;
     QLabel *m_txStatus = nullptr;
+    QLabel *m_rxRate = nullptr;
+    QLabel *m_txRate = nullptr;
     QLabel *m_trafficStatus = nullptr; // 监视区会话累计条数（面板经 summaryChanged 上报）
     QLabel *m_statusNote = nullptr;
+    // A/B 连接状态各一块：圆点表示通断，文字是状态。临时提示不再借用这一格。
+    QLabel *m_endpointState[2] = {nullptr, nullptr};
+    QFrame *m_endpointDot[2] = {nullptr, nullptr};
     QToolButton *m_stayOnTop = nullptr;
 };
 #endif // MAINWINDOW_H

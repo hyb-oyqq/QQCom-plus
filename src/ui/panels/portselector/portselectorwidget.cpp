@@ -30,14 +30,11 @@
 
 namespace {
 
-// The advanced toggle is icon-only, so the glyph has to carry the whole affordance. 20px is
-// the tallest glyph that still fits the row: with the button's own 4px padding that makes the
-// toggle 28px high, exactly the height of the connect/listen button beside it, and the icon
-// fills the button's whole content box.
-constexpr int AdvancedIconSize = 20;
+// 高级开关只有图标。16px 字形加上 1px 内边距，高度与旁边的连接按钮对齐。
+constexpr int AdvancedIconSize = 16;
 
 // Action buttons keep their text; the status glyph rides beside it at the usual icon size.
-constexpr int ActionIconSize = 16;
+constexpr int ActionIconSize = 14;
 
 class BaudRateValidator final : public QValidator
 {
@@ -129,16 +126,16 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     // **左右 6 + 左列那层的 6 = 12**，与监视区/发送区卡片内容的缩进对齐
     //（卡片 = 左列 6 + 卡片内边距 6）。原来这里是 12、且左列没有边距，
     // 于是端口条底色比卡片外框多探出 6px（用户反馈"端口选择区与数据显示区没有对齐"）。
-    layout->setContentsMargins(6, 5, 6, 5);
-    layout->setSpacing(4);
+    layout->setContentsMargins(6, 2, 6, 2);
+    layout->setSpacing(2);
 
     // Main row: every parameter needed to connect stays on one line, no selection step.
     auto *row = new QHBoxLayout;
-    row->setSpacing(7);
+    row->setSpacing(5);
     m_badge = new QLabel;
     m_badge->setObjectName("EndpointBadge");
     m_badge->setAlignment(Qt::AlignCenter);
-    m_badge->setFixedSize(24, 24);
+    m_badge->setFixedSize(20, 20);
     row->addWidget(m_badge);
 
     m_type = new QComboBox;
@@ -294,8 +291,8 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     m_advancedPanel->setObjectName("advancedPanel");
     // 纵向：上排是各类型专属参数，下排是与类型无关的接收组帧。
     auto *advancedLayout = new QVBoxLayout(m_advancedPanel);
-    advancedLayout->setContentsMargins(34, 0, 0, 2);
-    advancedLayout->setSpacing(4);
+    advancedLayout->setContentsMargins(28, 0, 0, 2);
+    advancedLayout->setSpacing(2);
     m_advancedPages = new QStackedWidget;
     advancedLayout->addWidget(m_advancedPages);
 
@@ -641,38 +638,38 @@ QWidget *PortSelectorWidget::buildFramingRow()
     auto *row = new QWidget;
     row->setObjectName(QStringLiteral("framingPanel"));
     auto *column = new QVBoxLayout(row);
-    column->setContentsMargins(0, 5, 0, 2);
+    column->setContentsMargins(0, 2, 0, 2);
     column->setSpacing(2);
 
-    // 开关、完整帧判定和两个兜底参数收成一行。标签不用 Muted：那条规则是 12px，
-    // 输入框继承正文 13px，并排会看成字号不齐。说明文字留在下一行。
+    // 开关、组帧方式和两个兜底参数收成一行。标签不用 Muted：那条规则是 11px，
+    // 输入框继承正文 12px，并排会看成字号不齐。说明文字留在下一行。
     auto *controls = new QWidget(row);
     controls->setObjectName(QStringLiteral("framingControls"));
     auto *controlsLayout = new QHBoxLayout(controls);
     controlsLayout->setContentsMargins(0, 0, 0, 0);
     controlsLayout->setSpacing(6);
 
-    m_framingEnabled = new QCheckBox(tr("启用接收组帧"));
+    m_framingEnabled = new QCheckBox(tr("接收组帧"));
     m_framingEnabled->setObjectName(QStringLiteral("framingEnabled"));
-    m_framingEnabled->setToolTip(tr("启用后，串口和 TCP 字节流会按下面的完整帧判定规则组帧；UDP 数据报自带边界，不经过组帧。"));
+    m_framingEnabled->setToolTip(tr("串口和 TCP 按组帧方式切分。UDP 数据报自带边界，不经过组帧。"));
     controlsLayout->addWidget(m_framingEnabled);
-    m_framingLogHints = new QCheckBox(tr("记录组帧提示日志"));
+    m_framingLogHints = new QCheckBox(tr("提示日志"));
     m_framingLogHints->setObjectName(QStringLiteral("framingLogHints"));
-    m_framingLogHints->setToolTip(tr("兜底输出（空闲超时、缓冲阈值、关闭收尾）时向监视区发一条提示事件"));
+    m_framingLogHints->setToolTip(tr("空闲超时、达到缓冲阈值或关闭时，向监视区记一条原因"));
     controlsLayout->addWidget(m_framingLogHints);
     controlsLayout->addSpacing(8);
 
-    auto *label = new QLabel(tr("完整帧判定"));
+    auto *label = new QLabel(tr("组帧方式"));
     label->setObjectName(QStringLiteral("framingModeLabel"));
     controlsLayout->addWidget(label);
 
     m_framingMode = new QComboBox;
     m_framingMode->setObjectName(QStringLiteral("framingMode"));
     m_framingMode->addItem(tr("不拆分"), int(ReceiveFraming::Passthrough));
-    m_framingMode->addItem(tr("按空闲超时拆分"), int(ReceiveFraming::IdleTimeout));
-    m_framingMode->addItem(tr("按结束符拆分"), int(ReceiveFraming::Delimiter));
-    m_framingMode->addItem(tr("按长度前缀拆分"), int(ReceiveFraming::LengthPrefixU16LE));
-    m_framingMode->setToolTip(tr("决定字节流怎样切分成一条条记录；UDP 数据报自带边界，不经过组帧。"));
+    m_framingMode->addItem(tr("空闲超时"), int(ReceiveFraming::IdleTimeout));
+    m_framingMode->addItem(tr("结束符"), int(ReceiveFraming::Delimiter));
+    m_framingMode->addItem(tr("长度前缀"), int(ReceiveFraming::LengthPrefixU16LE));
+    m_framingMode->setToolTip(tr("字节流如何切成一条记录"));
     // 非编辑型下拉框一律按内容定宽（AdjustToContents+Fixed），否则 QSS 的箭头内边距
     // 会把最宽项截掉——tests/ui 的 portControlsShowTheirOwnContent 就是这条底线。
     fitComboToItems(m_framingMode);
@@ -697,7 +694,7 @@ QWidget *PortSelectorWidget::buildFramingRow()
     auto numericLocale = QLocale::c();
     numericLocale.setNumberOptions(QLocale::RejectGroupSeparator);
 
-    m_framingIdleLabel = new QLabel(tr("空闲输出超时"));
+    m_framingIdleLabel = new QLabel(tr("空闲超时"));
     m_framingIdleLabel->setObjectName(QStringLiteral("framingIdleLabel"));
     controlsLayout->addWidget(m_framingIdleLabel);
     m_framingIdle = new PortSpinBox;
@@ -706,15 +703,15 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingIdle->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_framingIdle->setLocale(numericLocale);
     m_framingIdle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    m_framingIdle->setToolTip(tr("超过该时长没有新数据，就把已缓冲的字节作为一条输出"));
+    m_framingIdle->setToolTip(tr("连续无新数据达到该时间后输出已缓冲字节"));
     controlsLayout->addWidget(m_framingIdle);
-    // 单位在框外：输入框只放数字。字号与数字相同，不再用次要文字的 12px。
+    // 单位在框外：输入框只放数字。字号与数字相同，不再用次要文字的 11px。
     m_framingIdleUnit = new QLabel(tr("ms"));
     m_framingIdleUnit->setObjectName(QStringLiteral("framingIdleUnit"));
     controlsLayout->addWidget(m_framingIdleUnit);
     controlsLayout->addSpacing(8);
 
-    m_framingThresholdLabel = new QLabel(tr("缓冲输出阈值"));
+    m_framingThresholdLabel = new QLabel(tr("缓冲阈值"));
     m_framingThresholdLabel->setObjectName(QStringLiteral("framingThresholdLabel"));
     controlsLayout->addWidget(m_framingThresholdLabel);
     m_framingThreshold = new PortSpinBox;
@@ -723,7 +720,7 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingThreshold->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_framingThreshold->setLocale(numericLocale);
     m_framingThreshold->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    m_framingThreshold->setToolTip(tr("缓冲达到该字节数即强制输出，避免无定界的数据一直滞留"));
+    m_framingThreshold->setToolTip(tr("达到该字节数即输出，避免数据滞留"));
     controlsLayout->addWidget(m_framingThreshold);
     m_framingThresholdUnit = new QLabel(tr("字节"));
     m_framingThresholdUnit->setObjectName(QStringLiteral("framingThresholdUnit"));
@@ -731,15 +728,10 @@ QWidget *PortSelectorWidget::buildFramingRow()
     controlsLayout->addStretch();
     column->addWidget(controls);
 
-    // 说明区对应参考图的“工作机制”。模式切换后只更新说明，不改变已经保存的字段含义。
-    // 标题加粗但不再单独缩小字号，和上面这一行保持同一套正文大小。
-    m_framingMechanismTitle = new QLabel(tr("工作机制"));
-    m_framingMechanismTitle->setObjectName(QStringLiteral("framingMechanismTitle"));
-    column->addWidget(m_framingMechanismTitle);
+    // 一行说明跟着方式变。不再单列“工作机制”标题，标题和说明说的是同一件事。
     m_framingHint = new QLabel;
     m_framingHint->setObjectName(QStringLiteral("framingHint"));
     m_framingHint->setWordWrap(true);
-    m_framingHint->setIndent(8);
     column->addWidget(m_framingHint);
 
     const auto changed = [this] { notifyChange(); };
@@ -786,8 +778,8 @@ void PortSelectorWidget::syncFramingControls()
     const bool splitting = enabled && (idleTimeout || delimiter || length); // 只有组帧模式才缓冲
     m_framingMode->setEnabled(enabled);
     m_framingMode->setToolTip(enabled
-        ? tr("选择字节流如何组成完整帧")
-        : tr("接收组帧未启用；收到的数据将原样输出"));
+        ? tr("字节流如何切成一条记录")
+        : tr("未启用，收到的数据原样输出"));
     m_framingDelimiter->setVisible(enabled && delimiter);
     // 同一个开关在两种模式下语义不同：结束符模式下是"保留结束符"，
     // 长度前缀模式下是"保留长度帧头"。
@@ -805,20 +797,17 @@ void PortSelectorWidget::syncFramingControls()
 
     QString hint;
     if (!enabled)
-        hint = tr("未启用接收组帧：收到的数据原样作为一条输出，不做缓冲或拆分。启用后可按结束符、长度前缀或空闲超时组帧。 ");
+        hint = tr("收到即输出，不缓冲。启用后按结束符、长度前缀或空闲超时组帧。");
     else if (idleTimeout)
-        hint = tr("每次收到数据后，连续空闲达到“空闲超时”就输出当前缓冲；缓冲达到“缓冲阈值”时提前输出，防止数据滞留。\n"
-                  "关闭端口时，缓冲区中的最后数据也会输出。 ");
+        hint = tr("空闲超时后输出当前缓冲；达到缓冲阈值时提前输出。关闭端口时输出剩余数据。");
     else if (delimiter)
-        hint = tr("每遇到结束符就切出一条完整帧；结束符之后的剩余字节继续缓冲，等待下一帧。");
+        hint = tr("遇到结束符即输出一帧，其后字节继续缓冲。");
     else if (length)
-        hint = tr("帧头 2 字节（小端）表示其后数据的字节数，凑满即输出一条完整帧。");
+        hint = tr("前 2 字节（小端）表示后续长度，凑满即输出。");
     else
-        hint = tr("收到的数据原样作为一条输出（可能一次收到半帧或多帧），不拆分也不缓冲；"
-                  "适合协议自带边界、或不需要按帧查看的场景。");
+        hint = tr("收到即输出，不缓冲。");
     if (splitting && !idleTimeout)
-        hint += tr(" 兜底：最近一次收到数据后连续空闲达到“空闲超时”、或缓冲达到“缓冲阈值”时，即使还没等到定界也会把已有字节输出，"
-                   "保证数据不会一直滞留在缓冲里。");
+        hint += tr(" 未形成完整帧时，按空闲超时或缓冲阈值输出。");
     m_framingHint->setText(hint);
 }
 

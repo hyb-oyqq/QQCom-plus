@@ -39,6 +39,10 @@ namespace StyleDialogs
     QString getSaveFileName(QWidget *parent, const QString &caption,
                             const QString &dir = QString(),
                             const QString &filter = QString());
+
+    // 选择已有目录
+    QString getExistingDirectory(QWidget *parent, const QString &caption,
+                                 const QString &dir = QString());
 }
 
 #endif // STYLEDIALOGS_H

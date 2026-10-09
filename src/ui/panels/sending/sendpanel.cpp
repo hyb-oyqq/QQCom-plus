@@ -2,25 +2,45 @@
 #include "filetransferwidget.h"
 #include "app/endpointruntime.h"
 #include "ui/common/buttonmetrics.h"
+#include "ui/common/combometrics.h"
 #include "ui/common/payloadcodec.h"
+#include "ui/common/tintedicon.h"
 #include "persistence/preferencesstore.h"
 
-#include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QGridLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QShowEvent>
+#include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStringList>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
 
-// 标签页的 sizeHint 跟当前页走。QTabWidget 默认按最高的那一页占位，
-// 文件页会把手动发送下面撑出一块空白，数据显示区就被永久挤掉。
+// 页签、发送按钮与文件页动作共用这一档，和监视区顶栏的 14px 字形对齐。
+constexpr int GlyphSize = 14;
+
+// 三页共用一个高度，取内容最高的那一页。跟当前页走的话，手动发送和文件页
+// 差出一两行，切换标签时分隔条就会跳。
+int tallestPageHeight(const QTabWidget *tabs)
+{
+    int page = 0;
+    if (!tabs) return 0;
+    for (int i = 0; i < tabs->count(); ++i) {
+        const QWidget *widget = tabs->widget(i);
+        if (!widget) continue;
+        page = qMax(page, qMax(widget->sizeHint().height(), widget->minimumSizeHint().height()));
+    }
+    return page;
+}
+
 class ModeTabs final : public QTabWidget
 {
 public:
@@ -28,11 +48,14 @@ public:
 
     QSize sizeHint() const override
     {
-        const QWidget *page = currentWidget();
-        QSize hint = page ? page->sizeHint() : QSize();
-        if (page) hint = hint.expandedTo(page->minimumSizeHint());
+        const int page = tallestPageHeight(this);
+        int width = 0;
+        for (int i = 0; i < count(); ++i) {
+            if (const QWidget *widget = this->widget(i))
+                width = qMax(width, qMax(widget->sizeHint().width(), widget->minimumSizeHint().width()));
+        }
         const int bar = tabBar() ? tabBar()->sizeHint().height() : 0;
-        return QSize(qMax(hint.width(), 0), hint.height() + bar + 4);
+        return QSize(width, page + bar + 4);
     }
 
     QSize minimumSizeHint() const override { return sizeHint(); }
@@ -53,8 +76,8 @@ constexpr int EditorDocumentMarginPx = 2;
 // 是同一类做法。取一个浅底与深底上都读得清的中性蓝。
 constexpr const char *ByteCountColor = "#2563eb";
 
-// 正文行数（用户钦定）：四行足够看清常见指令（例如 AA 06 05 01 02 B2 这类带空格的 HEX），
-// 五行会让发送区白白高出一行——那行高度从数据显示区借，不值得。
+// 构造期先按四行占位。QPlainTextEdit 的默认 sizeHint 会把窗口撑得很高，
+// 真正的高度在 syncManualToFilePages() 里跟文件页对齐。
 constexpr int EditorVisibleLines = 4;
 
 } // namespace
@@ -65,32 +88,25 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     setObjectName("Surface");
     // 主布局是**左右两栏**（用户钦定："发送按钮放到发送框的右边，定时发送、编码选择也集成到右边"）：
     // 正文在左，编码 / 定时 / 目标 / 发送收进右侧一列。
-    // 原来三行纵向铺开（正文 → 格式+末尾+预览 → 定时+目标+发送）要约 200px 高，
-    // 而同样的控件并进右侧三行就装下了——省下的纵向空间全部归数据显示区。
+    // 右列三行同高、左右缘对齐、行距相等，末行与预览齐平。
     auto *root = new QVBoxLayout(this);
     // **左右必须是 6**：数据区外边距 6 + 这里 6 = 12，与端口条内容、监视区内容的
-    // 左缩进对齐（用户反馈"边框距离内部元素没有对齐"）。上下 8：发送区是自适应的
-    // 卡片，贴着内容收紧即可，不必再留原来的 10。
-    root->setContentsMargins(6, 8, 6, 8);
-    root->setSpacing(6);
+    // 左缩进对齐（用户反馈"边框距离内部元素没有对齐"）。上下 4：发送区贴着内容收紧。
+    root->setContentsMargins(6, 4, 6, 4);
+    root->setSpacing(4);
 
-    // 目标：A / B / AB 三选一，沿用数据显示区端点开关那套可勾选按钮（QPushButton:checked 样式）。
-    // 用互斥按钮组而不是独立开关：发送必须有一个目标，不留“都不选”的空状态。
-    // 按钮本身放在动作行的发送按钮旁边，顶部不再单占一行，正文因此更高。
+    // 目标：A、B 两个独立开关。只选 A 发给 A，只选 B 发给 B，两个都选中就都发。
+    // 不再单设 AB：那一档和“两个都选中”是同一件事。
+    // 至少留一个选中，不出现“点了发送却没有目标”的空状态。
     m_targetA = new QPushButton(tr("A"));
     m_targetA->setObjectName("sendTargetA");
-    m_targetA->setToolTip(tr("只发送到端点 A"));
+    m_targetA->setToolTip(tr("发送到端点 A"));
     m_targetB = new QPushButton(tr("B"));
     m_targetB->setObjectName("sendTargetB");
-    m_targetB->setToolTip(tr("只发送到端点 B"));
-    m_targetBoth = new QPushButton(tr("AB"));
-    m_targetBoth->setObjectName("sendTargetAB");
-    m_targetBoth->setToolTip(tr("同时发送到端点 A 和 B"));
-    auto *targetGroup = new QButtonGroup(this);
-    targetGroup->setExclusive(true);
-    for (auto *button : {m_targetA, m_targetB, m_targetBoth}) {
+    m_targetB->setToolTip(tr("发送到端点 B"));
+    for (auto *button : {m_targetA, m_targetB}) {
         button->setCheckable(true);
-        targetGroup->addButton(button);
+        button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     }
     m_targetA->setChecked(true);
 
@@ -106,8 +122,8 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     m_editor->setPlainText(sample);
     m_editor->setStyleSheet(QStringLiteral("QPlainTextEdit { padding: %1px; }").arg(EditorPaddingPx));
     m_editor->document()->setDocumentMargin(EditorDocumentMarginPx);
-    // 正文固定约四行：行高取自等宽字体自身，不写死像素。输入框不再纵向伸展，
-    // 发送区因此贴着内容收紧，纵向空间让给数据显示区（见 MainWindow 的分隔条分配）。
+    // 先按四行占位，布局完成后改成和文件页一样高。输入框不纵向伸展，
+    // 多出来的高度留给数据显示区（见 MainWindow 的分隔条分配）。
     m_editor->setFixedHeight(m_editor->fontMetrics().lineSpacing() * EditorVisibleLines
         + 2 * (EditorPaddingPx + EditorDocumentMarginPx + m_editor->frameWidth()));
 
@@ -136,6 +152,7 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     m_preview->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_preview->setTextFormat(Qt::RichText); // 字节数要着色，见 updatePreview()
     m_preview->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_preview->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
     m_repeat = new QCheckBox(tr("定时发送"));
     m_repeat->setObjectName("repeatSending");
@@ -145,73 +162,83 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     m_interval->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_interval->setRange(10, 3600000);
     m_interval->setValue(1000);
-    // 纯数字输入（用户钦定）：不加 " ms" 后缀——后缀会把框读成"值+单位"的复合体，
-    // 键盘输入时也容易被当成内容的一部分。单位改由 tooltip 交代，数字本身就够读。
-    m_interval->setToolTip(tr("发送间隔（毫秒）"));
+    // 单位在框内（"1000 ms"）。QSpinBox 后缀不进入可编辑区，键盘仍然只收数字。
+    m_interval->setSuffix(QStringLiteral(" ms"));
+    m_interval->setToolTip(tr("发送间隔，单位毫秒"));
     // **始终可输入**（用户钦定）：勾选前就能把间隔设好，勾上即按该值跑。
     // 它是 QSpinBox——非数字键（含粘贴的非法文本）会被它自带的校验器挡掉，不必另做处理。
     m_sendButton = new QPushButton(tr("发送"));
     m_sendButton->setObjectName("PrimaryButton");
+    m_sendButton->setIcon(actionStateIcon(QStringLiteral(":/icons/send.svg"), GlyphSize));
+    m_sendButton->setIconSize(QSize(GlyphSize, GlyphSize));
     m_sendButton->setEnabled(false);
     m_sendButton->setToolTip(tr("端口未连接"));
-    // 目标 A/B/AB 三选一，不再带「目标」二字的小标签（用户钦定）：
-    // 三个端点字母本身已经说清了这一排是什么，标签只是重复占宽。
-    // 目标按钮 trio：三个并排按钮宽度统一（AB 比 A/B 宽，不统一的话中间那个会明显鼓出来）。
-    // 「发送」是主操作，宽度跟着这一排最宽者——既不至于被文字截断，也不会长短参差。
-    // 见 unifyActionWidths()：这里不写死像素，字体/DPI/翻译变化时重算即可。
+    // 主操作靠颜色和字重区分，高度与同排的 A/B、下拉框一致。这里只负责横向伸展。
+    m_sendButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_repeatTimer = new QTimer(this);
 
     // ---- 组装：手动发送、发送文件、接收文件各是一个标签。方向靠选中的标签表达。 ----
 
     auto *manualPage = new QWidget;
     manualPage->setObjectName(QStringLiteral("manualSendPage"));
-    auto *leftColumn = new QVBoxLayout;
-    leftColumn->setSpacing(6);
-    leftColumn->addWidget(m_editor);
-    // 字节数与最终内容预览贴着正文下方：它们回答的是"我到底要发什么"，与正文同属
-    // "内容"一侧。预览文本长度不可控，放进右栏会把那一栏撑得比正文还高。
-    // 预览行现在只有一个标签（字节数与预览已合并，见上），不再需要"摆两个控件再对齐"。
-    auto *previewRow = new QHBoxLayout;
-    previewRow->addWidget(m_preview, 1);
-    leftColumn->addLayout(previewRow);
 
-    // 右栏三行的语义顺序：怎么发（编码/末尾）→ 发几拍（定时/间隔）→ 发给谁（目标 + 发送）。
-    // 行高与左侧四行正文相当，两栏自然齐平，不需要额外撑高。
-    auto *rightColumn = new QVBoxLayout;
-    rightColumn->setSpacing(6);
-
+    // 右栏三行：怎么发（编码/末尾）→ 发几拍（定时/间隔）→ 发给谁（目标 + 发送）。
+    // 两段等比例弹簧把正文高度减去三行之后的空白平分，所以行距相等。
+    // 第一行贴着正文上沿；最后一行落在预览那一行里，和字节数同一高度。
     auto *encodeRow = new QHBoxLayout;
-    encodeRow->setSpacing(6);
+    encodeRow->setContentsMargins(0, 0, 0, 0);
+    encodeRow->setSpacing(4);
     encodeRow->addWidget(new QLabel(tr("格式")), 0, Qt::AlignVCenter);
     encodeRow->addWidget(m_format, 0, Qt::AlignVCenter);
-    encodeRow->addSpacing(6);
+    encodeRow->addStretch(1);
     encodeRow->addWidget(new QLabel(tr("末尾")), 0, Qt::AlignVCenter);
     encodeRow->addWidget(m_suffix, 0, Qt::AlignVCenter);
-    encodeRow->addStretch();
 
     auto *repeatRow = new QHBoxLayout;
-    repeatRow->setSpacing(6);
+    repeatRow->setContentsMargins(0, 0, 0, 0);
+    repeatRow->setSpacing(4);
+    // 间隔框与「末尾」下拉框同宽并共用右缘，勾选框紧贴在它左边。
+    repeatRow->addStretch(1);
     repeatRow->addWidget(m_repeat, 0, Qt::AlignVCenter);
     repeatRow->addWidget(m_interval, 0, Qt::AlignVCenter);
-    repeatRow->addStretch();
 
     auto *actionRow = new QHBoxLayout;
-    actionRow->setSpacing(6);
-    for (auto *button : {m_targetA, m_targetB, m_targetBoth})
+    actionRow->setContentsMargins(0, 0, 0, 0);
+    actionRow->setSpacing(4);
+    for (auto *button : {m_targetA, m_targetB})
         actionRow->addWidget(button, 0, Qt::AlignVCenter);
-    actionRow->addWidget(m_sendButton, 0, Qt::AlignVCenter);
+    actionRow->addWidget(m_sendButton, 1, Qt::AlignVCenter);
 
+    auto *rightColumn = new QVBoxLayout;
+    rightColumn->setContentsMargins(0, 0, 0, 0);
+    rightColumn->setSpacing(0);
     rightColumn->addLayout(encodeRow);
+    rightColumn->addStretch(1);
     rightColumn->addLayout(repeatRow);
+    rightColumn->addStretch(1);
     rightColumn->addLayout(actionRow);
 
+    // 字节数与最终内容预览贴着正文下方：它们回答的是"我到底要发什么"。
+    // 富文本标签不理会垂直居中，所以套一层与按钮同高的容器，标签在容器里居中。
+    auto *previewHost = new QWidget(manualPage);
+    previewHost->setObjectName(QStringLiteral("payloadPreviewRow"));
+    previewHost->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    auto *previewRow = new QHBoxLayout(previewHost);
+    previewRow->setContentsMargins(0, 0, 0, 0);
+    previewRow->setSpacing(0);
+    previewRow->addWidget(m_preview, 0, Qt::AlignVCenter);
+
     // 左栏拿全部剩余宽度（正文越宽越少折行），右栏取自身内容宽度。
-    auto *content = new QHBoxLayout(manualPage);
+    // 右栏跨正文和预览两行，末行才能和预览齐平。
+    auto *content = new QGridLayout(manualPage);
     // 与发送/接收文件页同一上边距，页签下面留出一截空隙。
-    content->setContentsMargins(0, 8, 0, 0);
-    content->setSpacing(10);
-    content->addLayout(leftColumn, 1);
-    content->addLayout(rightColumn, 0);
+    content->setContentsMargins(0, 4, 0, 0);
+    content->setHorizontalSpacing(8);
+    content->setVerticalSpacing(4);
+    content->addWidget(m_editor, 0, 0);
+    content->addWidget(previewHost, 1, 0);
+    content->addLayout(rightColumn, 0, 1, 2, 1);
+    content->setColumnStretch(0, 1);
 
     m_fileTransfer = new FileTransferWidget(this);
     m_tabs = new ModeTabs(this);
@@ -220,15 +247,29 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     m_tabs->addTab(manualPage, tr("手动发送"));
     m_tabs->addTab(m_fileTransfer->sendPage(), tr("发送文件"));
     m_tabs->addTab(m_fileTransfer->receivePage(), tr("接收文件"));
+    m_tabs->setIconSize(QSize(GlyphSize, GlyphSize));
+    // 选中页用和页签文字同一档蓝，其余保持静音灰。QSS 改不了 QIcon 的颜色。
+    const auto refreshTabIcons = [this] {
+        if (!m_tabs) return;
+        const QColor idle(0x64, 0x75, 0x90);
+        const QColor active(0x1d, 0x4e, 0xd8);
+        const QStringList paths{QStringLiteral(":/icons/send.svg"),
+            QStringLiteral(":/icons/file-upload.svg"),
+            QStringLiteral(":/icons/file-download.svg")};
+        for (int i = 0; i < m_tabs->count() && i < paths.size(); ++i)
+            m_tabs->setTabIcon(i, tintedIcon(paths.at(i),
+                i == m_tabs->currentIndex() ? active : idle, GlyphSize));
+    };
+    refreshTabIcons();
     root->addWidget(m_tabs, 0);
-    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) {
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this, refreshTabIcons](int) {
+        refreshTabIcons();
         if (m_tabs) m_tabs->updateGeometry();
         updateGeometry();
         emit preferredHeightChanged(preferredHeight());
     });
 
-    // 送进统一宽度：A/B/AB 与「发送」同属这一排，用一个宽度。必须在布局挂好之后调，
-    // 这样 sizeHint 才带得上它自己那一身 QSS（内边距/圆角），量出来的宽才是真的。
+    // A、B 取齐宽度。必须在布局挂好之后调，sizeHint 才带得上 QSS 的内边距。
     unifyActionWidths();
 
     // 定时发送 = 按周期持续发主输入框的内容，勾选即开始、取消即停（不再设次数上限：
@@ -258,8 +299,17 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     // 两个选择器任一变化即落盘；加载偏好期间由 m_loading 抑制（见 loadPreferences）。
     connect(m_format, &QComboBox::currentIndexChanged, this, &SendPanel::savePreferences);
     connect(m_suffix, &QComboBox::currentIndexChanged, this, &SendPanel::savePreferences);
-    for (auto *button : {m_targetA, m_targetB, m_targetBoth})
+    for (auto *button : {m_targetA, m_targetB}) {
         connect(button, &QPushButton::toggled, this, &SendPanel::updateSendAvailability);
+        // clicked 在勾选状态已经翻转之后才到。最后一个被点掉时立刻勾回去。
+        // 程序里 setChecked 不会发 clicked，缺端点时取消 B 不会被这里挡回去。
+        connect(button, &QPushButton::clicked, this, [this, button] {
+            if (button->isChecked() || targetMask() != 0) return;
+            const QSignalBlocker blocker(button);
+            button->setChecked(true);
+            updateSendAvailability();
+        });
+    }
     updatePreview();
 }
 
@@ -272,23 +322,99 @@ void SendPanel::setPorts(const QList<PortDraft> &ports)
 void SendPanel::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
-    // 字体 / DPI / 翻译都可能让"最宽的那个按钮"变宽，而 QSS 是把内边距算进
-    // sizeHint 的——控件在真窗口里拿到样式之后 hint 才稳定。宽度变化时重算一次，
-    // 保证 A/B/AB 与发送四个按钮始终等宽且不被文字截断。
+    if (m_syncingHeight) return;
+    // 字体 / DPI / 翻译变化后 A、B 的 sizeHint 会变，窗口尺寸变化时重算一次。
+    unifyActionWidths();
+}
+
+void SendPanel::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    // 样式抛光之后控件的 sizeHint 才是最终值，这里再对齐一次三页高度。
     unifyActionWidths();
 }
 
 void SendPanel::unifyActionWidths()
 {
-    // 先把这四个按钮的横向策略**钉成 Fixed**：unifyButtonWidths() 只设 minimumWidth，
-    // 而 minimum 策略允许被拉宽——右侧栏的宽度由"最宽的那一行"决定，多出来的空间
-    // 落到本行时按取整分给各按钮，就会出现 61/62/62/62 这种一像素参差。
-    // 钉成 Fixed 后它们的宽度恒等于 minimumWidth（= 其中最宽者），不再受行宽影响。
-    // 这不违反"不写死宽度"：宽度仍由 sizeHint 推出来，字体/DPI/翻译变化时会重算。
-    for (auto *button : {m_targetA, m_targetB, m_targetBoth, m_sendButton}) {
+    const QList<QWidget *> controls{
+        m_format, m_suffix, m_interval, m_targetA, m_targetB, m_sendButton};
+
+    // 下拉框按全部条目取宽，字体 / DPI / 翻译变化时跟着走。
+    // 这些 sizeHint 按内容计算，不受下面写死的宽高影响，所以不必先清掉固定尺寸
+    // （清掉会在 resizeEvent 里来回触发布局）。
+    // 格式和末尾取同一个宽度，间隔框也用这个宽度，右缘才能落在同一条线上。
+    if (m_format) fitComboToItems(m_format);
+    if (m_suffix) fitComboToItems(m_suffix);
+    int fieldWidth = 0;
+    if (m_format) fieldWidth = qMax(fieldWidth, m_format->sizeHint().width());
+    if (m_suffix) fieldWidth = qMax(fieldWidth, m_suffix->sizeHint().width());
+    // 间隔框要容下量程最大值和 " ms"，否则单位会被右缘裁掉。
+    if (m_interval) fieldWidth = qMax(fieldWidth, m_interval->sizeHint().width());
+
+    int controlHeight = 0;
+    for (auto *control : controls) {
+        if (!control) continue;
+        controlHeight = qMax(controlHeight, control->sizeHint().height());
+    }
+    if (controlHeight > 0) {
+        for (auto *control : controls)
+            if (control) control->setFixedHeight(controlHeight);
+        // 预览容器与按钮同高，标签在里面垂直居中，底行才是一条直线。
+        if (auto *previewRow = findChild<QWidget *>(QStringLiteral("payloadPreviewRow")))
+            previewRow->setFixedHeight(controlHeight);
+    }
+    if (fieldWidth > 0) {
+        for (QWidget *field : {static_cast<QWidget *>(m_format),
+                 static_cast<QWidget *>(m_suffix), static_cast<QWidget *>(m_interval)}) {
+            if (field) field->setFixedWidth(fieldWidth);
+        }
+    }
+
+    // 只取齐 A、B 的宽度。发送按钮吃掉本行剩余宽度，不跟字母开关绑成同一个宽。
+    for (auto *button : {m_targetA, m_targetB}) {
         if (button) button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     }
-    unifyButtonWidths({m_targetA, m_targetB, m_targetBoth, m_sendButton});
+    unifyButtonWidths({m_targetA, m_targetB});
+    syncManualToFilePages();
+}
+
+void SendPanel::syncManualToFilePages()
+{
+    if (m_syncingHeight || !m_editor || !m_tabs || !m_fileTransfer) return;
+    auto *manual = findChild<QWidget *>(QStringLiteral("manualSendPage"));
+    auto *grid = manual ? qobject_cast<QGridLayout *>(manual->layout()) : nullptr;
+    auto *preview = manual ? manual->findChild<QWidget *>(QStringLiteral("payloadPreviewRow")) : nullptr;
+    if (!grid || !preview) return;
+
+    const int fileH = qMax(
+        m_fileTransfer->sendPage() ? m_fileTransfer->sendPage()->sizeHint().height() : 0,
+        m_fileTransfer->receivePage() ? m_fileTransfer->receivePage()->sizeHint().height() : 0);
+    if (fileH <= 0) return;
+
+    const QMargins margins = grid->contentsMargins();
+    const int previewH = qMax(preview->sizeHint().height(), preview->minimumSizeHint().height());
+    int editorH = fileH - margins.top() - margins.bottom() - grid->verticalSpacing() - previewH;
+    const int lineFloor = m_editor->fontMetrics().lineSpacing()
+        + 2 * (EditorPaddingPx + EditorDocumentMarginPx + m_editor->frameWidth());
+    if (editorH < lineFloor) editorH = lineFloor;
+
+    m_syncingHeight = true;
+    m_editor->setFixedHeight(editorH);
+    // 布局自己还会加一点边，按差一次补回，页高才和文件页重合。
+    for (int i = 0; i < 2; ++i) {
+        const int delta = fileH - manual->sizeHint().height();
+        if (delta == 0) break;
+        editorH += delta;
+        if (editorH < lineFloor) break;
+        m_editor->setFixedHeight(editorH);
+    }
+    m_syncingHeight = false;
+
+    if (!isVisible()) return;
+    const int preferred = preferredHeight();
+    if (preferred == m_appliedHeight) return;
+    m_appliedHeight = preferred;
+    emit preferredHeightChanged(preferred);
 }
 
 void SendPanel::setEndpointOpen(int index, bool open)
@@ -312,16 +438,18 @@ void SendPanel::handleRawDataReceived(int index, const Traffic::Source &source,
 
 void SendPanel::updateTargets()
 {
-    // 目标只有端点个数这一个约束：缺 B 时 B/AB 不可选。
-    // 任何影响目标可用性的状态变化都必须回调本函数，否则回落逻辑不会重跑。
+    // 缺 B 时 B 不可选。选中态跟着可用性走，避免“勾着一个不存在的端点”。
     m_targetA->setEnabled(m_ports.size() >= 1);
     m_targetB->setEnabled(m_ports.size() >= 2);
-    m_targetBoth->setEnabled(m_ports.size() >= 2);
-    // 被选中的目标失效时回落到仍然可用的那个，不留“已选但不可用”的空目标。
-    const bool chosenAvailable = (m_targetA->isChecked() && m_targetA->isEnabled())
-        || (m_targetB->isChecked() && m_targetB->isEnabled())
-        || (m_targetBoth->isChecked() && m_targetBoth->isEnabled());
-    if (!chosenAvailable && m_targetA->isEnabled()) m_targetA->setChecked(true);
+    if (m_targetB->isChecked() && !m_targetB->isEnabled()) {
+        const QSignalBlocker blocker(m_targetB);
+        m_targetB->setChecked(false);
+    }
+    if (targetMask() == 0 && m_targetA->isEnabled()) {
+        const QSignalBlocker blocker(m_targetA);
+        m_targetA->setChecked(true);
+    }
+    updateSendAvailability();
 }
 
 void SendPanel::updatePreview()
@@ -361,11 +489,10 @@ void SendPanel::updatePreview()
 void SendPanel::updateSendAvailability()
 {
     // 发送条件：内容可解析且非空，且选中目标里至少有一个端点已连接。
-    // AB 目标只连了一端时按该端发送，不必强迫用户切目标。
+    // 两个都选中、只连了一端时，按钮仍可用；没连上的那一端会留下失败记录。
     const bool anySelectedOpen =
         (m_targetA->isChecked() && m_openFlags[0])
-        || (m_targetB->isChecked() && m_openFlags[1])
-        || (m_targetBoth->isChecked() && (m_openFlags[0] || m_openFlags[1]));
+        || (m_targetB->isChecked() && m_openFlags[1]);
     const bool ready = m_payloadValid && !m_payloadBytes.isEmpty() && anySelectedOpen;
     m_sendButton->setEnabled(ready);
     m_sendButton->setToolTip(ready ? tr("发送 %1 字节").arg(m_payloadBytes.size())
@@ -377,7 +504,6 @@ int SendPanel::targetMask() const
     int mask = 0;
     if (m_targetA->isChecked()) mask |= 1;
     if (m_targetB->isChecked()) mask |= 2;
-    if (m_targetBoth->isChecked()) mask |= 3;
     return mask;
 }
 
@@ -407,7 +533,7 @@ void SendPanel::setPayload(const QByteArray &bytes)
 
 int SendPanel::preferredHeight() const
 {
-    const int page = m_tabs && m_tabs->currentWidget() ? m_tabs->currentWidget()->sizeHint().height() : 0;
+    const int page = tallestPageHeight(m_tabs);
     const int bar = m_tabs && m_tabs->tabBar() ? m_tabs->tabBar()->sizeHint().height() : 0;
     const auto margins = layout() ? layout()->contentsMargins() : QMargins();
     return page + bar + margins.top() + margins.bottom() + 8;
