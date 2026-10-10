@@ -1,0 +1,15 @@
+{
+    "schema": 1,
+    "product": "QQCom",
+    "channel": "stable",
+    "version": "0.1.0",
+    "releaseDate": "2026-10-09T23:18:22Z",
+    "mandatory": false,
+    "download": {
+        "type": "zip",
+        "url": "https://gitee.com/qinjmin/qqcom/releases/download/v0.1.0/QQCom-0.1.0-win64.zip",
+        "size": 31680688,
+        "sha256": "d78cbbd6ac3f873d964f6722400fcbbbfc92b1e7c1c832caadfc96205c5a8d90"
+    },
+    "notesUrl": "https://gitee.com/qinjmin/qqcom/releases/tag/v0.1.0"
+}
