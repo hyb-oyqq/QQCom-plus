@@ -4,9 +4,12 @@
 #include <QMap>
 #include <QStringList>
 
-// Closed: the action to take. Open: the action that stops it. The button states itself.
-QString portActionName(int kind, bool open)
+// Closed: the action to take. Opening: a client is still dialling. Open: the action that stops it.
+// The button states itself, so the connecting wait lives on the same label.
+QString portActionName(int kind, bool open, bool connecting)
 {
+    if (connecting && !open && kind == PortDraft::TcpClient)
+        return QObject::tr("正在连接");
     switch (kind) {
     case PortDraft::TcpServer: return open ? QObject::tr("停止") : QObject::tr("监听");
     case PortDraft::Udp: return open ? QObject::tr("解绑") : QObject::tr("绑定");

@@ -378,15 +378,18 @@ void PortSelectorWidget::setEndpointLabel(const QString &label)
     m_badge->setToolTip(tr("端点 %1").arg(label));
 }
 
-void PortSelectorWidget::setConnectionOpen(bool open)
+void PortSelectorWidget::setConnectionOpen(bool open, bool connecting)
 {
-    if (m_open == open) return;
+    connecting = connecting && !open;
+    if (m_open == open && m_connecting == connecting) return;
     m_open = open;
+    m_connecting = connecting;
     // 打开期间锁定类型与参数：连接中的端点不接受"边连边改"，
     // 想换配置先关闭——状态机因此只需要处理干净的状态边界。
-    m_type->setEnabled(!open);
+    const bool busy = open || connecting;
+    m_type->setEnabled(!busy);
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it)
-        it.value()->setEnabled(!open);
+        it.value()->setEnabled(!busy);
     updateActionLabels();
     updateValidation();
 }
@@ -394,7 +397,7 @@ void PortSelectorWidget::setConnectionOpen(bool open)
 void PortSelectorWidget::updateActionLabels()
 {
     const int kind = m_type->currentData().toInt();
-    m_action->setText(portActionName(kind, m_open));
+    m_action->setText(portActionName(kind, m_open, m_connecting));
     m_action->setIcon(actionStateIcon(portActionIconName(kind, m_open), ActionIconSize));
     // Blue invites the connect action; red marks the one that tears it down.
     m_action->setProperty("open", m_open);
@@ -991,9 +994,10 @@ void PortSelectorWidget::updateValidation()
                                                        : it.value()->property("helpToolTip").toString());
     apply(m_framingDelimiter, QString());
     m_validationError = messages.join('\n');
-    // 动作按钮：配置有效才可打开；已打开时保持可点（用于关闭/取消）。
-    m_action->setEnabled(m_open || m_validationError.isEmpty());
-    m_action->setToolTip(m_open || m_validationError.isEmpty() ? QString() : m_validationError);
+    // 动作按钮：配置有效才可打开；已打开或正在连接时保持可点（用于关闭/取消）。
+    m_action->setEnabled(m_open || m_connecting || m_validationError.isEmpty());
+    m_action->setToolTip(m_open || m_connecting || m_validationError.isEmpty()
+                             ? QString() : m_validationError);
     // No inline marker: invalid fields carry a red border, the reason sits on each field.
     // An invalid field hidden behind the collapsed row would leave the message unreachable.
     // 自动展开只响应"新出现"的错误：程序化载入（setDraft / 串口扫描）会让上次会话

@@ -540,7 +540,8 @@ private slots:
         // 两组开关同住第一行：并排出现才叫"常驻顶栏"，谁被挪进第二行都会随条件条一起消失。
         QCOMPARE(views->parentWidget(), flags->parentWidget());
 
-        const QStringList directions{QStringLiteral("filterRx"), QStringLiteral("filterTx")};
+        const QStringList directions{QStringLiteral("filterRx"), QStringLiteral("filterTx"),
+            QStringLiteral("filterForward")};
         const QStringList viewSwitches{QStringLiteral("viewPureData"), QStringLiteral("viewHexEcho"),
             QStringLiteral("viewLineWrap")};
         for (const auto &name : directions) {
@@ -616,21 +617,24 @@ private slots:
             QCOMPARE(pair.first->isChecked(), !flipped);
         }
 
-        // 纯数据模式会把"行前缀"那批开关置灰：顶栏按钮必须同步置灰，
+        // 关掉「前缀」后，行号、时间、HEX 那批开关置灰：顶栏按钮必须同步置灰，
         // 否则留下一个"看着能点、点了一下没反应"的死开关。
-        if (pure->isChecked()) pure->click();
-        QVERIFY(!pure->isChecked());
+        if (!pure->isChecked()) pure->click();
+        QVERIFY(pure->isChecked());
         auto *number = window.findChild<QAction *>(QStringLiteral("showLineNumber"));
         QVERIFY(number && number->isEnabled() && hexEcho->isEnabled());
         pure->click();
-        QVERIFY(pure->isChecked());
+        QVERIFY(!pure->isChecked());
         QCOMPARE(number->isEnabled(), false);
         QCOMPARE(hexEcho->isEnabled(), false);
         pure->click();
+        QVERIFY(pure->isChecked());
         QVERIFY(number->isEnabled());
 
         // '过滤 · N' 仍是两处条件的合计：只关掉 RX（条件条里一条内容条件都没有）也必须算进去。
         auto *rx = flags->findChild<QPushButton *>(QStringLiteral("filterRx"));
+        auto *forward = flags->findChild<QPushButton *>(QStringLiteral("filterForward"));
+        QVERIFY(forward && forward->isChecked());
         // 只关掉 RX 时重置按钮必须是亮的，否则那半套条件没有回到默认的入口。
         auto *reset = bar->findChild<QPushButton *>(QStringLiteral("filterReset"));
         QVERIFY(reset && !reset->isEnabled());
@@ -644,8 +648,11 @@ private slots:
         // 重置一次清干净：顶栏方向开关、菜单事件开关、条件条内容条件一起回到不过滤。
         bar->findChild<QLineEdit *>(QStringLiteral("filterKeywords"))->setText(QStringLiteral("心跳"));
         QVERIFY(toggle->text().contains(QStringLiteral("· 3")));
+        forward->setChecked(false);
+        QVERIFY(toggle->text().contains(QStringLiteral("· 4")));
         reset->click();
         QVERIFY(rx->isChecked());
+        QVERIFY(forward->isChecked());
         QVERIFY(warnings->isChecked());
         // 「清除过滤」改为**保留输入框内容、只停用过滤**（用户反馈"又得重新输入，很麻烦"）：
         // 复位的是方向/事件开关与"生效的过滤"；条件留在框里，点「应用过滤」即可恢复。
@@ -1231,6 +1238,24 @@ private slots:
         QCOMPARE(accepted(options), 2);
         options.keywords.clear();
 
+        // 转发开关只藏桥接产生的发送行。手动发送和接收仍在。
+        auto forwarded = Traffic::makeSampleMessage(
+            6, QDateTime(), a, Traffic::Direction::Transmit, QByteArray("fwd"));
+        forwarded.origin = Traffic::Origin::Forward;
+        const auto manual = Traffic::makeSampleMessage(
+            7, QDateTime(), a, Traffic::Direction::Transmit, QByteArray("hand"));
+        model.replaceRecords({stream, forwarded, manual});
+        options.endpoints = {a.endpointId};
+        QCOMPARE(accepted(options), 3);
+        options.forwards = false;
+        QCOMPARE(accepted(options), 2);
+        options.tx = false;
+        QCOMPARE(accepted(options), 1);
+        options.tx = true;
+        options.forwards = true;
+        options.endpoints = {a.endpointId, b.endpointId};
+        model.replaceRecords({stream, datagram, message});
+
         // 错误/警告日志各自有独立开关：关闭后 Warning/Error 事件不进显示，数据不受影响。
         const auto warning = Traffic::makeSampleMessage(
             4, QDateTime(), b, Traffic::Direction::Warning, {});
@@ -1267,7 +1292,7 @@ private slots:
             + QStringLiteral("/preferences.ini");
         PreferencesStore sweep(nullptr, ini);
         for (const auto *key : {"filter/keywords", "filter/excludes", "filter/regex",
-                 "filter/caseSensitive", "filter/rx", "filter/tx", "filter/states",
+                 "filter/caseSensitive", "filter/rx", "filter/tx", "filter/forward", "filter/states",
                  "filter/warnings", "filter/errors", "filter/expanded",
                  // 显示开关同样会落盘：某个用例把"同时显示 HEX"打开后不关，
                  // 下一个用例就会在"行数多一倍"的前提下断言——与过滤条件同一类串扰。
@@ -1496,6 +1521,61 @@ private slots:
         message.rawLength = message.raw.size();
         view.appendMessages({message}, PayloadCodec::Format::Utf8, options);
         QCOMPARE(view.toPlainText(), QStringLiteral("RX ← 127.0.0.1:9001: ping"));
+
+        Traffic::Message sent = message;
+        sent.direction = Traffic::Direction::Transmit;
+        sent.origin = Traffic::Origin::Manual;
+        sent.raw = QByteArray("pong");
+        sent.rawLength = sent.raw.size();
+        TrafficTextView sentView;
+        sentView.appendMessages({sent}, PayloadCodec::Format::Utf8, options);
+        QCOMPARE(sentView.toPlainText(), QStringLiteral("TX·手动 → 127.0.0.1:9001: pong"));
+
+        // 关掉「转发」只从数据区拿走桥接产生的发送行。接收和手动发送留下。
+        clearEndpointDrafts();
+        MainWindow forwardWindow;
+        forwardWindow.setAttribute(Qt::WA_DontShowOnScreen);
+        forwardWindow.show();
+        auto *panel = forwardWindow.findChild<TrafficPanel *>();
+        QVERIFY(panel);
+        panel->setPreferences(nullptr);
+        // 默认格式是 HEX，正文不会出现 "bridged" 这几个字母。
+        forwardWindow.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+        auto *portA = forwardWindow.findChild<QPushButton *>(QStringLiteral("showPortA"));
+        QVERIFY(portA);
+        // 端点身份由 refreshEndpoints 在显示之后写入。读早了是空 UUID，行会被端点过滤丢掉。
+        QTRY_VERIFY(!portA->property("endpoint").toUuid().isNull());
+        const QUuid endpointId = portA->property("endpoint").toUuid();
+        auto line = [&](Traffic::Direction direction, Traffic::Origin origin, const char *body) {
+            Traffic::Message row;
+            row.id = 1;
+            row.timestamp = QDateTime::currentDateTime();
+            row.direction = direction;
+            row.origin = origin;
+            row.source.endpointId = endpointId;
+            row.source.endpointIndex = 0;
+            row.raw = QByteArray(body);
+            row.rawLength = row.raw.size();
+            return row;
+        };
+        panel->appendMessages({
+            line(Traffic::Direction::Receive, Traffic::Origin::Automatic, "in"),
+            line(Traffic::Direction::Transmit, Traffic::Origin::Forward, "bridged"),
+            line(Traffic::Direction::Transmit, Traffic::Origin::Manual, "hand"),
+        });
+        auto *text = forwardWindow.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        QVERIFY(text);
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("bridged")));
+        auto *hideForward = forwardWindow.findChild<QPushButton *>(QStringLiteral("filterForward"));
+        QVERIFY(hideForward);
+        hideForward->click();
+        auto *rebuild = forwardWindow.findChild<QPushButton *>(QStringLiteral("filterRebuild"));
+        QVERIFY(rebuild);
+        rebuild->click();
+        QTRY_VERIFY(!text->toPlainText().contains(QStringLiteral("bridged")));
+        QVERIFY(text->toPlainText().contains(QStringLiteral("hand")));
+        QVERIFY(text->toPlainText().contains(QStringLiteral("in")));
 
         // 纯数据模式依旧不添加任何元信息。
         TrafficTextView pureView;
@@ -3380,12 +3460,27 @@ private slots:
         // The full endpoint names live in the tooltip now that the pair label is gone.
         QVERIFY(bridge->toolTip().contains(QStringLiteral("A · 串口")));
         QVERIFY(bridge->toolTip().contains(QStringLiteral("B · TCP 服务器")));
+        // 顶边允许差 1px：分割线取整后，桥接行和端点行会差这么多，肉眼可忽略。
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QCOMPARE(direction->width(), bridge->width());
+        auto *b = window.findChild<PortSelectorWidget *>("endpointB");
+        QVERIFY(b);
+        const auto aligned = [](QWidget *left, QWidget *right) {
+            return qAbs(left->mapTo(left->window(), QPoint(0, 0)).y()
+                        - right->mapTo(right->window(), QPoint(0, 0)).y()) <= 1;
+        };
+        QVERIFY(aligned(direction, a->findChild<QPushButton *>("endpointAction")));
+        QVERIFY(aligned(bridge, b->findChild<QPushButton *>("endpointAction")));
+        QCOMPARE(bridge->property("open").toBool(), false);
         bridge->click();
         QCOMPARE(bridge->text(), QStringLiteral("停止桥接"));
-        QCOMPARE(window.findChild<QLabel *>("RouteStatus")->text(), QStringLiteral("已建立 · 预览"));
+        QCOMPARE(bridge->property("open").toBool(), true);
+        QCOMPARE(window.findChild<QLabel *>("RouteStatus")->text(), QStringLiteral("已建立"));
         QVERIFY(!direction->isEnabled());
         bridge->click();
         QCOMPARE(bridge->text(), QStringLiteral("建立桥接"));
+        QCOMPARE(bridge->property("open").toBool(), false);
         QVERIFY(direction->isEnabled());
         // Editing an endpoint while bridged stops the preview link.
         bridge->click();
@@ -3402,19 +3497,6 @@ private slots:
         QVERIFY(!bridge->isEnabled());
         window.showRoutes(); // The --routes entry point focuses the always-visible action.
         QVERIFY(bridge->hasFocus() || !bridge->isEnabled());
-        // Direction combo and bridge button share the panel width once the layout has run.
-        window.setAttribute(Qt::WA_DontShowOnScreen);
-        window.show();
-        QTest::qWait(30);
-        QCOMPARE(direction->width(), bridge->width());
-        // The bridge block repeats the endpoint rows' rhythm, so its controls line up with the
-        // connect and listen buttons instead of drifting by the row gap.
-        auto *b = window.findChild<PortSelectorWidget *>("endpointB");
-        QVERIFY(b);
-        QCOMPARE(direction->mapTo(&window, QPoint(0, 0)).y(),
-                 a->findChild<QPushButton *>("endpointAction")->mapTo(&window, QPoint(0, 0)).y());
-        QCOMPARE(bridge->mapTo(&window, QPoint(0, 0)).y(),
-                 b->findChild<QPushButton *>("endpointAction")->mapTo(&window, QPoint(0, 0)).y());
     }
 
     void endpointActionOpensAndCloses()
@@ -3439,6 +3521,24 @@ private slots:
         action->click();
         QTRY_COMPARE(action->text(), QStringLiteral("监听"));
         QVERIFY(b->findChild<QComboBox *>("portType")->isEnabled());
+
+        // TCP 客户端拨号期间按钮改成「正在连接」，类型和参数先锁住；连上之后才变红。
+        auto *a = window.findChild<PortSelectorWidget *>("endpointA");
+        QVERIFY(a);
+        a->findChild<QComboBox *>("portType")->setCurrentIndex(1);
+        auto *clientAction = a->findChild<QPushButton *>("endpointAction");
+        QCOMPARE(clientAction->text(), QStringLiteral("连接"));
+        QCOMPARE(clientAction->property("open").toBool(), false);
+        a->setConnectionOpen(false, true);
+        QCOMPARE(clientAction->text(), QStringLiteral("正在连接"));
+        QCOMPARE(clientAction->property("open").toBool(), false);
+        QVERIFY(!a->findChild<QComboBox *>("portType")->isEnabled());
+        a->setConnectionOpen(true);
+        QCOMPARE(clientAction->text(), QStringLiteral("断开"));
+        QCOMPARE(clientAction->property("open").toBool(), true);
+        a->setConnectionOpen(false);
+        QCOMPARE(clientAction->text(), QStringLiteral("连接"));
+        QVERIFY(a->findChild<QComboBox *>("portType")->isEnabled());
     }
 
 
@@ -3840,14 +3940,14 @@ private slots:
         QTRY_COMPARE(model->rowCount(), 2);
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("[2 B]: OK"));
 
-        // 纯数据模式：一切前缀与附注消失，只剩数据本身。
-        window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(true);
+        // 关掉前缀：一切前缀与附注消失，只剩数据本身。
+        window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(false);
         message.id = 3;
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 3);
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("OK"));
         // 还原默认开关，不把本用例的状态带给后续用例。
-        window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(true);
         window.findChild<QAction *>(QStringLiteral("showLineNumber"))->setChecked(true);
         window.findChild<QAction *>(QStringLiteral("showLength"))->setChecked(false);
     }

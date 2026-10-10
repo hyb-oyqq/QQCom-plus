@@ -76,18 +76,20 @@ void SerialTransport::start(const PortDraft &draft, quint64 generation)
     m_port->setReadBufferSize(SerialReadBufferBytes);
     m_port->setWriteBufferSize(SerialWriteBufferBytes);
 
-    connect(m_port, &QSerialPort::readyRead, this, [this] {
-        const auto payload = m_port->readAll();
-        if (!payload.isEmpty())
-            emit dataReceived(m_generation, makeSource(m_generation), payload,
-                int(Traffic::Framing::Stream));
-    });
     connect(m_port, &QSerialPort::errorOccurred, this, &SerialTransport::handlePortError);
 
     m_opening = true;
     const bool opened = m_port->open(QIODevice::ReadWrite);
     m_opening = false;
     if (opened) {
+        // 先丢掉打开前已在驱动缓冲里的字节，再开始接收。反过来会把旧字节当成新会话。
+        discardPendingInput();
+        connect(m_port, &QSerialPort::readyRead, this, [this] {
+            const auto payload = m_port->readAll();
+            if (!payload.isEmpty())
+                emit dataReceived(m_generation, makeSource(m_generation), payload,
+                    int(Traffic::Framing::Stream));
+        });
         emit stateChanged(m_generation, int(Transport::State::Open),
             tr("%1 @%2").arg(portName).arg(baud));
         return;
@@ -108,6 +110,12 @@ qint64 SerialTransport::write(const QByteArray &payload, const QUuid &peerId)
     if (!m_port || !m_port->isOpen())
         return -1;
     return m_port->write(payload);
+}
+
+void SerialTransport::discardPendingInput()
+{
+    if (m_port && m_port->isOpen())
+        m_port->readAll();
 }
 
 void SerialTransport::handlePortError(QSerialPort::SerialPortError error)

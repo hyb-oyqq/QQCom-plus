@@ -9,3 +9,11 @@ Traffic::Source AbstractTransport::makeSource(quint64 generation, const QUuid &p
     source.peerAddress = peerAddress;
     return source;
 }
+
+void AbstractTransport::discardPendingInput() {}
+
+QString AbstractTransport::writeAddress(const QUuid &peerId) const
+{
+    Q_UNUSED(peerId);
+    return {};
+}

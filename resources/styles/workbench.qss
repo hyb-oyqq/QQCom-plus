@@ -36,18 +36,16 @@ QPushButton, QToolButton { background: #f4f6fa; border: 1px solid #a9b5c9; borde
 QPushButton:hover, QToolButton:hover { color: #14326f; border-color: #6d87b8; background: #e8eefb; }
 QPushButton:pressed, QToolButton:pressed { background: #d7e2f7; border-color: #4d6ba3; }
 /* 勾选态的黄与「扩展」收起态同一套（#fbbf24），不要再另用一档浅琥珀。
-   带 id 的蓝按钮（A/B、展开中的「扩展」）写在后面，特异性更高，不会被这里盖掉。 */
+   展开中的「扩展」写在后面，特异性更高，不会被这里盖掉。
+   A/B 使能也走这套黄，未使能保持灰。 */
 QPushButton:checked { background: #fbbf24; border-color: #b45309; color: #7a3f00; }
 QPushButton:checked:hover { background: #f5b016; border-color: #92400e; color: #5c2f00; }
 QPushButton:checked:pressed { background: #e09f0a; border-color: #7a3f00; }
 QPushButton:disabled { background: #eceff5; border-color: #c3ccda; color: #7a8599; }
-/* A/B 端点开关：选中=实心蓝（该端点数据显示中），未选中=灰（已停用），对比强、状态一眼可辨。 */
+/* A/B 端点开关：使能（勾选）走上面那套黄，未使能保持灰。 */
 QPushButton#showPortA, QPushButton#showPortB { font-size: 12px; font-weight: 700; min-width: 22px; }
-QPushButton#showPortA:checked, QPushButton#showPortB:checked { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; }
-QPushButton#showPortA:checked:hover { background: #163fb3; border-color: #163fb3; }
-QPushButton#showPortA:checked:pressed { background: #12369c; }
 QPushButton#showPortA:!checked, QPushButton#showPortB:!checked { background: #e3e7ee; border-color: #c3ccda; color: #8a94a6; }
-QPushButton#showPortA:!checked:hover { border-color: #9aa7bd; color: #6b7690; }
+QPushButton#showPortA:!checked:hover, QPushButton#showPortB:!checked:hover { border-color: #9aa7bd; color: #6b7690; }
 /* 指令面板「扩展」开关：展开时实心蓝（面板在位），收起时换成琥珀"提醒色"——
    面板被收走后按钮仍在，必须比常态更显眼，用户才会想起它还在那儿（用户钦定）。
    图标随勾选态在 C++ 里手动换（白箭头 / 深琥珀箭头），QSS 只管底色与文字色。 */
@@ -80,6 +78,8 @@ QProgressBar#fileTransferProgress, QProgressBar#fileReceiveProgress { border: 1p
 QProgressBar#fileTransferProgress::chunk, QProgressBar#fileReceiveProgress::chunk { background: #1d4ed8; border-radius: 4px; margin: 1px; }
 QPushButton#bridgeButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
 QPushButton#bridgeButton:hover { background: #163fb3; border-color: #163fb3; }
+QPushButton#bridgeButton[open="true"] { background: #c0392b; border-color: #a7301f; }
+QPushButton#bridgeButton[open="true"]:hover { background: #a7301f; border-color: #a7301f; }
 QPushButton#endpointAction { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
 QPushButton#endpointAction:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#endpointAction:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }

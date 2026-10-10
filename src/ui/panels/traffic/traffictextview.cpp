@@ -264,11 +264,14 @@ void TrafficTextView::appendMessages(
                             dirFormat.setFontWeight(QFont::DemiBold);
                             cursor.setCharFormat(dirFormat);
                             cursor.insertText(dir);
-                            // 接收数据的来源是事实字段。UDP 没有“连接成功”事件，因而把
-                            // 实际 IP:端口紧跟在 RX 后面，用户可以直接判断每个数据报来自谁。
-                            // 发送行不重复显示固定目标，纯数据模式也始终不加任何前缀。
-                            if (r.direction == Traffic::Direction::Receive && r.source.hasPeer())
-                                cursor.insertText(QStringLiteral(" ← %1").arg(r.source.peerAddress));
+                            // 对端地址跟在方向后面。收是谁发来的，发是写给谁的；
+                            // 多个客户端或数据报来源时，没有这一段就分不清是哪一个。
+                            // 串口没有对端，纯数据模式也不加任何前缀。
+                            if (r.isData() && r.source.hasPeer()) {
+                                const QChar arrow = r.direction == Traffic::Direction::Transmit
+                                    ? QChar(0x2192) : QChar(0x2190);
+                                cursor.insertText(QStringLiteral(" %1 %2").arg(arrow, r.source.peerAddress));
+                            }
                             separatorFormat = dirFormat;
                         }
                         if (options.direction || !metaPrefix.isEmpty()) {

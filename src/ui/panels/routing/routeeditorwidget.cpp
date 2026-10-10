@@ -73,7 +73,7 @@ RouteEditorWidget::RouteEditorWidget(QWidget *parent) : QWidget(parent)
     connect(m_bridge, &QPushButton::clicked, this, [this] {
         if (!m_active && !m_ready) return;
         m_active = !m_active;
-        emit draftCountChanged(m_active ? 1 : 0);
+        emit bridgeChanged(link());
         updateBridgeState();
     });
     updateBridgeState();
@@ -89,9 +89,17 @@ void RouteEditorWidget::setEndpoints(const QList<PortDraft> &ports, bool ready)
     m_ready = ready && ports.size() == 2;
     if (m_active && (changed || !m_ready)) {
         m_active = false;
-        emit draftCountChanged(0);
+        emit bridgeChanged(link());
     }
     updateBridgeState();
+}
+
+BridgeLink RouteEditorWidget::link() const
+{
+    BridgeLink link;
+    link.enabled = m_active;
+    link.direction = m_direction ? m_direction->currentIndex() : int(BridgeDirection::Both);
+    return link;
 }
 
 QString RouteEditorWidget::bridgeSummary() const
@@ -109,6 +117,10 @@ void RouteEditorWidget::updateBridgeState()
     m_bridge->setEnabled(m_active || m_ready);
     m_bridge->setText(m_active ? tr("停止桥接") : tr("建立桥接"));
     m_bridge->setIcon(actionStateIcon(QStringLiteral(":/icons/swap-horizontal.svg"), BridgeIconSize));
+    // 已建立和已连接端口用同一套红：蓝是还没开始的动作，红是正在运行、再点就停。
+    m_bridge->setProperty("open", m_active);
+    m_bridge->style()->unpolish(m_bridge);
+    m_bridge->style()->polish(m_bridge);
     // The pair label is gone; the tooltip carries the full endpoint names and the direction.
     m_bridge->setToolTip(m_active ? tr("停止 A、B 之间的转发")
                        : m_ready ? bridgeSummary() : tr("先补全 A、B 的端点参数"));

@@ -2,6 +2,7 @@
 #define ROUTEEDITORWIDGET_H
 
 #include <QWidget>
+#include "domain/bridgelink.h"
 #include "domain/portdraft.h"
 
 class QComboBox;
@@ -16,8 +17,9 @@ class RouteEditorWidget : public QWidget
 public:
     explicit RouteEditorWidget(QWidget *parent = nullptr);
     void setEndpoints(const QList<PortDraft> &ports, bool ready);
+    BridgeLink link() const;
 signals:
-    void draftCountChanged(int count);
+    void bridgeChanged(const BridgeLink &link);
 private:
     void updateBridgeState();
     QString bridgeSummary() const;

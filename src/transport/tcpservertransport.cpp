@@ -88,6 +88,23 @@ qint64 TcpServerTransport::write(const QByteArray &payload, const QUuid &peerId)
     return accepted;
 }
 
+void TcpServerTransport::discardPendingInput()
+{
+    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it)
+        it.key()->readAll();
+}
+
+QString TcpServerTransport::writeAddress(const QUuid &peerId) const
+{
+    if (!peerId.isNull()) {
+        for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it)
+            if (it.value().id == peerId) return it.value().address;
+        return {};
+    }
+    // 空 peerId 是写全部客户端。只有一个时地址是确定的；多个时日志不能假装只有一个。
+    return m_peers.size() == 1 ? m_peers.constBegin().value().address : QString();
+}
+
 void TcpServerTransport::acceptPending()
 {
     while (m_server && m_server->hasPendingConnections()) {
@@ -106,6 +123,7 @@ void TcpServerTransport::acceptPending()
         peer.address = QStringLiteral("%1:%2").arg(
             socket->peerAddress().toString()).arg(socket->peerPort());
         socket->setReadBufferSize(PeerReadBufferBytes);
+        socket->readAll(); // 接入瞬间已到达的字节属于打开前，不进入本次会话
         connect(socket, &QTcpSocket::readyRead, this, [this, socket] {
             const auto it = m_peers.constFind(socket);
             if (it == m_peers.cend()) return;
@@ -118,6 +136,8 @@ void TcpServerTransport::acceptPending()
         // socket 断开后的 errorOccurred 只属于这个已detach 的对象，无需单独处理；
         // 销毁交给 disconnected 里的 deleteLater。
         m_peers.insert(socket, peer);
+        // 接入必须进数据区：断开已经有错误行，连上只改状态栏人数会让人看不到谁来了。
+        emit peerConnected(m_generation, peer.id, peer.address);
         publishPeers();
     }
 }

@@ -40,6 +40,7 @@ bool TrafficFilter::Matcher::accepts(const Traffic::Message &r) const
         break;
     case Traffic::Direction::Transmit:
         if (!m_options.tx) return false;
+        if (r.origin == Traffic::Origin::Forward && !m_options.forwards) return false;
         break;
     case Traffic::Direction::State:
         if (!m_options.states) return false;

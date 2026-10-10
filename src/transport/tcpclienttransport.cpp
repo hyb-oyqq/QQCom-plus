@@ -41,8 +41,15 @@ void TcpClientTransport::start(const PortDraft &draft, quint64 generation)
     connect(m_socket, &QTcpSocket::connected, this, [this] {
         m_timeout->stop();
         m_open = true;
-        emit stateChanged(m_generation, int(Transport::State::Open), tr("已连接 %1:%2")
-            .arg(m_socket->peerName(), QString::number(m_socket->peerPort())));
+        discardPendingInput();
+        connect(m_socket, &QTcpSocket::readyRead, this, [this] {
+            const auto payload = m_socket->readAll();
+            if (!payload.isEmpty())
+                emit dataReceived(m_generation, makeSource(m_generation, QUuid(), peerText()), payload,
+                    int(Traffic::Framing::Stream));
+        });
+        emit stateChanged(m_generation, int(Transport::State::Open), tr("已连接 %1")
+            .arg(peerText()));
     });
     connect(m_socket, &QTcpSocket::disconnected, this, [this] {
         m_timeout->stop();
@@ -70,13 +77,6 @@ void TcpClientTransport::start(const PortDraft &draft, quint64 generation)
                 emit stateChanged(m_generation, int(Transport::State::Closed), tr("连接失败"));
             }
         });
-    connect(m_socket, &QTcpSocket::readyRead, this, [this] {
-        const auto payload = m_socket->readAll();
-        if (!payload.isEmpty())
-            emit dataReceived(m_generation, makeSource(m_generation), payload,
-                int(Traffic::Framing::Stream));
-    });
-
     emit stateChanged(m_generation, int(Transport::State::Opening),
         tr("连接中 %1:%2").arg(host).arg(port));
     m_socket->connectToHost(host, quint16(port));
@@ -99,4 +99,22 @@ qint64 TcpClientTransport::write(const QByteArray &payload, const QUuid &peerId)
     if (!m_socket || !m_open)
         return -1;
     return m_socket->write(payload);
+}
+
+void TcpClientTransport::discardPendingInput()
+{
+    if (m_socket && m_open)
+        m_socket->readAll();
+}
+
+QString TcpClientTransport::writeAddress(const QUuid &peerId) const
+{
+    Q_UNUSED(peerId);
+    return peerText();
+}
+
+QString TcpClientTransport::peerText() const
+{
+    if (!m_socket || !m_open) return {};
+    return QStringLiteral("%1:%2").arg(m_socket->peerAddress().toString()).arg(m_socket->peerPort());
 }

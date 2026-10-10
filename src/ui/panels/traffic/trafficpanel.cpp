@@ -85,7 +85,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     layout->setContentsMargins(6, 4, 6, 4);
     layout->setSpacing(4);
 
-    // 两行头：第一行是原顶栏（A/B、编码、过滤折叠按钮、显示设置、导出、滚动到底、清空），
+    // 两行头：第一行是原顶栏（编码、过滤、A/B、显示、导出、滚动、清空），
     // 第二行是过滤条件条。两行同属一个头块，行距压到 4px——它们是"一次头"，
     // 不是两块独立面板。数据区高度只被这一条头带走两行控件的高度。
     auto *head = new QWidget(this);
@@ -95,21 +95,6 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
 
     auto *top = new QHBoxLayout;
     top->setSpacing(4);
-
-    // A/B 端点开关直接放在选项栏里：点哪个看哪个，都点看全部，无需进菜单。
-    const auto portToggle = [this](const QString &letter, const QString &name) {
-        auto *button = new QPushButton(letter, this);
-        button->setObjectName(name);
-        button->setCheckable(true);
-        button->setChecked(true);
-        button->setToolTip(tr("显示端点 %1 的记录").arg(letter));
-        connect(button, &QPushButton::toggled, this, &TrafficPanel::updatePortVisibility);
-        return button;
-    };
-    m_portAButton = portToggle(QStringLiteral("A"), QStringLiteral("showPortA"));
-    top->addWidget(m_portAButton);
-    m_portBButton = portToggle(QStringLiteral("B"), QStringLiteral("showPortB"));
-    top->addWidget(m_portBButton);
 
     m_format = new QComboBox;
     m_format->setObjectName("trafficFormat");
@@ -130,6 +115,22 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(m_filterToggle, &QPushButton::toggled, this, &TrafficPanel::setFilterExpanded);
     top->addWidget(m_filterToggle);
 
+    // A/B 端点开关紧挨过滤：点哪个看哪个，都点看全部，无需进菜单。
+    // 使能（勾选）用和其他开关同一套黄，未使能保持灰。
+    const auto portToggle = [this](const QString &letter, const QString &name) {
+        auto *button = new QPushButton(letter, this);
+        button->setObjectName(name);
+        button->setCheckable(true);
+        button->setChecked(true);
+        button->setToolTip(tr("显示端点 %1 的记录").arg(letter));
+        connect(button, &QPushButton::toggled, this, &TrafficPanel::updatePortVisibility);
+        return button;
+    };
+    m_portAButton = portToggle(QStringLiteral("A"), QStringLiteral("showPortA"));
+    top->addWidget(m_portAButton);
+    m_portBButton = portToggle(QStringLiteral("B"), QStringLiteral("showPortB"));
+    top->addWidget(m_portBButton);
+
     // 方向开关（RX / TX）就住在折叠按钮旁边（用户钦定）：它们**不进可折叠的第二行**，
     // 这样条件条收起来时这两个开关仍在原位。事件类型（状态/警告/错误）在显示设置
     // 菜单里——切换频次低得多，且与那批行内容开关同类，放一起更顺（用户钦定）。
@@ -142,10 +143,10 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 日志显示设置：行内容开关收进菜单，顶栏只留一个入口。
     // 方向与事件开关不在这里——它们管的是"哪些行进来"，不是外观：方向常驻顶栏，
     // 事件（状态/警告/错误）与上面那批"显示哪些行类型"的项一起留在这个菜单里。
-    auto *settings = new QPushButton(tr("显示设置"));
+    auto *settings = new QPushButton(tr("显示"));
     settings->setObjectName("displaySettings");
     settings->setIcon(mutedIcon(QStringLiteral(":/icons/cog.svg"), BarIconSize));
-    settings->setToolTip(tr("日志显示选项：行前缀、自动换行、记录"));
+    settings->setToolTip(tr("日志显示选项：行前缀、换行、记录"));
     auto *displayMenu = new StayOpenMenu(settings);
     // 行内容开关：控制台语义，全部在消息到达时生效，已固化的行不重排。
     const auto rowToggle = [this, &displayMenu](const char *name, const QString &text, bool checked) {
@@ -163,23 +164,19 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 顶栏按钮文案一律取短（用户反馈"按钮文字太长了"）：这一行要塞下 5 个开关 +
     // 一批动作按钮，每个字都是宽度。**菜单项与顶栏按钮共用 QAction 的文案**（不另抄
     // 一份短名）——两处说的必须是同一件事，完整解释放进 tooltip。
-    //
-    // 第三个刻意保留"自动"二字：本应用里「换行」另有含义（发送区的结尾符 CR/LF），
-    // 只说「换行」会被读成"给指令加换行符"，那是另一件事。
-    m_hexAction = rowToggle("showHex", tr("HEX 同显"), false);
-    m_hexAction->setToolTip(tr("同时显示 HEX：数据行之后另起一行显示 HEX 对照（HEX 显示格式下自动省略）"));
-    // 顶栏只放三个字。「纯数据」看不出在管什么；「是否显示前缀」又太长。
-    // 点亮即去掉行号、时间、方向、长度，日志里只留数据。
-    m_pureAction = rowToggle("pureData", tr("无前缀"), false);
-    m_pureAction->setToolTip(tr("去掉行号、时间、方向和长度，日志里只留数据本身"));
-    // 纯数据开启时，行前缀开关全部失效置灰，状态一目了然。
-    connect(m_pureAction, &QAction::toggled, this, [this](bool pure) {
+    m_hexAction = rowToggle("showHex", tr("HEX"), false);
+    m_hexAction->setToolTip(tr("数据行之后另起一行显示 HEX 对照；显示格式已经是 HEX 时自动省略"));
+    // 点亮即显示行号、时间、方向、长度。关掉后日志里只留数据。
+    m_pureAction = rowToggle("pureData", tr("前缀"), true);
+    m_pureAction->setToolTip(tr("显示行号、时间、方向和长度；关闭后日志里只留数据本身"));
+    // 关掉前缀时，行号、时间、方向、长度和 HEX 全部置灰。
+    connect(m_pureAction, &QAction::toggled, this, [this](bool prefixes) {
         for (auto *action : {m_numberAction, m_timestampAction, m_directionAction, m_lengthAction,
                              m_hexAction})
-            action->setEnabled(!pure);
+            action->setEnabled(prefixes);
     });
-    m_wrapAction = rowToggle("wrapTraffic", tr("自动换行"), false);
-    m_wrapAction->setToolTip(tr("自动换行：按窗口宽度折行显示；关闭时长报文水平滚动"));
+    m_wrapAction = rowToggle("wrapTraffic", tr("换行"), false);
+    m_wrapAction->setToolTip(tr("按窗口宽度折行显示；关闭时长报文水平滚动"));
     connect(m_wrapAction, &QAction::toggled, this, [this](bool wrap) {
         m_text->setLineWrapping(wrap);
         savePreferences();
@@ -195,7 +192,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_errorAction = rowToggle("showErrors", tr("错误"), true);
     m_errorAction->setToolTip(tr("显示错误日志"));
 
-    // 显示开关（纯数据模式 / 同时显示 HEX / 自动换行）常驻顶栏，紧跟方向开关之后（用户钦定）：
+    // 显示开关（前缀 / HEX / 换行）常驻顶栏，紧跟方向开关之后：
     // 三者都是"随手切一下"的外观项目，频次高到不该藏在菜单里两步。顶上的是同一批
     // QAction 的门面——菜单项照旧保留，两处永远一致（见 ViewToggles）。
     // 插在 m_flags 之后而不是 addWidget：顶栏右端那批动作按钮的位置与顺序不动。
@@ -237,7 +234,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     exportButton->setIcon(mutedIcon(QStringLiteral(":/icons/export.svg"), BarIconSize));
     top->addWidget(exportButton);
 
-    m_follow = new QPushButton(tr("滚动到底"));
+    m_follow = new QPushButton(tr("滚动"));
     m_follow->setObjectName("followTraffic");
     m_follow->setCheckable(true);
     m_follow->setChecked(true);
@@ -762,6 +759,7 @@ void TrafficPanel::loadPreferences()
     DirectionFlags directions;
     directions.rx = m_preferences->value("filter/rx", m_preferences->value("traffic/rx", true)).toBool();
     directions.tx = m_preferences->value("filter/tx", m_preferences->value("traffic/tx", true)).toBool();
+    directions.forward = m_preferences->value("filter/forward", true).toBool();
     m_flags->restore(directions);
     {
         const auto legacyEvents = m_preferences->value("traffic/errors", true);
@@ -781,7 +779,8 @@ void TrafficPanel::loadPreferences()
     m_directionAction->setChecked(m_preferences->value("traffic/direction", true).toBool());
     m_lengthAction->setChecked(m_preferences->value("traffic/length", false).toBool());
     m_hexAction->setChecked(m_preferences->value("traffic/hex", false).toBool());
-    m_pureAction->setChecked(m_preferences->value("traffic/pure", false).toBool());
+    // traffic/pure 仍表示"去掉前缀"。按钮文案改成「前缀」后，勾选表示显示前缀，读盘时取反。
+    m_pureAction->setChecked(!m_preferences->value("traffic/pure", false).toBool());
     m_wrapAction->setChecked(m_preferences->value("traffic/wrap", false).toBool());
     m_follow->setChecked(m_preferences->value("traffic/follow", true).toBool());
     m_portAButton->setChecked(m_preferences->value("traffic/portA", true).toBool());
@@ -820,6 +819,7 @@ void TrafficPanel::savePreferences()
     m_preferences->setValue("filter/expanded", m_filterExpanded);
     m_preferences->setValue("filter/rx", flags.rx);
     m_preferences->setValue("filter/tx", flags.tx);
+    m_preferences->setValue("filter/forward", flags.forward);
     m_preferences->setValue("filter/states", flags.states);
     m_preferences->setValue("filter/warnings", flags.warnings);
     m_preferences->setValue("filter/errors", flags.errors);
@@ -832,7 +832,7 @@ void TrafficPanel::savePreferences()
     m_preferences->setValue("traffic/direction", m_directionAction->isChecked());
     m_preferences->setValue("traffic/length", m_lengthAction->isChecked());
     m_preferences->setValue("traffic/hex", m_hexAction->isChecked());
-    m_preferences->setValue("traffic/pure", m_pureAction->isChecked());
+    m_preferences->setValue("traffic/pure", !m_pureAction->isChecked());
     m_preferences->setValue("traffic/wrap", m_wrapAction->isChecked());
     m_preferences->setValue("traffic/follow", m_follow->isChecked());
     m_preferences->setValue("traffic/portA", m_portAButton->isChecked());
@@ -872,6 +872,7 @@ FilterFlagsState TrafficPanel::filterFlagsState() const
     FilterFlagsState flags;
     flags.rx = directions.rx;
     flags.tx = directions.tx;
+    flags.forward = directions.forward;
     if (m_stateAction) flags.states = m_stateAction->isChecked();
     if (m_warningAction) flags.warnings = m_warningAction->isChecked();
     if (m_errorAction) flags.errors = m_errorAction->isChecked();
@@ -883,8 +884,8 @@ int TrafficPanel::activeFlagCount() const
     // 默认全开：关掉任意一项即算"在过滤"。两项来源合并计数——只数顶栏会漏掉
     // "只关掉了警告"这种最容易被忘掉的情形，而那个数字正是「过滤 · N」的唯一出口。
     const auto flags = filterFlagsState();
-    return (flags.rx ? 0 : 1) + (flags.tx ? 0 : 1) + (flags.states ? 0 : 1)
-        + (flags.warnings ? 0 : 1) + (flags.errors ? 0 : 1);
+    return (flags.rx ? 0 : 1) + (flags.tx ? 0 : 1) + (flags.forward ? 0 : 1)
+        + (flags.states ? 0 : 1) + (flags.warnings ? 0 : 1) + (flags.errors ? 0 : 1);
 }
 
 void TrafficPanel::updateFilter()
@@ -898,6 +899,7 @@ void TrafficPanel::updateFilter()
     options.endpoints = m_visibleEndpoints;
     options.rx = flags.rx;
     options.tx = flags.tx;
+    options.forwards = flags.forward;
     options.states = flags.states;
     options.warnings = flags.warnings;
     options.errors = flags.errors;
@@ -916,7 +918,7 @@ void TrafficPanel::updateFilter()
     m_displayOptions.direction = m_directionAction->isChecked();
     m_displayOptions.length = m_lengthAction->isChecked();
     m_displayOptions.hex = m_hexAction->isChecked();
-    m_displayOptions.pure = m_pureAction->isChecked();
+    m_displayOptions.pure = !m_pureAction->isChecked();
     // 外观（显示设置/编码格式）一变，已经收到的内容必须立刻跟着变——这是视图的
     // 语义，不是可选项。过滤条件的变化则只作用于新行，等「应用过滤」把它们补到
     // 已有记录上（用户钦定的交互），这里不做任何重放。

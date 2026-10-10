@@ -12,6 +12,7 @@ HEADERS += \
     $$PWD/commanditem.h \
     $$PWD/commandset.h \
     $$PWD/networkaddress.h \
+    $$PWD/bridgelink.h \
     $$PWD/portdraft.h \
     $$PWD/receiveframing.h \
     $$PWD/serialportdescriptor.h \

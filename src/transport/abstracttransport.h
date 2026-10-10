@@ -38,6 +38,15 @@ public:
     // 不在此函数内。
     virtual qint64 write(const QByteArray &payload, const QUuid &peerId) = 0;
 
+    // 丢掉打开前已经到达、还没读走的内容。桥接建立和端点打开时调用，
+    // 避免把开关前的旧字节转发出去。关闭时不调用：意外断开不该靠丢缓冲来收拾。
+    virtual void discardPendingInput();
+
+    // 这次写出实际交给了谁。单目标端点返回固定对端或配置目标；
+    // TCP 服务器按 peerId 返回该客户端，空 peerId 且只有一个客户端时返回那一个。
+    // 多个客户端一起写时无法归到某一个地址，返回空串。串口没有对端。
+    virtual QString writeAddress(const QUuid &peerId) const;
+
 signals:
     // 状态迁移。detail 是给人看的一句话（如 "COM3 @115200"、"连接中 127.0.0.1:9000"）。
     void stateChanged(quint64 generation, int state, const QString &detail);
@@ -47,6 +56,8 @@ signals:
         const QByteArray &payload, int framing);
     // TCP 服务器的客户端集合变化；其余类型不发。
     void peerListChanged(quint64 generation, const QList<Transport::PeerInfo> &peers);
+    // TCP 服务器识别到一个客户端完成握手。UDP 没有连接，不发这个信号。
+    void peerConnected(quint64 generation, const QUuid &peerId, const QString &address);
     // 离散错误：打开失败、意外断开、设备拔出等。状态变化仍走 stateChanged。
     void errorOccurred(quint64 generation, const QString &message);
 

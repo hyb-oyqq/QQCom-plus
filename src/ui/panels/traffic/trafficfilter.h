@@ -30,6 +30,7 @@ public:
         QSet<QUuid> endpoints; // 集合为空表示不显示任何端点的记录
         bool rx = true;
         bool tx = true;
+        bool forwards = true; // 桥接转发产生的发送行。关掉只影响显示，不停止转发。
         bool states = true;   // 状态迁移（端口打开/关闭/重连等）
         bool warnings = true; // 警告日志
         bool errors = true;   // 错误日志
@@ -43,6 +44,7 @@ public:
         bool operator==(const Options &other) const
         {
             return endpoints == other.endpoints && rx == other.rx && tx == other.tx
+                && forwards == other.forwards
                 && states == other.states && warnings == other.warnings && errors == other.errors
                 && keywords == other.keywords && excludes == other.excludes
                 && caseSensitive == other.caseSensitive;

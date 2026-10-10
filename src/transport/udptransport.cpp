@@ -47,13 +47,14 @@ void UdpTransport::start(const PortDraft &draft, quint64 generation)
     }
 
     m_socket = new QUdpSocket(this);
-    connect(m_socket, &QUdpSocket::readyRead, this, &UdpTransport::drainPendingDatagrams);
     if (!m_socket->bind(bindAddress, quint16(bindPort))) {
         emit errorOccurred(m_generation, tr("绑定 %1:%2 失败：%3")
             .arg(bindText).arg(bindPort).arg(m_socket->errorString()));
         emit stateChanged(m_generation, int(Transport::State::Closed), tr("打开失败"));
         return;
     }
+    discardPendingInput();
+    connect(m_socket, &QUdpSocket::readyRead, this, &UdpTransport::drainPendingDatagrams);
     const auto targetSuffix = m_targetPort != 0
         ? tr(" → 发送目标 %1:%2").arg(m_targetAddress.toString()).arg(m_targetPort)
         : tr("；未设置发送目标：仅接收，收到数据报不会建立连接或自动回发");
@@ -78,6 +79,23 @@ qint64 UdpTransport::write(const QByteArray &payload, const QUuid &peerId)
         return -1; // 仅接收的端点没有发送目标
     // 整报提交：writeDatagram 不支持部分写，返回值要么是整报长度要么是 -1。
     return m_socket->writeDatagram(payload, m_targetAddress, m_targetPort);
+}
+
+QString UdpTransport::writeAddress(const QUuid &peerId) const
+{
+    Q_UNUSED(peerId);
+    if (m_targetPort == 0) return {};
+    return QStringLiteral("%1:%2").arg(m_targetAddress.toString()).arg(m_targetPort);
+}
+
+void UdpTransport::discardPendingInput()
+{
+    if (!m_socket) return;
+    while (m_socket->hasPendingDatagrams()) {
+        QHostAddress sender;
+        quint16 senderPort = 0;
+        m_socket->readDatagram(nullptr, 0, &sender, &senderPort);
+    }
 }
 
 void UdpTransport::drainPendingDatagrams()

@@ -37,12 +37,10 @@ QPushButton:checked { background: #d97706; border-color: #92400e; color: #fef3c7
 QPushButton:checked:hover { background: #f59e0b; border-color: #b45309; color: #fffbeb; }
 QPushButton:checked:pressed { background: #b45309; border-color: #92400e; }
 QPushButton:disabled { background: #252b3d; border-color: #3d4758; color: #5a6377; }
+/* A/B 端点开关：使能（勾选）走上面那套黄，未使能保持灰。 */
 QPushButton#showPortA, QPushButton#showPortB { font-size: 12px; font-weight: 700; min-width: 22px; }
-QPushButton#showPortA:checked, QPushButton#showPortB:checked { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; }
-QPushButton#showPortA:checked:hover { background: #2860e8; border-color: #2860e8; }
-QPushButton#showPortA:checked:pressed { background: #1a45c0; }
 QPushButton#showPortA:!checked, QPushButton#showPortB:!checked { background: #2d3548; border-color: #434d64; color: #7a8599; }
-QPushButton#showPortA:!checked:hover { border-color: #5a6885; color: #9aa7bd; }
+QPushButton#showPortA:!checked:hover, QPushButton#showPortB:!checked:hover { border-color: #5a6885; color: #9aa7bd; }
 QPushButton#commandPanelToggle:checked { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
 QPushButton#commandPanelToggle:checked:hover { background: #2860e8; border-color: #2860e8; }
 QPushButton#commandPanelToggle:checked:pressed { background: #1a45c0; }
@@ -68,6 +66,8 @@ QProgressBar#fileTransferProgress, QProgressBar#fileReceiveProgress { border: 1p
 QProgressBar#fileTransferProgress::chunk, QProgressBar#fileReceiveProgress::chunk { background: #1d4ed8; border-radius: 4px; margin: 1px; }
 QPushButton#bridgeButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
 QPushButton#bridgeButton:hover { background: #2860e8; border-color: #2860e8; }
+QPushButton#bridgeButton[open="true"] { background: #c0392b; border-color: #a7301f; }
+QPushButton#bridgeButton[open="true"]:hover { background: #d44332; border-color: #d44332; }
 QPushButton#endpointAction { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
 QPushButton#endpointAction:hover { background: #2860e8; border-color: #2860e8; }
 QPushButton#endpointAction:disabled { background: #3d4a6b; border-color: #2d3952; color: #5a6885; }

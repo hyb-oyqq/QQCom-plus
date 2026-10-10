@@ -2,8 +2,14 @@
 #include "transport/transportfactory.h"
 
 #include <QDateTime>
+#include <QMetaType>
 #include <QTimer>
 #include <utility>
+
+namespace {
+// 主窗口经队列槽把桥接开关送到 I/O 线程，类型必须在首次跨线程调用前登记。
+const int bridgeLinkMetaTypeId = qRegisterMetaType<BridgeLink>();
+} // namespace
 
 EndpointRuntime::EndpointRuntime(QObject *parent) : QObject(parent)
 {
@@ -83,6 +89,12 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
     if (!transport) return;
     m_transports[index] = transport;
     const quint64 generation = m_generations[index];
+    // 打开成功后再丢一次还没读走的输入。关闭路径不丢，意外断开留下的内容按原会话处理。
+    connect(transport, &AbstractTransport::stateChanged, this,
+        [this, index, generation](quint64 gen, int state, const QString &) {
+            if (gen != m_generations[index] || state != int(Transport::State::Open)) return;
+            if (auto *opened = m_transports[index]) opened->discardPendingInput();
+        });
 
     // 连接按代次闭包：实例被替换后，旧实例晚到的信号一律丢弃。
     connect(transport, &AbstractTransport::stateChanged, this,
@@ -103,6 +115,9 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
                 auto message = makeMessage(index, Traffic::Direction::State, Traffic::Origin::Automatic,
                     {}, Traffic::Framing::Message);
                 message.statusText = stateRowText(state, detail, endpointIdentity(index, m_drafts[index]));
+                // TCP 客户端连上时，对端地址跟在这条状态行上，数据区才能直接看到连的是谁。
+                if (state == int(Transport::State::Open) && m_transports[index])
+                    message.source.peerAddress = m_transports[index]->writeAddress(QUuid());
                 publish(std::move(message));
             }
             emit endpointStateChanged(index, state, detail);
@@ -111,13 +126,14 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
         [this, index, generation](quint64 gen, const Traffic::Source &source,
                                    const QByteArray &payload, int framing) {
             if (gen != m_generations[index]) return;
-            if (!payload.isEmpty())
+            if (!payload.isEmpty()) {
                 emit rawDataReceived(index, source, payload);
+                forwardReceived(index, payload);
+            }
             // 数据报自带边界，直接就是一条；字节流片段才交给组帧器。
             if (Traffic::Framing(framing) != Traffic::Framing::Stream) {
-                // UDP 每个数据报都带独立的来源地址。首次见到一个来源时，用状态行和
-                // 参数区明确告诉用户来源，但不把它误解成“已连接”，更不能暗中改写
-                // 用户指定的固定发送目标。
+                // UDP 没有握手。首次收到某个来源的数据报，就在数据区记一条对端已出现。
+                // 只记来源，不改用户指定的发送目标。
                 if (m_drafts[index].kind == PortDraft::Udp && source.hasPeer()
                     && !m_observedUdpPeers[index].contains(source.peerAddress)) {
                     m_observedUdpPeers[index].insert(source.peerAddress);
@@ -128,8 +144,8 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
                     auto notice = makeMessage(index, Traffic::Direction::State,
                         Traffic::Origin::Automatic, {}, Traffic::Framing::Message);
                     notice.source = source;
-                    notice.statusText = tr("UDP 已收到来自 %1 的数据报；UDP 无连接，未自动设为发送目标。")
-                                            .arg(source.peerAddress);
+                    notice.statusText = tr("%1 · 对端 %2 已连接")
+                        .arg(endpointIdentity(index, m_drafts[index]), source.peerAddress);
                     publish(std::move(notice));
                 }
                 auto message = makeMessage(index, Traffic::Direction::Receive,
@@ -148,6 +164,17 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             addresses.reserve(peers.size());
             for (const auto &peer : peers) addresses.append(peer.address);
             emit endpointPeersChanged(index, addresses);
+        });
+    connect(transport, &AbstractTransport::peerConnected, this,
+        [this, index, generation](quint64 gen, const QUuid &peerId, const QString &address) {
+            if (gen != m_generations[index]) return;
+            auto notice = makeMessage(index, Traffic::Direction::State, Traffic::Origin::Automatic,
+                {}, Traffic::Framing::Message);
+            notice.source.peerId = peerId;
+            notice.source.peerAddress = address;
+            notice.statusText = tr("%1 · 客户端 %2 已连接")
+                .arg(endpointIdentity(index, m_drafts[index]), address);
+            publish(std::move(notice));
         });
     connect(transport, &AbstractTransport::errorOccurred, this,
         [this, index, generation](quint64 gen, const QString &text) {
@@ -198,10 +225,51 @@ void EndpointRuntime::sendPayload(int index, const QByteArray &payload, int orig
     // 写入同步返回"本地接受"的字节数：全部接受记 LocalCompleted（仅代表
     // 本地写出，不等同对端收到），部分接受记 Partial，拒绝/失败记 Failed。
     const qint64 accepted = transport ? transport->write(payload, QUuid()) : -1;
+    if (transport)
+        message.source.peerAddress = transport->writeAddress(QUuid());
     if (accepted < 0) {
         message.state = Traffic::State::Failed;
         message.statusText = transport ? tr("写入被拒绝：端口未就绪或无可用目标") : tr("端口未打开");
     } else if (accepted >= payload.size()) {
+        message.state = Traffic::State::LocalCompleted;
+    } else {
+        message.state = Traffic::State::Partial;
+        message.statusText = tr("本地接受 %1/%2 字节").arg(accepted).arg(payload.size());
+    }
+    publish(std::move(message));
+}
+
+void EndpointRuntime::setBridge(const BridgeLink &link)
+{
+    const bool turningOn = link.enabled && !m_bridge.enabled;
+    m_bridge = link;
+    if (!m_bridge.enabled) return;
+    if (m_bridge.direction < int(BridgeDirection::AtoB) || m_bridge.direction > int(BridgeDirection::Both))
+        m_bridge.direction = int(BridgeDirection::Both);
+    // 只在建立时清空。停止和意外断开都不丢缓冲，已经在路上的字节按原会话走完。
+    if (turningOn)
+        discardPendingInput();
+}
+
+void EndpointRuntime::discardPendingInput()
+{
+    for (auto *transport : m_transports)
+        if (transport) transport->discardPendingInput();
+}
+
+void EndpointRuntime::forwardReceived(int index, const QByteArray &payload)
+{
+    const int target = m_bridge.targetOf(index);
+    if (target < 0) return;
+    auto *transport = m_transports[target];
+    if (!transport) return;
+    // 原样交给另一端。转发写出不再回到这里，所以 A↔B 不会自己绕回来。
+    const qint64 accepted = transport->write(payload, QUuid());
+    if (accepted < 0) return;
+    auto message = makeMessage(target, Traffic::Direction::Transmit, Traffic::Origin::Forward,
+        payload, Traffic::Framing::Message);
+    message.source.peerAddress = transport->writeAddress(QUuid());
+    if (accepted >= payload.size()) {
         message.state = Traffic::State::LocalCompleted;
     } else {
         message.state = Traffic::State::Partial;

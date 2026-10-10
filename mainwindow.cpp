@@ -95,7 +95,7 @@ PortDraft draftFromVariant(const QVariantMap &m)
 {
     PortDraft d;
     const auto id = QUuid::fromString(m.value("id").toString());
-    if (!id.isNull()) d.id = id; // 端点身份跨会话稳定：监视区开关、桥接预览都认它
+    if (!id.isNull()) d.id = id; // 端点身份跨会话稳定：监视区开关认它
     d.kind = m.value("kind", d.kind).toInt();
     d.values = m.value("values").toMap();
     d.framing = framingFromVariant(m.value("framing").toMap());
@@ -514,10 +514,11 @@ MainWindow::MainWindow(QWidget *parent)
                     QMetaObject::invokeMethod(m_runtime, "sendPayload", Qt::QueuedConnection,
                         Q_ARG(int, index), Q_ARG(QByteArray, payload), Q_ARG(int, origin));
         });
-    connect(m_bridge, &RouteEditorWidget::draftCountChanged, this, [this](int count) {
-        const bool active = count > 0;
-        m_routeStatus->setText(active ? tr("已建立 · 预览") : tr("未启动"));
-        restyleProperty(m_routeStatus, "active", active);
+    connect(m_bridge, &RouteEditorWidget::bridgeChanged, this, [this](const BridgeLink &link) {
+        m_routeStatus->setText(link.enabled ? tr("已建立") : tr("未启动"));
+        restyleProperty(m_routeStatus, "active", link.enabled);
+        QMetaObject::invokeMethod(m_runtime, "setBridge", Qt::QueuedConnection,
+            Q_ARG(BridgeLink, link));
     });
 
     // 速率节拍：与串口扫描一样只在窗口真实显示时运行。
@@ -651,7 +652,8 @@ void MainWindow::handleEndpointState(int index, int state, const QString &detail
     Q_UNUSED(detail);
     if (index < 0 || index >= m_selectors.size()) return;
     m_endpointStates[index] = Transport::State(state);
-    m_selectors.at(index)->setConnectionOpen(state == int(Transport::State::Open));
+    m_selectors.at(index)->setConnectionOpen(state == int(Transport::State::Open),
+        state == int(Transport::State::Opening));
     // ★ 端点状态一变就必须喂给发送区：发送按钮的可用性=「选中目标里至少有一个已连接」，
     // 而它读的是 SendPanel::m_openFlags。这条线曾经**根本没接**——setEndpointOpen()
     // 全项目没有任何调用点，于是 m_openFlags 恒为 false、发送按钮**永远禁用**，

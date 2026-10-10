@@ -30,7 +30,7 @@ void bindToggleButton(QPushButton *button, QAction *action)
     QObject::connect(action, &QAction::toggled, button, [button](bool on) {
         if (button->isChecked() != on) button->setChecked(on);
     });
-    // 命令 → 按钮：可用性。纯数据模式会把"行前缀"那批开关置灰，顶栏按钮必须同步，
+    // 命令 → 按钮：可用性。关掉「前缀」会把行号、HEX 那批开关置灰，顶栏按钮必须同步，
     // 否则会出现"按钮亮着但点了没反应"的死开关。
     QObject::connect(action, &QAction::changed, button,
         [button, action] { button->setEnabled(action->isEnabled()); });

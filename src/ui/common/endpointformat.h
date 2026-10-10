@@ -16,8 +16,8 @@ QString portKindName(int kind);
 QString portDraftSummary(const PortDraft &draft);
 QString portDraftDetails(const PortDraft &draft);
 
-// Closed: the action to take. Open: the action that stops it.
-QString portActionName(int kind, bool open);
+// Closed: the action to take. Opening: a client is still dialling. Open: the action that stops it.
+QString portActionName(int kind, bool open, bool connecting = false);
 
 // The glyph beside that text: a link for the actions that dial out, an access point for the
 // ones that listen, and a broken link once the endpoint is open.

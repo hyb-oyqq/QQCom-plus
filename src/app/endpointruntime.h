@@ -7,6 +7,7 @@
 #include <QSet>
 #include <QTimer>
 #include "app/receiveframer.h"
+#include "domain/bridgelink.h"
 #include "domain/portdraft.h"
 #include "domain/trafficmessage.h"
 #include "transport/abstracttransport.h"
@@ -19,9 +20,10 @@
 //   openEndpoint(index, draft)  关旧实例 → 新代次 → 新建传输并 start
 //   closeEndpoint(index)        用户关闭；此后旧实例事件按代次丢弃
 //   sendPayload(index, payload, origin)  写入并把结果装配成 TX 消息
+//   setBridge(link)                      建立或停止 A/B 转发
 //
 // 负责连接生命周期、按来源隔离的接收组帧、消息装配及事件发布。
-// 路由转发、周期发送、拥塞策略尚未实现，不在这里预埋。
+// 桥接只做一件事：一端收到的原始字节原样写到另一端。周期发送尚未实现。
 class EndpointRuntime : public QObject
 {
     Q_OBJECT
@@ -35,6 +37,7 @@ public slots:
     void openEndpoint(int index, const PortDraft &draft);
     void closeEndpoint(int index);
     void sendPayload(int index, const QByteArray &payload, int origin);
+    void setBridge(const BridgeLink &link);
     void shutdown();
 
 signals:
@@ -65,8 +68,12 @@ private:
     void flushSession(int index, ReceiveSession &session, ReceiveFramer::Trigger trigger);
     void flushFramers(int index, ReceiveFramer::Trigger trigger);
     void removeDisconnectedPeers(int index, const QList<Transport::PeerInfo> &peers);
+    // 打开端点或建立桥接时丢掉还没读走的输入，避免旧字节进入本次会话或被转发。
+    void discardPendingInput();
+    void forwardReceived(int index, const QByteArray &payload);
 
     AbstractTransport *m_transports[EndpointCount] = {};
+    BridgeLink m_bridge;
     PortDraft m_drafts[EndpointCount];
     quint64 m_generations[EndpointCount] = {};
     // 失败合并的锚点：传输层把一次失败拆成 errorOccurred + stateChanged(Closed) 两条信号
@@ -74,8 +81,8 @@ private:
     // 错误的代次"，紧随其后的同代次 Closed 便并入那条错误行、不再另发零信息的状态行。
     // 0 是哨兵：代次从 1 起递增，0 永远不是一次真实事件的代次。
     quint64 m_pendingFailureGeneration[EndpointCount] = {};
-    // UDP 是无连接协议。这里记录本次打开期间实际发过数据报的来源，只用于向界面
-    // 报告“已发现来源”；绝不把它当成发送目标或连接状态。
+    // UDP 没有握手。这里记录本次打开期间实际发过数据报的来源，首次见到时写一条
+    // 「对端已连接」状态日志，并刷新参数区来源列表。绝不把它当成发送目标。
     QSet<QString> m_observedUdpPeers[EndpointCount];
     // TCP 服务端按连接隔离缓冲和空闲计时；串口/客户端使用空 peerId。
     // 仅启用组帧并收到非空数据时创建，直通与 UDP 不分配定时器。

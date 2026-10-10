@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QUdpSocket>
 #include "app/endpointruntime.h"
 #include "app/receiveframer.h"
 #include "app/commandmanager.h"
@@ -712,6 +713,7 @@ private slots:
         TcpClientTransport client(1);
         QSignalSpy clientState(&client, &AbstractTransport::stateChanged);
         QSignalSpy clientData(&client, &AbstractTransport::dataReceived);
+        QSignalSpy connected(&server, &AbstractTransport::peerConnected);
         client.start(makeDraft(PortDraft::TcpClient,
             {{"client.host", "127.0.0.1"}, {"client.port", port}, {"client.timeout", 5000}}), 1);
         QTRY_COMPARE(lastState(clientState), int(Transport::State::Open));
@@ -731,6 +733,8 @@ private slots:
         QCOMPARE(server.write("pong", peerId), qint64(4));
         QTRY_VERIFY(!clientData.isEmpty());
         QCOMPARE(clientData.last().at(2).toByteArray(), QByteArray("pong"));
+        const auto clientSource = clientData.last().at(1).value<Traffic::Source>();
+        QVERIFY(clientSource.peerAddress.endsWith(QStringLiteral(":%1").arg(port)));
 
         // 服务器 → 全部客户端（peerId 为空的广播语义）
         QCOMPARE(server.write("all", QUuid()), qint64(3));
@@ -739,6 +743,19 @@ private slots:
         for (int i = 0; i < clientData.count(); ++i)
             broadcastSeen |= clientData.at(i).at(2).toByteArray() == QByteArray("all");
         QVERIFY(broadcastSeen);
+
+        // 服务端握手完成时发出接入事件，地址进数据区。监听成功本身不算对端已连接。
+        QTRY_COMPARE(connected.count(), 1);
+        QCOMPARE(connected.at(0).at(1).toUuid(), peerId);
+        QVERIFY(connected.at(0).at(2).toString().startsWith(QStringLiteral("127.0.0.1:")));
+        // 客户端连上时的已打开说明带对端地址，数据区状态行直接能读出连的是谁。
+        bool clientOpenHasPeer = false;
+        for (int i = 0; i < clientState.count(); ++i) {
+            if (clientState.at(i).at(1).toInt() != int(Transport::State::Open)) continue;
+            clientOpenHasPeer = clientState.at(i).at(2).toString()
+                .contains(QStringLiteral("127.0.0.1:%1").arg(port));
+        }
+        QVERIFY(clientOpenHasPeer);
 
         // 未知 peer 的定向写是失败而不是静默广播
         QCOMPARE(server.write("ghost", QUuid::createUuid()), qint64(-1));
@@ -901,9 +918,11 @@ private slots:
             return Traffic::Message{};
         };
         // TX：已打开且目标是明确地址 → 本地写出完成；身份与单调时钟已打戳。
+        // 发送目标写在来源地址上，日志才能看出这一笔发给了谁。
         const auto tx = findMessage(Traffic::Direction::Transmit, 1, "ping");
         QCOMPARE(tx.state, Traffic::State::LocalCompleted);
         QVERIFY(tx.id != 0 && tx.monotonicNs > 0);
+        QCOMPARE(tx.source.peerAddress, QStringLiteral("127.0.0.1:%1").arg(port));
         // RX：轮询重查 spy（QTRY 的表达式每次迭代都重新执行 findMessage）。
         QTRY_VERIFY(findMessage(Traffic::Direction::Receive, 0, "ping").id != 0);
         const auto rx = findMessage(Traffic::Direction::Receive, 0, "ping");
@@ -924,7 +943,8 @@ private slots:
             for (const auto &params : messages) {
                 const auto message = params.at(0).value<Traffic::Message>();
                 if (message.direction == Traffic::Direction::State && message.source.endpointIndex == 0
-                    && message.statusText.contains(QStringLiteral("UDP 无连接")))
+                    && message.statusText.contains(QStringLiteral("对端"))
+                    && message.statusText.contains(QStringLiteral("已连接")))
                     ++count;
             }
             return count;
@@ -947,6 +967,149 @@ private slots:
         // 关闭时的空列表广播用于复位界面显示。
         QVERIFY(!peers.isEmpty());
         QVERIFY(peers.last().at(1).toStringList().isEmpty());
+    }
+
+    void bridgeCopiesReceivedBytesToTheOtherEndpoint()
+    {
+        EndpointRuntime runtime;
+        QSignalSpy states(&runtime, &EndpointRuntime::endpointStateChanged);
+        QSignalSpy messages(&runtime, &EndpointRuntime::messageReceived);
+
+        int portA = 0;
+        for (int candidate = PortScanBegin; candidate <= PortScanEnd && portA == 0; ++candidate) {
+            runtime.openEndpoint(0, makeDraft(PortDraft::Udp,
+                {{"udp.address", "127.0.0.1"}, {"udp.port", candidate},
+                 {"udp.target", ""}, {"udp.targetPort", 0}}));
+            if (lastState(states) == int(Transport::State::Open)) portA = candidate;
+            else { runtime.closeEndpoint(0); states.clear(); }
+        }
+        QVERIFY(portA != 0);
+
+        UdpTransport sinkB(0);
+        QSignalSpy sinkBState(&sinkB, &AbstractTransport::stateChanged);
+        QSignalSpy sinkBData(&sinkB, &AbstractTransport::dataReceived);
+        const int sinkPort = findFreePort([&sinkB, &sinkBState](int candidate) {
+            sinkB.start(makeDraft(PortDraft::Udp,
+                {{"udp.address", "127.0.0.1"}, {"udp.port", candidate},
+                 {"udp.target", ""}, {"udp.targetPort", 0}}), 1);
+            const bool open = lastState(sinkBState) == int(Transport::State::Open);
+            if (!open) sinkBState.clear();
+            return open;
+        });
+        QVERIFY(sinkPort != 0);
+
+        int portB = 0;
+        for (int candidate = portA + 1; candidate <= PortScanEnd && portB == 0; ++candidate) {
+            if (candidate == sinkPort) continue;
+            runtime.openEndpoint(1, makeDraft(PortDraft::Udp,
+                {{"udp.address", "127.0.0.1"}, {"udp.port", candidate},
+                 {"udp.target", "127.0.0.1"}, {"udp.targetPort", sinkPort}}));
+            if (lastState(states) == int(Transport::State::Open)) portB = candidate;
+            else { runtime.closeEndpoint(1); states.clear(); }
+        }
+        QVERIFY(portB != 0);
+
+        // 未建立时，发往 A 的数据报只留在 A，不出现在 B 的发送目标上。
+        UdpTransport outsider(0);
+        QSignalSpy outsiderState(&outsider, &AbstractTransport::stateChanged);
+        outsider.start(makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
+             {"udp.target", "127.0.0.1"}, {"udp.targetPort", portA}}), 1);
+        QCOMPARE(lastState(outsiderState), int(Transport::State::Open));
+        QCOMPARE(outsider.write(QByteArray("before"), QUuid()), qint64(6));
+        QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QList<QVariant> &params) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            return message.direction == Traffic::Direction::Receive && message.raw == QByteArray("before");
+        }));
+        QCOMPARE(sinkBData.count(), 0);
+
+        BridgeLink link;
+        link.enabled = true;
+        link.direction = int(BridgeDirection::AtoB);
+        runtime.setBridge(link);
+        QCOMPARE(outsider.write(QByteArray("live"), QUuid()), qint64(4));
+        QTRY_COMPARE(sinkBData.count(), 1);
+        QCOMPARE(sinkBData.at(0).at(2).toByteArray(), QByteArray("live"));
+        QCOMPARE(sinkBData.at(0).at(3).toInt(), int(Traffic::Framing::Datagram));
+
+        const auto forwarded = [&messages] {
+            int count = 0;
+            for (const auto &params : messages) {
+                const auto message = params.at(0).value<Traffic::Message>();
+                if (message.direction == Traffic::Direction::Transmit
+                    && message.origin == Traffic::Origin::Forward
+                    && message.raw == QByteArray("live"))
+                    ++count;
+            }
+            return count;
+        };
+        QTRY_COMPARE(forwarded(), 1);
+        QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [&](const QList<QVariant> &params) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            return message.direction == Traffic::Direction::Transmit
+                && message.origin == Traffic::Origin::Forward
+                && message.raw == QByteArray("live")
+                && message.source.peerAddress == QStringLiteral("127.0.0.1:%1").arg(sinkPort);
+        }));
+
+        // 单向 A → B：发往 B 的字节留在 B，不经 A 再写出去。
+        UdpTransport toB(0);
+        QSignalSpy toBState(&toB, &AbstractTransport::stateChanged);
+        toB.start(makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
+             {"udp.target", "127.0.0.1"}, {"udp.targetPort", portB}}), 1);
+        QCOMPARE(lastState(toBState), int(Transport::State::Open));
+        QCOMPARE(toB.write(QByteArray("only-b"), QUuid()), qint64(6));
+        QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QList<QVariant> &params) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            return message.direction == Traffic::Direction::Receive
+                && message.source.endpointIndex == 1
+                && message.raw == QByteArray("only-b");
+        }));
+        QCOMPARE(sinkBData.count(), 1);
+
+        link.enabled = false;
+        runtime.setBridge(link);
+        QCOMPARE(outsider.write(QByteArray("after"), QUuid()), qint64(5));
+        QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QList<QVariant> &params) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            return message.direction == Traffic::Direction::Receive && message.raw == QByteArray("after");
+        }));
+        QCOMPARE(sinkBData.count(), 1);
+        outsider.stop();
+        toB.stop();
+        sinkB.stop();
+        runtime.shutdown();
+    }
+
+    void openingDiscardsUnreadInput()
+    {
+        UdpTransport receiver(0);
+        QSignalSpy state(&receiver, &AbstractTransport::stateChanged);
+        QSignalSpy received(&receiver, &AbstractTransport::dataReceived);
+        const int port = findFreePort([&receiver, &state](int candidate) {
+            receiver.start(makeDraft(PortDraft::Udp,
+                {{"udp.address", "127.0.0.1"}, {"udp.port", candidate},
+                 {"udp.target", ""}, {"udp.targetPort", 0}}), 1);
+            const bool open = lastState(state) == int(Transport::State::Open);
+            if (!open) state.clear();
+            return open;
+        });
+        QVERIFY(port != 0);
+
+        QUdpSocket sender;
+        QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
+        QCOMPARE(sender.writeDatagram("stale", QHostAddress::LocalHost, quint16(port)), qint64(5));
+        // 数据报先到达套接字，再由打开动作丢掉，不能进入本次接收。
+        QTRY_VERIFY(receiver.findChild<QUdpSocket *>()->hasPendingDatagrams());
+        receiver.discardPendingInput();
+        QTest::qWait(40);
+        QCOMPARE(received.count(), 0);
+
+        QCOMPARE(sender.writeDatagram("fresh", QHostAddress::LocalHost, quint16(port)), qint64(5));
+        QTRY_COMPARE(received.count(), 1);
+        QCOMPARE(received.at(0).at(2).toByteArray(), QByteArray("fresh"));
+        receiver.stop();
     }
 
     void ymodemRoundTripOverRawLoopback()

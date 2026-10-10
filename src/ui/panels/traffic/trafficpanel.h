@@ -155,7 +155,7 @@ private:
     // 时也要能点。分工不同——方向管"哪些行进来"，显示开关管"每行长什么样"。
     QPushButton *m_filterToggle;
     FilterFlags *m_flags;
-    ViewToggles *m_viewToggles = nullptr; // 纯数据模式 / 同时显示 HEX / 自动换行
+    ViewToggles *m_viewToggles = nullptr; // 前缀 / HEX / 换行
     FilterBar *m_filterBar;
     // 过滤标志开关
     QAction *m_stateAction;
@@ -166,7 +166,7 @@ private:
     // 折叠状态用显式标志而不是 isVisible()：窗口整体隐藏时 isVisible() 恒为假，
     // 记忆状态会跟着被读错。
     bool m_filterExpanded = true;
-    // A/B 端点开关直接放在顶栏选项栏里，快捷切换显示范围；其余显示选项在"显示设置"菜单。
+    // A/B 端点开关紧挨过滤按钮，使能时为黄；其余显示选项在「显示」菜单。
     QPushButton *m_portAButton;
     QPushButton *m_portBButton;
     // 行内容开关：全部在到达时生效（控制台语义），纯数据模式下被忽略。
@@ -176,8 +176,8 @@ private:
     QAction *m_timestampAction;
     QAction *m_directionAction;
     QAction *m_lengthAction;  // 数据长度 [N B]
-    QAction *m_hexAction;     // 同时显示 HEX 对照
-    QAction *m_pureAction;    // 纯数据视图：无一切前缀
+    QAction *m_hexAction;     // 另起一行显示 HEX 对照
+    QAction *m_pureAction;    // 「前缀」：勾选显示行号/时间/方向/长度，取消后只留数据
     QAction *m_wrapAction;    // 自动换行
     QAction *m_recordAction;  // 记录到文件：按当前显示格式持续写日志
     QAction *m_logLocationAction = nullptr;       // 日志位置：改目录

@@ -23,9 +23,12 @@ FilterFlags::FilterFlags(QWidget *parent) : QWidget(parent)
         tr("RX"), tr("显示接收 RX"));
     m_tx = makeFlag(QStringLiteral("filterTx"), QStringLiteral(":/icons/arrow-up-bold.svg"),
         tr("TX"), tr("显示发送 TX"));
+    // 紧挨 TX：桥接转发在数据区就是一条 TX·转发。关掉它只藏这一类行，收发本身不受影响。
+    m_forward = makeFlag(QStringLiteral("filterForward"), QStringLiteral(":/icons/swap-horizontal.svg"),
+        tr("转发"), tr("在数据区显示桥接转发的数据。关闭后仍继续转发，只是不再出现在这里。"));
 
-    for (auto *button : {m_rx, m_tx}) row->addWidget(button);
-    // 两个方向开关都按自己的 sizeHint 占位：顶栏那一行的下限因此不需要外部求和
+    for (auto *button : {m_rx, m_tx, m_forward}) row->addWidget(button);
+    // 开关都按自己的 sizeHint 占位：顶栏那一行的下限因此不需要外部求和
     // （见 rowmetrics.h）。
     pinRowToContents(row);
 }
@@ -52,6 +55,7 @@ DirectionFlags FilterFlags::directions() const
     DirectionFlags state;
     state.rx = m_rx->isChecked();
     state.tx = m_tx->isChecked();
+    state.forward = m_forward->isChecked();
     return state;
 }
 
@@ -60,5 +64,6 @@ void FilterFlags::restore(const DirectionFlags &state)
     m_restoring = true;
     m_rx->setChecked(state.rx);
     m_tx->setChecked(state.tx);
+    m_forward->setChecked(state.forward);
     m_restoring = false;
 }

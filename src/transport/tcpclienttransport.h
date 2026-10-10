@@ -20,8 +20,11 @@ public:
     void start(const PortDraft &draft, quint64 generation) override;
     void stop() override;
     qint64 write(const QByteArray &payload, const QUuid &peerId) override;
+    void discardPendingInput() override;
+    QString writeAddress(const QUuid &peerId) const override;
 
 private:
+    QString peerText() const;
     QTcpSocket *m_socket = nullptr;
     QTimer *m_timeout = nullptr;
     bool m_open = false;      // 已进入 Open（用于区分错误发生在哪个阶段）
