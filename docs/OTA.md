@@ -61,6 +61,8 @@ powershell.exe -File qqcom-updater.ps1 \
 
 覆盖时只处理发布包中的文件，不执行 zip 内脚本。安装目录建议使用用户可写的 `%LOCALAPPDATA%\Programs\QQCom`，这样普通用户可以完成升级；如果采用 `Program Files`，更新器需要管理员权限或单独安装器。
 
+第一次上线的实际地址、哈希和操作顺序见 [0.1.0 发布记录](RELEASE_0.1.0.md)。
+
 ## 发布流程
 
 1. 修改 `version/version.json`，更新 `CHANGELOG.md`，提交并打 tag `v<version>`。
