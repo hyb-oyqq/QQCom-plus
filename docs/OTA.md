@@ -10,7 +10,7 @@ Gitee 仓库只保存源码和清单模板，二进制放在 Release 附件：
 
 ```text
 https://gitee.com/api/v5/repos/qinjmin/qqcom/contents/ota/stable.json?ref=master
-https://gitee.com/qinjmin/qqcom/releases/download/v0.2.0/QQCom-0.2.0-win64.zip
+https://gitee.com/qinjmin/qqcom/releases/download/v<version>/QQCom-<version>-win64.zip
 ```
 
 稳定清单应在 zip 已上传、校验并人工试装后再更新。清单示例见 [`ota/stable.example.json`](../ota/stable.example.json)。
@@ -61,9 +61,9 @@ powershell.exe -File qqcom-updater.ps1 \
 
 覆盖时只处理发布包中的文件，不执行 zip 内脚本。安装目录建议使用用户可写的 `%LOCALAPPDATA%\Programs\QQCom`，这样普通用户可以完成升级；如果采用 `Program Files`，更新器需要管理员权限或单独安装器。
 
-第一次上线的实际地址、哈希和操作顺序见 [0.1.0 发布记录](RELEASE_0.1.0.md)。
-
 ## 发布流程
+
+发布前先清理 `docs/`：删掉已经过时的说明，把还在用的文档改成和当前程序一致。版本记录仍写仓库根目录的 `更新记录.md`，不在 `docs/` 另写一份。
 
 1. 版本号直接改 `version/version.h` 里的主/次/修订号，构建只刷新时间戳。按 `更新记录.md` 文首格式写本版记录，提交并打 tag `v<version>`。
 2. 使用固定 Qt Kit 构建 Release，并运行 core/UI 测试。
@@ -77,12 +77,12 @@ powershell.exe -File qqcom-updater.ps1 \
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 `
   -BinaryDir build/release/release `
-  -Version 0.2.0 `
-  -BaseUrl https://gitee.com/qinjmin/qqcom/releases/download/v0.2.0
+  -Version 1.0.0 `
+  -BaseUrl https://gitee.com/qinjmin/qqcom/releases/download/v1.0.0
 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate_ota_manifest.ps1 `
   -ManifestPath build/ota/manifest.json `
-  -PackagePath build/ota/QQCom-0.2.0-win64.zip
+  -PackagePath build/ota/QQCom-1.0.0-win64.zip
 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_ota.ps1
 
@@ -91,11 +91,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/local_update_test.ps
   -BinaryDir build/release/release
 ```
 
-## 分阶段落地
+## 还没做的部分
 
-1. **发布基础**：版本清单、打包脚本、校验脚本和 Release 约定。
-2. **客户端检查**：加入 Qt `QNetworkAccessManager`，启动后延迟检查清单，状态栏提供「检查更新」。
-3. **下载和更新器**：下载 zip、校验 SHA-256、启动 updater、退出主程序、覆盖并重启。
-4. **运营增强**：增加 beta 通道、强制升级、下载进度、代理/超时设置和错误日志上传（仍不上传用户通信数据）。
-
-第一版建议只实现前 3 个阶段，不做后台静默强制升级。用户看到版本号、大小、Release 说明后确认更新，失败时重试即可。
+检查、下载、校验、覆盖和重启已经接入。还没做的是代码签名、清单签名、代理和超时设置、错误日志上传。更新仍由用户确认，不做后台静默强制升级。错误日志不上传用户通信数据。

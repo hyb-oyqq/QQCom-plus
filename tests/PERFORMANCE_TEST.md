@@ -24,7 +24,7 @@ cd ..\..
 | `perf/command_table_perf.pro` | `QQCom_command_perf.exe 250 500` | 指令表删除条数/总行数 |
 | `perf/command_refresh_perf.pro` | `QQCom_command_refresh_perf.exe 2000` | 指令表建行、布局、整表刷新及控件数量 |
 
-组帧工程可传 `FRAMER_SOURCE_ROOT=<源码目录>`，目录需含 `app/receiveframer.*` 和 `domain/receiveframing.h`，用同一探针对照旧实现。大阈值下避免重复扫描的历史证据见 [审查归档](../docs/archive/2026-10-07-review.md)。指令探针另将结果写入当前工作目录的 `QQCom_cmdperf_out.txt` / `QQCom_cmdrefresh_out.txt`。
+组帧工程可传 `FRAMER_SOURCE_ROOT=<源码目录>`，目录需含 `app/receiveframer.*` 和 `domain/receiveframing.h`，用同一探针对照旧实现。指令探针另将结果写入当前工作目录的 `QQCom_cmdperf_out.txt` / `QQCom_cmdrefresh_out.txt`。
 
 监视探针需同时看总周期、等待和长尾。所谓“净工作”是总周期减人为等待，等待期间也可能处理插入，不能单看该差值比较不同实现。历史重投影随条数增长；不要由小批次结果推断百万行仍不卡顿。批量文本编辑块应保留，逐字段单独插入会放大文档布局开销。
 
