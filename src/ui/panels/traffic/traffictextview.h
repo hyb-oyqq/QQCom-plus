@@ -40,7 +40,7 @@ public:
         bool prefixLineNumber = true;  // 行号（会话内绝对计数）
         bool prefixTimestamp = true;   // 行首 HH:mm:ss.zzz
         bool prefixLength = true;      // 方向后面的 [NB]；端口方向关掉时改放在时间后面
-        bool alwaysShowHex = true;     // 数据后另起一行显示 HEX 对照（HEX 格式下无意义，自动省略）
+        bool alwaysShowHex = false;    // 数据后另起一行显示 HEX 对照（HEX 格式下无意义，自动省略）
 
         // 面板用它判断"外观是否变了、要不要重投影"。写成显式比较而不是依赖
         // 默认的 operator==：C++17 下没有默认比较，且逐字段列出更不容易漏改。

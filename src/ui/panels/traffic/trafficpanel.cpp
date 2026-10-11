@@ -167,7 +167,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_prefixLineNumberAction->setToolTip(tr("每条记录开头显示序号，例如「1」「2」"));
     m_prefixTimestampAction = rowToggle("prefixTimestamp", tr("前缀时间戳"), true);
     m_prefixTimestampAction->setToolTip(tr("每条记录显示到达时间，精确到毫秒"));
-    m_prefixLengthAction = rowToggle("prefixLength", tr("前缀数据长度"), false);
+    m_prefixLengthAction = rowToggle("prefixLength", tr("前缀数据长度"), true);
     m_prefixLengthAction->setToolTip(tr("在方向后面显示本条字节数，写成 [12B]"));
     // 关掉「显示前缀」时，下面三项置灰且点不了。HEX 对照和换行不跟前缀走。
     connect(m_prefixAction, &QAction::toggled, this, [this](bool prefixes) {
@@ -177,7 +177,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     displayMenu->addSeparator();
     m_alwaysShowHexAction = rowToggle("alwaysShowHex", tr("始终显示HEX"), false);
     m_alwaysShowHexAction->setToolTip(tr("数据行之后另起一行显示 HEX 对照；显示格式已经是 HEX 时自动省略"));
-    m_autoWrapAction = rowToggle("autoWrap", tr("自动换行"), false);
+    m_autoWrapAction = rowToggle("autoWrap", tr("自动换行"), true);
     m_autoWrapAction->setToolTip(tr("按窗口宽度折行显示；关闭时长报文水平滚动"));
     connect(m_autoWrapAction, &QAction::toggled, this, [this](bool wrap) {
         m_text->setLineWrapping(wrap);
@@ -820,9 +820,9 @@ void TrafficPanel::loadPreferences()
         m_preferences->value("traffic/number", true)).toBool());
     m_prefixTimestampAction->setChecked(m_preferences->value("traffic/prefixTimestamp",
         m_preferences->value("traffic/timestamp", true)).toBool());
-    // 0.1.0 里长度和 HEX 的缺省是关。键不存在时必须沿用旧缺省，不能改成开。
+    // 初次启动：前缀数据长度开，始终显示 HEX 关。键不存在时用这个缺省。
     m_prefixLengthAction->setChecked(m_preferences->value("traffic/prefixLength",
-        m_preferences->value("traffic/length", false)).toBool());
+        m_preferences->value("traffic/length", true)).toBool());
     m_alwaysShowHexAction->setChecked(m_preferences->value("traffic/alwaysShowHex",
         m_preferences->value("traffic/hex", false)).toBool());
     const bool prefixOn = m_preferences->contains("traffic/prefix")
@@ -832,9 +832,9 @@ void TrafficPanel::loadPreferences()
     // toggled 在值没变时不发。启动时前缀已是关掉的，要在这里把下面三项置灰。
     for (auto *action : {m_prefixLineNumberAction, m_prefixTimestampAction, m_prefixLengthAction})
         action->setEnabled(prefixOn);
-    // 0.1.0 里换行的缺省是关。
+    // 初次启动自动换行打开。键不存在时用这个缺省。
     m_autoWrapAction->setChecked(m_preferences->value("traffic/autoWrap",
-        m_preferences->value("traffic/wrap", false)).toBool());
+        m_preferences->value("traffic/wrap", true)).toBool());
     m_follow->setChecked(m_preferences->value("traffic/follow", true).toBool());
     m_portAButton->setChecked(m_preferences->value("traffic/portA", true).toBool());
     m_portBButton->setChecked(m_preferences->value("traffic/portB", true).toBool());

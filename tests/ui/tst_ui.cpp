@@ -489,7 +489,7 @@ private slots:
         QVERIFY(text && model && bar && rebuild);
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
-        // 初次启动默认带 HEX 对照行。本用例按一条消息一块计数，先关掉对照。
+        // 始终显示 HEX 缺省关闭。这里再关一次，保证一条消息只占一块。
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         // 还没收到任何记录时无从回溯，按钮应该是灰的。
         QVERIFY(!rebuild->isEnabled());
@@ -1395,7 +1395,7 @@ private slots:
                  "filter/caseSensitive", "filter/rx", "filter/tx", "filter/forward", "filter/state",
                  "filter/warning", "filter/error", "filter/states", "filter/warnings", "filter/errors",
                  "filter/expanded",
-                 // 显示开关同样会落盘：某个用例把「始终显示 HEX」打开后不关，
+                 // 显示开关同样会落盘：某个用例改过长度、HEX、换行后不还原，
                  // 下一个用例就会在"行数多一倍"的前提下断言——与过滤条件同一类串扰。
                  "traffic/prefix", "traffic/prefixLineNumber", "traffic/prefixTimestamp",
                  "traffic/prefixLength", "traffic/alwaysShowHex", "traffic/autoWrap",
@@ -3896,7 +3896,7 @@ private slots:
         // 格式切换是"外观"：按契约立刻作用于**已收到/已显示**的行，新到达的消息也按新格式渲染
         // （r5 起不再是"只影响新行"的控制台语义）。切完先等掉那一刻必然发生的防抖重投影。
         // 已知字节流片段（HEX 01 03 00 00 00 02 C4 0B）渲染为 DEC，并带 ⏎ 续接标记——边界是消息的事实。
-        // DEC 下默认会再跟一行 HEX 对照。本用例一行一条，先关掉对照。
+        // 始终显示 HEX 缺省关闭。这里再关一次，保证一行一条。
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         trafficFormat->setCurrentIndex(1); // DEC
         QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次重投影，等掉它再断言
@@ -4132,7 +4132,7 @@ private slots:
         auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
         QVERIFY(text);
         // 换行语义属于文本类渲染：HEX/DEC 本身没有换行概念，切到 UTF-8 验证。
-        // 默认 HEX 对照会再占一块，关掉后块数才等于报文本身的行数。
+        // 始终显示 HEX 缺省关闭。这里再关一次，块数才等于报文本身的行数。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->setCurrentText(QStringLiteral("UTF-8"));
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
 
@@ -4443,7 +4443,7 @@ private slots:
         // 不能把基线建立在"重投影还没发生"上（旧断言正是这么过期的：它赌的是 HEX 还没重画）。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
-        // 默认 HEX 对照会让一条消息占两块。本用例按一条消息一行计数，先关掉。
+        // 始终显示 HEX 缺省关闭。这里再关一次，保证一条消息一行。
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次重投影，等掉它
         const auto baseline = text->document()->lastBlock().text();
@@ -5034,7 +5034,7 @@ private slots:
         QVERIFY(text && model && keywords && apply && timestamp && format && clear);
 
         // 归一化到确定起点，避免被同一次运行里更早的用例留下的共享偏好影响。
-        // 切到 UTF-8 后默认 HEX 对照会让一条消息占两行。本用例一行一条，先关掉。
+        // 始终显示 HEX 缺省关闭。这里再关一次，保证一行一条。
         keywords->clear();
         format->setCurrentText(QStringLiteral("HEX"));
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
@@ -5167,7 +5167,7 @@ private slots:
         keywords->clear();
         clear->click();
         format->setCurrentText(QStringLiteral("DEC")); // DEC 渲染 = 十进制字节值，如 "0 255"
-        // DEC 下默认 HEX 对照会让一条消息占两行。本用例一行一条。
+        // 始终显示 HEX 缺省关闭。这里再关一次，保证一行一条。
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         window.findChild<QPushButton *>(QStringLiteral("showPortA"))->setChecked(true);
         if (auto *rx = window.findChild<QPushButton *>(QStringLiteral("filterRx")))
@@ -5225,7 +5225,7 @@ private slots:
         QVERIFY(text && model);
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
-        // 默认 HEX 对照会插在数据行和续行之间。本用例只看报文本身的两块。
+        // 始终显示 HEX 缺省关闭。这里再关一次，只看报文本身的两块。
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
                                      ->property("endpoint").toUuid();
@@ -5398,8 +5398,6 @@ private slots:
         window.show();
         auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
         QVERIFY(text);
-        QCOMPARE(text->lineWrapMode(), QPlainTextEdit::NoWrap);
-        window.findChild<QAction *>(QStringLiteral("autoWrap"))->setChecked(true);
         QCOMPARE(text->lineWrapMode(), QPlainTextEdit::WidgetWidth);
         window.findChild<QAction *>(QStringLiteral("autoWrap"))->setChecked(false);
         QCOMPARE(text->lineWrapMode(), QPlainTextEdit::NoWrap);

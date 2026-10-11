@@ -171,8 +171,8 @@ TrafficTextView::TrafficTextView(QWidget *parent) : QPlainTextEdit(parent)
     setMaximumBlockCount(m_blockBudget); // 从头部整块淘汰，回滚第 1 条在预算内永远可行
     setTextInteractionFlags(Qt::TextSelectableByKeyboard | Qt::TextSelectableByMouse);
     setCenterOnScroll(false);
-    // 初次启动不折行，长报文水平滚动。「设置」里的「自动换行」再改成按窗口宽度折行。
-    setLineWrapMode(QPlainTextEdit::NoWrap);
+    // 初次启动按窗口宽度折行。「设置」里关掉「自动换行」后改为水平滚动。
+    setLineWrapMode(QPlainTextEdit::WidgetWidth);
     // 整行等宽，行号、时间、载荷才能上下对齐，看起来才是命令行而不是比例字体的表格。
     // 字体**不在代码里设**：全局 QSS 的 font-family 会覆盖 setFont()（实测），
     // 统一由 QSS 保证——与发送区正文/预览同一套，见用例 hexDisplayFontIsUniform。
