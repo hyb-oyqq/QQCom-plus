@@ -97,7 +97,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 
 - [界面与使用约定](docs/UI_DESIGN.md)
 - [开发与验证](docs/DEVELOPMENT.md)
 - [OTA 自动升级方案](docs/OTA.md)
-- [参考来源](docs/REFERENCES.md)
 - [贡献指南](CONTRIBUTING.md)
 - [更新记录](更新记录.md)
 

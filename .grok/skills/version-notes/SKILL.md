@@ -46,7 +46,7 @@ description: >
 
 ## 文档清理
 
-留在 `docs/` 的是当前还成立的说明：架构、界面约定、开发验证、OTA 流程、参考来源。
+留在 `docs/` 的是当前还成立的说明：架构、界面约定、开发验证、OTA 流程。图标草稿在 `design/`，外部工程阅读笔记在 `docs/REFERENCES.md`，两者都留在本机，已写入 `.gitignore`，不提交。
 
 删掉这些：
 
@@ -57,17 +57,31 @@ description: >
 
 改写时只改失实的句子。不要为了统一口吻重写整篇还在用的文档。删文件前先搜仓库里的链接，把 README、测试说明和 OTA 文档里的引用一起改掉。
 
-## 发行版信息
+## 发布
 
-用户要发布版本、创建发行版，或说「生成发行版信息」时，按 Gitee「创建发行版」页的字段写好，方便直接粘贴。不代替用户点「创建发行版」，除非用户明确要求代为创建。
+用户说发布、创建发行版、生成发行版信息时，做完下面整份清单再停。只写网页文案、只推源码、只建发行版，都算没发布完。
 
-字段固定为：
+旧客户端读 `master` 上的 `ota/stable.json` 判断有没有新版本，不读发行版页面，也不比窗口标题里的构建时间。清单 `version` 不高于客户端版本时，客户端显示已是最新版本。
 
-- 标签：`v` 加 `version/version.h` 的 `主.次.修订`，例如 `v1.0.0`。
+按这个顺序做。前一步没完成就停，不跳到后面。
+
+1. 定版顺序里的审查、文档清理、版本号、`更新记录.md` 都已完成。版本号只来自 `version/version.h` 的三个数字。
+2. 跑 `build.bat`。确认 `build/release/release/QQCom.exe` 编出来了。
+3. 跑 `scripts/package_release.ps1`，再跑 `scripts/validate_ota_manifest.ps1`。版本和下载地址用当前版本：`QQCom-<版本>-win64.zip`，地址是 `https://gitee.com/qinjmin/qqcom/releases/download/v<版本>/QQCom-<版本>-win64.zip`。
+4. 把发行版字段交给用户粘贴，等用户说发行版和附件已经建好。网页上的「创建发行版」由用户点，除非用户明确要求代为创建。
+5. 公开下载附件，核对字节数和 SHA-256 与当次 `build/ota/manifest.json` 一致。不一致就停下，此时还不要改 `ota/stable.json`。
+6. 核对通过后，把 `build/ota/manifest.json` 原样覆盖 `ota/stable.json`。`version`、`download.url`、`download.size`、`download.sha256`、`notesUrl` 都来自这份清单，不沿用上一版的数字。`ota/stable.example.json` 是空模板，不改。
+7. 提交并推送 `ota/stable.json`。再读一次远端 `https://gitee.com/api/v5/repos/qinjmin/qqcom/contents/ota/stable.json?ref=master`，确认解开后的 `version` 是这一版。用户没说推送时停在这里说明，不推。
+
+发行版字段：
+
+- 标签：`v` 加版本号，例如 `v1.0.0`。
 - 目标：`master`。
-- 发行版的标题：`更新记录.md` 文首当前这一版的标题，去掉开头的 `# `。例如记录是 `# V202610111436.001.0000` 时，标题填 `V202610111436.001.0000`。标题不写 `v1.0.0`，那是标签。
+- 发行版的标题：`更新记录.md` 文首当前这一版的标题，去掉开头的 `# `。记录是 `# V202610111436.001.0000` 时，标题填 `V202610111436.001.0000`。
 - 预览版本：不勾选。
-- 描述：`更新记录.md` 文首当前这一版的整段，从 `# V` 标题到该版最后一条，原样照抄，不改编号、不补空格、不另写摘要。
-- 附件：`build/ota/QQCom-<版本>-win64.zip` 的完整路径。包还没打时先说明，不编造文件名。包已打出时附上字节数和 SHA-256，数字只取 `build/ota/manifest.json` 或当次打包输出。
+- 描述：`更新记录.md` 文首当前这一版的整段，从 `# V` 标题到该版最后一条，原样照抄。
+- 附件：`build/ota/QQCom-<版本>-win64.zip` 的完整路径。附上字节数和 SHA-256，只取当次 `build/ota/manifest.json`。
 
-创建发行版只是把 zip 挂到标签上。旧版本检查更新读的是 `master` 上的 `ota/stable.json`，不读发行版页面。附件公开下载、大小和 SHA-256 与 `build/ota/manifest.json` 一致后，把这份清单原样写成 `ota/stable.json` 并推到 `master`。清单里的 `version` 必须高于旧客户端里的版本号；只推源码或只建发行版，旧客户端仍会显示已是最新版本。
+用户拿旧版本截图说检查更新不对时，先读窗口标题里的版本号，再拉远端 `ota/stable.json`。标题版本低于清单版本才应该提示更新。不要把标题版本当成正在发布的版本。
+
+交付时列出已经改过并推送的文件、发行版各字段、附件路径、大小和 SHA-256，以及远端清单里的 `version`。缺任何一项就写明还没做。

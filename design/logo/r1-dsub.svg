@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <!-- 方案 A「D-Sub」：DB9 串口插座的梯形轮廓，本身就读作一个 D（Debug）。
-       实心色块保证体量；插针孔用负空间（白）挖出，小尺寸下负空间比正细节更耐缩。 -->
-  <path d="M60 58 H136 L196 198 H60 Z"
-        fill="#1d4ed8" stroke="#1d4ed8" stroke-width="16" stroke-linejoin="round"/>
-
-  <rect x="88" y="99" width="58" height="22" rx="11" fill="#ffffff"/>
-  <rect x="88" y="135" width="58" height="22" rx="11" fill="#ffffff"/>
-</svg>

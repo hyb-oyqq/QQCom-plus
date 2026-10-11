@@ -97,3 +97,7 @@ __pycache__/
 # Local AI assistant workspace data
 /.workbuddy/
 .gstack/
+
+# Design drafts and working notes stay on this machine.
+/design/
+/docs/REFERENCES.md
