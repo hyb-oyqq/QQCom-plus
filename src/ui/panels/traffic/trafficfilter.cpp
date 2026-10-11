@@ -33,7 +33,10 @@ TrafficFilter::Matcher::Matcher(const Options &options, PayloadCodec::Format for
 bool TrafficFilter::Matcher::accepts(const Traffic::Message &r) const
 {
     // 端点与方向是消息自带的事实字段，直接按结构判等，不解析显示文本。
-    if (m_options.endpoints.isEmpty() || !m_options.endpoints.contains(r.source.endpointId)) return false;
+    // 桥接状态没有端点身份。A、B 只要有一端还在显示，这条日志就该留下。
+    if (m_options.endpoints.isEmpty()
+        || (r.source.endpointIndex >= 0 && !m_options.endpoints.contains(r.source.endpointId)))
+        return false;
     switch (r.direction) {
     case Traffic::Direction::Receive:
         if (!m_options.rx) return false;

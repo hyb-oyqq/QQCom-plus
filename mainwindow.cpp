@@ -88,7 +88,7 @@ ReceiveFraming framingFromVariant(const QVariantMap &m)
 QVariantMap draftToVariant(const PortDraft &d)
 {
     return {{"id", d.id.toString()}, {"kind", d.kind}, {"values", d.values},
-        {"framing", framingToVariant(d.framing)}};
+        {"autoRecover", d.autoRecover}, {"framing", framingToVariant(d.framing)}};
 }
 
 PortDraft draftFromVariant(const QVariantMap &m)
@@ -97,6 +97,7 @@ PortDraft draftFromVariant(const QVariantMap &m)
     const auto id = QUuid::fromString(m.value("id").toString());
     if (!id.isNull()) d.id = id; // 端点身份跨会话稳定：监视区开关认它
     d.kind = m.value("kind", d.kind).toInt();
+    d.autoRecover = m.value("autoRecover", false).toBool();
     d.values = m.value("values").toMap();
     d.framing = framingFromVariant(m.value("framing").toMap());
     return d;
@@ -134,6 +135,7 @@ MainWindow::MainWindow(QWidget *parent)
     auto *preferences = new PreferencesStore(this);
     m_preferences = preferences;
     auto *discovery = new PortDiscoveryService(this);
+    m_discovery = discovery;
     const auto reloadHistory = [this, preferences] {
         for (auto *selector : m_selectors)
             selector->setAddressHistory(preferences->addressHistory(false), preferences->addressHistory(true));
@@ -161,6 +163,14 @@ MainWindow::MainWindow(QWidget *parent)
         connect(selector, &PortSelectorWidget::addressCommitted, preferences, &PreferencesStore::rememberAddress);
         connect(discovery, &PortDiscoveryService::portsChanged, selector, &PortSelectorWidget::setSerialPorts);
     }
+    connect(discovery, &PortDiscoveryService::scanFinished, this,
+        [this](quint64 generation, const QList<SerialPortDescriptor> &ports) {
+            m_serialScanGeneration = generation;
+            m_presentSerialPorts.clear();
+            for (const auto &port : ports)
+                m_presentSerialPorts.insert(port.portName);
+            recoverEndpoints();
+        });
     // 端点草稿持久化：启动时恢复上次的串口选择与全部参数（含接收组帧）。
     // 串口名先以"待扫描"占位，设备列表扫描到位后自动对齐。
     restoreEndpointDrafts(preferences);
@@ -174,6 +184,9 @@ MainWindow::MainWindow(QWidget *parent)
     m_autoRefresh = new QTimer(this);
     m_autoRefresh->setInterval(SerialAutoRefreshMs);
     connect(m_autoRefresh, &QTimer::timeout, discovery, &PortDiscoveryService::refresh);
+    m_recoverTimer = new QTimer(this);
+    m_recoverTimer->setInterval(PortDraft::AutoRecoverRetryMs);
+    connect(m_recoverTimer, &QTimer::timeout, this, &MainWindow::recoverEndpoints);
 
     auto *bridgeDivider = new QFrame;
     bridgeDivider->setObjectName("BridgeDivider");
@@ -278,7 +291,11 @@ MainWindow::MainWindow(QWidget *parent)
         const int panelMin = m_commandPanel->expandedMinimumWidth() > 0
             ? m_commandPanel->expandedMinimumWidth()
             : m_commandPanel->minimumWidth();
-        const int panelWidth = expanded ? qMax(m_expandedPanelWidth, panelMin) : 0;
+        // 有快照就还原那一次的实际宽度。快照可以小于内容首选宽度：分栏允许把面板压窄，
+        // 用 qMax 会把窗口撑得比收起前更宽。
+        const int panelWidth = expanded
+            ? (m_expandedPanelWidth > 0 ? m_expandedPanelWidth : panelMin)
+            : 0;
 
         // 左列宽度取**展开态下记录的**那一份。
         // 不能读 sizes[0]：走到这里时 CommandPanel 已经把面板压成 0、分栏也把空出来的
@@ -291,24 +308,21 @@ MainWindow::MainWindow(QWidget *parent)
         }
         if (columnWidth <= 0) columnWidth = m_leftColumnMinimumWidth;
 
-        // 目标窗口宽度分两种情形，差别就在**分栏手柄是否占位**：
-        //   展开 —— 两块都在，中间那条手柄在，宽度是 左列 + 面板 + 手柄；
-        //   收起 —— 面板宽 0，QSplitter 会把相邻那条手柄一起隐藏，那一段宽度
-        //           会**全部归给唯一可见的左列**。所以收起时目标宽度里不能再算手柄，
-        //           否则左列会白长出手柄那一段（实测 1242 → 1270，多出来的正是它）。
-        // 外壳从**分栏自己的宽度**反推（与分栏内部怎么分无关，因此稳定），不写常量。
+        // 收起时把扩展区移出分栏。QSplitter 只要右侧控件还在，就会重新显示中间那条手柄并给它留宽；
+        // hide 和 QSS 都收不掉这一截。移走之后分栏里只剩左列，拖动条按 Qt 自己的规则消失。
+        // 展开则先加宽窗口，再把面板加回去。顺序反了，分栏会先在旧宽度里把左列撑开。
         const int chrome = width() - m_horizontalSplitter->width();
         const int contentWidth = expanded ? columnWidth + panelWidth + handle : columnWidth;
         const int targetWidth = contentWidth + chrome;
-        if (width() != targetWidth) resize(targetWidth, height());
 
-        // resize 之后分栏才拿到新宽度，此时按上面算好的两份宽度分配，落到就是最终值。
+        if (!expanded)
+            syncExtensionPanel(false);
+        if (width() != targetWidth) resize(targetWidth, height());
         if (expanded) {
+            syncExtensionPanel(true);
             m_horizontalSplitter->setSizes({columnWidth, panelWidth});
             m_expandedColumnWidth = columnWidth;
             m_expandedPanelWidth = panelWidth;
-        } else {
-            m_horizontalSplitter->setSizes({m_horizontalSplitter->width(), 0});
         }
     });
 
@@ -316,18 +330,26 @@ MainWindow::MainWindow(QWidget *parent)
     connect(horizontalSplitter, &QSplitter::splitterMoved, this, [this] { recordExpandedGeometry(); });
 
     horizontalSplitter->addWidget(leftColumn);
-    horizontalSplitter->addWidget(m_commandPanel);
     horizontalSplitter->setStretchFactor(0, 1);
-    horizontalSplitter->setStretchFactor(1, 0);
+    // 收起时不要先 addWidget 再移出。QSplitter 只要右侧控件进过分栏，就会先造出中间手柄并留宽；
+    // 初次启动默认收起，这一截不该出现。展开过的会话仍把面板加回去。
+    if (m_commandPanel->isExpanded()) {
+        horizontalSplitter->addWidget(m_commandPanel);
+        horizontalSplitter->setStretchFactor(1, 0);
+    } else {
+        m_commandPanel->setParent(this);
+        m_commandPanel->hide();
+    }
 
-    // 「扩展」按钮跟随**恢复出来的**面板状态：按钮的 checked 初值是硬编码的 true，
-    // 上次退出时若为收起，它会显示"已展开"而面板其实收着，两者对不上。
+    // 「扩展」按钮跟随**恢复出来的**面板状态。按钮初值是收起，与没有保存记录时的
+    // 面板一致。上次退出时若为展开，这里再把按钮按下。
     // 放在这里（分栏已装好之后）而不是更早：setChecked 会 emit commandPanelToggled，
     // 那条链路的后半段要读分栏几何。
     //
     // 这里原来写的是**无条件的 `setExpanded(true)`**——它会把 CommandPanel::loadPreferences()
     // 刚恢复的"收起"直接冲掉，于是"扩展状态不被记忆"（用户反馈）。
     // 现在恢复只由 loadPreferences 一处负责，这里只做按钮与状态的对齐。
+    // 偏好里已经是收起时，按钮初值也是收起，setChecked 不会 emit。
     m_traffic->setCommandPanelToggle(m_commandPanel->isExpanded());
 
     root->addWidget(horizontalSplitter, 1);
@@ -435,24 +457,28 @@ MainWindow::MainWindow(QWidget *parent)
         addCentered(chip);
     }
 
-    addGap(10);
-    addCentered(makeStatusSeparator());
-    addGap(8);
+    addGap(6);
 
-    // 两个动作放进同一个盒子、同一高度，避免状态栏再把它们拆开排。
-    auto *actions = new QWidget;
-    actions->setObjectName(QStringLiteral("StatusActions"));
-    auto *actionsLayout = new QHBoxLayout(actions);
-    actionsLayout->setContentsMargins(0, 0, 0, 0);
-    actionsLayout->setSpacing(4);
+    // 检查更新和置顶各占一块浅底，高度、圆角与端点状态一致。
+    // 合在同一块里时，文字和 12px 图钉贴在一起，点的时候分不清点到哪一个。
     const auto prepareAction = [](QToolButton *button) {
-        button->setFixedHeight(StatusControlHeight);
-        button->setAutoRaise(false);
+        button->setFixedHeight(StatusControlHeight - 2);
+        button->setAutoRaise(true);
         button->setFocusPolicy(Qt::NoFocus);
         button->setCursor(Qt::PointingHandCursor);
     };
+    const auto makeActionChip = [&](const QString &name, int left, int right) {
+        auto *chip = new QWidget;
+        chip->setObjectName(name);
+        chip->setFixedHeight(StatusControlHeight);
+        auto *layout = new QHBoxLayout(chip);
+        layout->setContentsMargins(left, 0, right, 0);
+        layout->setSpacing(0);
+        return chip;
+    };
 #ifdef Q_OS_WIN
     // 没有独立设置页。检查更新放在状态栏，和置顶一样是窗口级动作。
+    auto *updateChip = makeActionChip(QStringLiteral("StatusActions"), 6, 6);
     auto *checkUpdate = new QToolButton;
     checkUpdate->setObjectName(QStringLiteral("checkUpdate"));
     checkUpdate->setText(tr("检查更新"));
@@ -460,20 +486,23 @@ MainWindow::MainWindow(QWidget *parent)
     checkUpdate->setAccessibleName(tr("检查更新"));
     checkUpdate->setToolButtonStyle(Qt::ToolButtonTextOnly);
     prepareAction(checkUpdate);
-    actionsLayout->addWidget(checkUpdate, 0, Qt::AlignVCenter);
+    updateChip->layout()->addWidget(checkUpdate);
+    addCentered(updateChip);
     connect(checkUpdate, &QToolButton::clicked, this, &MainWindow::updateCheckRequested);
+    addGap(6);
 #endif
+    auto *pinChip = makeActionChip(QStringLiteral("StatusPin"), 1, 1);
     m_stayOnTop = new QToolButton;
     m_stayOnTop->setObjectName(QStringLiteral("stayOnTop"));
     m_stayOnTop->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    m_stayOnTop->setIconSize(QSize(14, 14));
-    m_stayOnTop->setFixedSize(StatusControlHeight, StatusControlHeight);
+    m_stayOnTop->setIconSize(QSize(12, 12));
+    m_stayOnTop->setFixedSize(StatusControlHeight - 2, StatusControlHeight - 2);
     m_stayOnTop->setCheckable(true);
     m_stayOnTop->setToolTip(tr("窗口置顶"));
     m_stayOnTop->setAccessibleName(tr("置顶"));
     prepareAction(m_stayOnTop);
-    actionsLayout->addWidget(m_stayOnTop, 0, Qt::AlignVCenter);
-    addCentered(actions);
+    pinChip->layout()->addWidget(m_stayOnTop);
+    addCentered(pinChip);
     connect(m_stayOnTop, &QToolButton::toggled, this, &MainWindow::setStayOnTop);
     if (preferences->value(QStringLiteral("window/stayOnTop"), false).toBool())
         m_stayOnTop->setChecked(true);
@@ -504,7 +533,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_sender, &SendPanel::sendRequested, this,
         [this](const QByteArray &payload, int targetMask, bool scheduled) {
             // 手动与定时走**同一条发送路径**，但来源标记不同：定时的一拍标 Scheduled，
-            // 屏幕上显示为 `TX·定时` 而不是 `TX·手动`（见 TrafficTextView 的前缀拼装）。
+            // 屏幕上显示为 `TX+TIMER` 而不是 `TX+MAN`（见 TrafficTextView 的前缀拼装）。
             // 这个参数以前被 lambda 丢掉了——形参只声明了两个，于是定时发送的每一拍
             // 都被记成"手动"，用户想区分"我点的"和"机器按期发的"就无从看起。
             const int origin = int(scheduled ? Traffic::Origin::Scheduled
@@ -518,7 +547,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_routeStatus->setText(link.enabled ? tr("已建立") : tr("未启动"));
         restyleProperty(m_routeStatus, "active", link.enabled);
         QMetaObject::invokeMethod(m_runtime, "setBridge", Qt::QueuedConnection,
-            Q_ARG(BridgeLink, link));
+            Q_ARG(BridgeLink, link), Q_ARG(PortDraft, m_ports.value(0)), Q_ARG(PortDraft, m_ports.value(1)));
     });
 
     // 速率节拍：与串口扫描一样只在窗口真实显示时运行。
@@ -624,15 +653,71 @@ void MainWindow::toggleEndpoint(int index)
 {
     if (index < 0 || index >= m_selectors.size()) return;
     // Closed → 打开；Opening/Open → 关闭（Opening 时即为取消连接）。
-    // 按钮的可用性由配置校验保证，这里不需要重复校验提示。
-    if (m_endpointStates[index] != Transport::State::Closed) {
-        QMetaObject::invokeMethod(m_runtime, "closeEndpoint", Qt::QueuedConnection, Q_ARG(int, index));
+    // 正在等待自动恢复时按钮是「等待中」：取消本次恢复，勾选本身保留。
+    // 取消必须立刻挡住已经排队的重试，不能等队列槽；否则占用中的重试失败
+    // 会把「等待中」马上又点亮。
+    if (m_endpointStates[index] != Transport::State::Closed || m_recoverArmed[index]) {
+        m_recoverArmed[index] = false;
+        if (m_recoverTimer && !m_recoverArmed[0] && !m_recoverArmed[1])
+            m_recoverTimer->stop();
+        m_selectors.at(index)->setRecovering(false);
+        if (m_endpointStates[index] != Transport::State::Closed) {
+            m_userStop[index] = true;
+            m_recoverCancelled[index] = false;
+            QMetaObject::invokeMethod(m_runtime, "closeEndpoint", Qt::QueuedConnection, Q_ARG(int, index));
+        } else {
+            m_userStop[index] = false;
+            m_recoverCancelled[index] = true;
+            if (m_runtime) m_runtime->suppressRecover(index);
+            showStatusNote(tr("已取消自动恢复"), 3000);
+        }
         return;
     }
+    m_userStop[index] = false;
+    m_recoverCancelled[index] = false;
     const auto draft = m_selectors.at(index)->draft();
     if (!m_selectors.at(index)->hasValidConfiguration()) return;
     QMetaObject::invokeMethod(m_runtime, "openEndpoint", Qt::QueuedConnection,
         Q_ARG(int, index), Q_ARG(PortDraft, draft));
+}
+
+void MainWindow::recoverEndpoints()
+{
+    if (!m_runtime) return;
+    bool waiting = false;
+    for (int index = 0; index < m_selectors.size() && index < EndpointRuntime::EndpointCount; ++index) {
+        if (!m_recoverArmed[index] || m_endpointStates[index] != Transport::State::Closed)
+            continue;
+        const auto draft = m_selectors.at(index)->draft();
+        if (!draft.autoRecover || draft.kind == PortDraft::TcpServer) {
+            m_recoverArmed[index] = false;
+            m_selectors.at(index)->setRecovering(false);
+            continue;
+        }
+        if (!m_selectors.at(index)->hasValidConfiguration()) {
+            waiting = true;
+            continue;
+        }
+        waiting = true;
+        // 断线瞬间的扫描快照可能还列着刚拔掉的口。先等一次新扫描，再决定打不打开。
+        if (draft.kind == PortDraft::Serial
+            && m_serialScanGeneration <= m_serialRecoverAfterScan[index])
+            continue;
+        const bool present = draft.kind != PortDraft::Serial
+            || m_presentSerialPorts.contains(draft.values.value(QStringLiteral("serial.port")).toString());
+        if (draft.kind == PortDraft::Serial && !present)
+            continue;
+        // 用成员函数指针，避免按名字查找槽时因参数元类型对不上而静默丢弃这一拍。
+        QMetaObject::invokeMethod(m_runtime, &EndpointRuntime::recoverEndpoint, Qt::QueuedConnection,
+            index, draft, present);
+    }
+    const bool visible = isVisible() && !testAttribute(Qt::WA_DontShowOnScreen);
+    if (!m_recoverTimer) return;
+    if (waiting && visible) {
+        if (!m_recoverTimer->isActive()) m_recoverTimer->start();
+    } else {
+        m_recoverTimer->stop();
+    }
 }
 
 void MainWindow::autoOpenEndpoint(const PortDraft &draft)
@@ -652,8 +737,31 @@ void MainWindow::handleEndpointState(int index, int state, const QString &detail
     Q_UNUSED(detail);
     if (index < 0 || index >= m_selectors.size()) return;
     m_endpointStates[index] = Transport::State(state);
-    m_selectors.at(index)->setConnectionOpen(state == int(Transport::State::Open),
-        state == int(Transport::State::Opening));
+    const bool opened = state == int(Transport::State::Open);
+    const bool opening = state == int(Transport::State::Opening);
+    if (opened) {
+        m_recoverArmed[index] = false;
+        m_recoverCancelled[index] = false;
+        m_userStop[index] = false;
+    } else if (opening) {
+        // 这一拍正在拨号。恢复标志先留着：失败后还要继续等，按钮也不该在
+        // 「等待中」和「正在连接」之间来回跳。
+        m_userStop[index] = false;
+    } else if (m_userStop[index] || m_recoverCancelled[index]) {
+        // 用户已经取消这次等待。在途的重试失败还会报到这里，不能再重新武装。
+        m_recoverArmed[index] = false;
+        m_userStop[index] = false;
+    } else if (m_ports.value(index).autoRecover
+        && m_ports.value(index).kind != PortDraft::TcpServer
+        && !m_recoverArmed[index]) {
+        m_recoverArmed[index] = true;
+        if (m_ports.value(index).kind == PortDraft::Serial) {
+            m_serialRecoverAfterScan[index] = m_serialScanGeneration;
+            if (m_discovery) m_discovery->refresh();
+        }
+    }
+    m_selectors.at(index)->setConnectionOpen(opened, opening);
+    m_selectors.at(index)->setRecovering(m_recoverArmed[index] && !opened);
     // ★ 端点状态一变就必须喂给发送区：发送按钮的可用性=「选中目标里至少有一个已连接」，
     // 而它读的是 SendPanel::m_openFlags。这条线曾经**根本没接**——setEndpointOpen()
     // 全项目没有任何调用点，于是 m_openFlags 恒为 false、发送按钮**永远禁用**，
@@ -661,6 +769,7 @@ void MainWindow::handleEndpointState(int index, int state, const QString &detail
     // 与"连接状态只由发送按钮外观 + tooltip 承载"配套：这里是那外观的唯一驱动源。
     if (m_sender) m_sender->setEndpointOpen(index, state == int(Transport::State::Open));
     updateEndpointStatus();
+    recoverEndpoints();
     // 打开成功的参数摘要不再走状态栏短消息：那会隐藏整行统计数据（见 showStatusNote
     // 的说明），而且监视区现在已经有一条 `状态: 已打开 · COM2 @115200` 的迁移记录，
     // 信息重复。失败原因由独立的 Error 行承载。
@@ -691,6 +800,25 @@ void MainWindow::handleMessage(const Traffic::Message &message)
     if (message.direction == Traffic::Direction::Error && !message.statusText.isEmpty())
         showStatusNote(message.statusText, 5000);
     m_traffic->appendMessage(message);
+}
+
+void MainWindow::syncExtensionPanel(bool expanded)
+{
+    if (!m_horizontalSplitter || !m_commandPanel) return;
+    const bool attached = m_horizontalSplitter->indexOf(m_commandPanel) >= 0;
+    if (expanded) {
+        if (!attached)
+            m_horizontalSplitter->addWidget(m_commandPanel);
+        // 收起时 hide() 过。addWidget 不会显示被显式隐藏的控件，隐藏控件在分栏里宽度是 0。
+        m_commandPanel->show();
+        m_horizontalSplitter->setStretchFactor(0, 1);
+        m_horizontalSplitter->setStretchFactor(1, 0);
+        return;
+    }
+    // 移出后父对象仍是主窗口，面板不会被销毁。分栏只剩左列时，Qt 不再创建中间手柄。
+    if (attached)
+        m_commandPanel->setParent(this);
+    m_commandPanel->hide();
 }
 
 void MainWindow::recordExpandedGeometry()
@@ -755,7 +883,7 @@ void MainWindow::setStayOnTop(bool on)
         const QColor color = on ? QColor(0x14, 0x32, 0x6f) : QColor(0x64, 0x75, 0x90);
         m_stayOnTop->setIcon(tintedIcon(on ? QStringLiteral(":/icons/pin.svg")
                                            : QStringLiteral(":/icons/pin-outline.svg"),
-            color, 16));
+            color, 12));
     }
     if (windowFlags().testFlag(Qt::WindowStaysOnTopHint) != on) {
         // 不用 setWindowFlag：它会拆掉原生窗口再新建。高 DPI 下这一下之后
@@ -782,6 +910,7 @@ void MainWindow::updateEndpointStatus()
         const int kind = m_ports.value(index).kind;
         switch (m_endpointStates[index]) {
         case Transport::State::Opening:
+            if (m_recoverArmed[index]) return tr("等待恢复");
             return tr("连接中");
         case Transport::State::Open:
             if (kind == PortDraft::TcpServer)
@@ -793,6 +922,7 @@ void MainWindow::updateEndpointStatus()
             }
             return tr("已连接");
         case Transport::State::Closed:
+            if (m_recoverArmed[index]) return tr("等待恢复");
             break;
         }
         return tr("未连接");
@@ -890,6 +1020,7 @@ void MainWindow::showEvent(QShowEvent *event)
     if (!testAttribute(Qt::WA_DontShowOnScreen)) {
         m_autoRefresh->start();
         m_rateTimer->start();
+        recoverEndpoints();
     }
     // 首次显示时布局刚定型：这里补记一次展开几何。构造期记不了（那时窗口还没排过版，
     // 两块宽度都还是 0），而 resizeEvent 也不是每次显示都会来——用户在窗口尺寸没变时
@@ -902,6 +1033,7 @@ void MainWindow::hideEvent(QHideEvent *event)
     QMainWindow::hideEvent(event);
     m_autoRefresh->stop();
     m_rateTimer->stop();
+    if (m_recoverTimer) m_recoverTimer->stop();
 }
 
 void MainWindow::handleCommandSend(const CommandItem &command)

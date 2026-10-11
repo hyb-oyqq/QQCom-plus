@@ -43,6 +43,7 @@ private:
         QComboBox *mode = nullptr;
         QPushButton *endpointA = nullptr;
         QPushButton *endpointB = nullptr;
+        QLabel *blockLabel = nullptr;
         QPushButton *block128 = nullptr;
         QPushButton *block1024 = nullptr;
         QSpinBox *chunk = nullptr;
@@ -82,6 +83,7 @@ private:
     void loadPage(Page *page, bool useLegacy);
     void syncReceivePath(Page *page, bool modeSwitched);
     bool ymodemSelected(const Page *page) const;
+    bool xmodemSelected(const Page *page) const;
     int endpoint(const Page *page) const;
     bool encodeField(const QLineEdit *edit, const QComboBox *format,
         QByteArray *bytes, QString *error) const;

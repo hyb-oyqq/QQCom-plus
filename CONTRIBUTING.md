@@ -17,7 +17,7 @@
 2. 使用 `build.bat` 构建 Release。
 3. 修改服务层或公共控件时执行对应的 core/UI 测试。
 4. 修改版本或发布脚本时运行 `scripts/validate_ota_manifest.ps1` 的示例校验。
-5. 确认 `git status --short` 中没有 `build/`、`debug/`、`release/`、`version/version.h` 等生成物。
+5. 确认 `git status --short` 中没有 `build/`、`debug/`、`release/` 等生成物。`version/version.h` 里的版本号要提交；构建刷新的时间戳可以留在工作区。
 
 ## 版本和发布
 
@@ -27,4 +27,4 @@
 - 新增向后兼容能力时递增次版本。
 - 修复问题或仅调整发布内容时递增修订版本。
 
-发布包必须由 `scripts/package_release.ps1` 生成，并通过 `scripts/validate_ota_manifest.ps1` 校验。生产发布还必须完成代码签名和人工更新演练，具体要求见 [OTA 方案](docs/OTA.md)。
+发布包必须由 `scripts/package_release.ps1` 生成，并通过 `scripts/validate_ota_manifest.ps1` 校验。打包前先按仓库根目录 `更新记录.md` 的格式写本版记录，脚本会把它原样写成随包发布的版本说明文件。写法见 `.grok/skills/version-notes/SKILL.md`。生产发布还必须完成代码签名和人工更新演练，具体要求见 [OTA 方案](docs/OTA.md)。

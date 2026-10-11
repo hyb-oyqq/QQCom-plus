@@ -73,28 +73,28 @@ private:
     //   clearAll → 从模型重放命中项 → 行号从 1 连续重排。
     // 两个维度必须分开（设计稿 §5 决策表）：
     //   · 外观（显示设置/编码格式）= 每行长什么样 → 立刻自动重投影；
-    //   · 过滤条件 = 哪些行进来 → 只作用新行，补到历史必须点「应用过滤」。
+    //   · 关键词和排除词 = 哪些行进来 → 只作用新行，补到历史必须点「应用过滤」。
+    //     端点、方向、转发和事件开关一点就作用到已有行。
     // 所以 applyCurrentConditions 决定这次用哪份条件过滤：
     //   true  —— 用**当前**条件（applyMatcher），并把 m_projectedOptions 记为当前条件。
     //            「应用过滤」按钮与 loadExample 走这条：它们的语义就是"让视图跟上当前条件"。
-    //   false —— 外观路径专用：用**上次已应用**的条件过滤，不碰 m_projectedOptions，因此
-    //            不会把未应用的条件套到历史行上。但它改的是"每行长什么样"，而候选项里含
-    //            "按当前显示格式渲染的文本"（见 TrafficFilter::Matcher）——所以只在
-    //            DEC / BASE64 / 转义字节等**格式专属渲染**里命中的条件会随编码格式移动命中行
-    //            （同一条件在新渲染下的重新求值；此时 m_projectedOptions == m_filterOptions、
+    //   false —— 外观路径专用：关键词和排除词仍用上次已应用的条件，
+    //            不会把未应用的内容条件套到历史行上。端点、方向、转发和事件开关
+    //            这次投影直接用当前值，并写回已应用条件。
+    //            候选项里含"按当前显示格式渲染的文本"（见 TrafficFilter::Matcher）——
+    //            所以只在 DEC / BASE64 / 转义字节等**格式专属渲染**里命中的条件会随编码
+    //            格式移动命中行（同一条件在新渲染下的重新求值；内容条件未改时
     //            「应用过滤」提示保持干净）。
     // announce 与 applyCurrentConditions 是两个独立维度，不要混用：loadExample 只要"不播报"
     // （applyCurrentConditions 仍为 true），外观路径两者都为 false。
     void reprojectView(bool announce = true, bool applyCurrentConditions = true);
-    // 重投影的防抖入口。只由**外观**变化调用（显示设置、编码格式）：一次点击一个
-    // 状态，用户期待切了就变，没道理再让他多点一次。过滤条件不走这里——它由条件条上
-    // 的「应用过滤」按钮显式触发（用户钦定），连续敲字期间不该反复重画几万行。
+    // 重投影的防抖入口。外观（行前缀、HEX、换行、编码格式）和顶栏显示开关走这里：
+    // 一次点击一个状态，用户期待切了就变。关键词和排除词不走这里，由「应用过滤」触发。
     void scheduleReproject();
     // 「每行长什么样」（编码格式 + 显示设置）是否与上次投影时不同。
     bool appearanceChanged() const;
-    // 记下"这次投影用的是当前外观/条件"。conditionsApplied 区分两条路径能否顺带更新
-    // 已应用条件：外观路径传 false（只更新外观签名，m_projectedOptions 不动），
-    // 这样未应用的条件在 refreshApplyHint 里仍被判为"待应用"。
+    // 记下"这次投影用的是当前外观/条件"。conditionsApplied 为 false 时只更新外观签名
+    // 和事件开关，关键词等已应用条件不动，未应用的内容条件仍算待应用。
     void markReprojected(bool conditionsApplied = true);
     // 条件条上「应用过滤」的待办提示：条件改了但还没补到已有记录上，必须说出来。
     void refreshApplyHint();
@@ -137,8 +137,11 @@ private:
     // 把当前目录和实际写入的文件名放进「记录到文件」的 tooltip。
     // 未记录时说明目录在哪、从哪里改；记录中保留「正在写 文件名」，测试靠这句定位文件。
     void refreshRecordTooltip();
+    void refreshOpenLogAction();
     // 「日志位置」的说明和「恢复默认位置」是否可点，跟着当前目录走。
     void refreshLogLocation();
+    // 用系统默认程序打开正在写的日志。文件还在追加，编辑器看到的是打开那一刻的内容。
+    void openCurrentLog();
     // 空的 m_logPath 表示用程序目录下的 log。这里给出真正用来开文件的模板路径。
     QString logTemplatePath() const;
     // 摘要经 summaryChanged 上报；内容不变就不重发，状态栏不做无效刷新。
@@ -155,31 +158,30 @@ private:
     // 时也要能点。分工不同——方向管"哪些行进来"，显示开关管"每行长什么样"。
     QPushButton *m_filterToggle;
     FilterFlags *m_flags;
-    ViewToggles *m_viewToggles = nullptr; // 前缀 / HEX / 换行
+    ViewToggles *m_viewToggles = nullptr; // 显示前缀 / 始终显示 HEX / 自动换行
     FilterBar *m_filterBar;
-    // 过滤标志开关
-    QAction *m_stateAction;
-    QAction *m_warningAction;
-    QAction *m_errorAction;
+    // 事件开关：显示状态 / 显示警告 / 显示错误
+    QAction *m_showStateAction;
+    QAction *m_showWarningAction;
+    QAction *m_showErrorAction;
     // 指令面板切换按钮
     QPushButton *m_commandPanelToggle = nullptr;
     // 折叠状态用显式标志而不是 isVisible()：窗口整体隐藏时 isVisible() 恒为假，
     // 记忆状态会跟着被读错。
     bool m_filterExpanded = true;
-    // A/B 端点开关紧挨过滤按钮，使能时为黄；其余显示选项在「显示」菜单。
+    // A/B 端点开关紧挨过滤按钮，使能时为黄；其余显示选项在「设置」菜单。
     QPushButton *m_portAButton;
     QPushButton *m_portBButton;
-    // 行内容开关：全部在到达时生效（控制台语义），纯数据模式下被忽略。
-    // 方向与事件开关不在其中——它们管的是"哪些行进来"，不随行内容一起变：
-    // 方向常驻顶栏、事件在显示设置菜单（见 filterFlagsState）。
-    QAction *m_numberAction;    // 行号（会话内绝对计数）
-    QAction *m_timestampAction;
-    QAction *m_directionAction;
-    QAction *m_lengthAction;  // 数据长度 [N B]
-    QAction *m_hexAction;     // 另起一行显示 HEX 对照
-    QAction *m_pureAction;    // 「前缀」：勾选显示行号/时间/方向/长度，取消后只留数据
-    QAction *m_wrapAction;    // 自动换行
+    // 行内容开关。关掉「显示前缀」后，行号、时间戳、数据长度和端口方向一起隐藏；
+    // 「始终显示 HEX」不跟前缀走。端口方向没有单独开关，跟着前缀总开关。
+    QAction *m_prefixAction;            // 显示前缀
+    QAction *m_prefixLineNumberAction;  // 前缀行号
+    QAction *m_prefixTimestampAction;   // 前缀时间戳
+    QAction *m_prefixLengthAction;      // 前缀数据长度
+    QAction *m_alwaysShowHexAction;     // 始终显示 HEX
+    QAction *m_autoWrapAction;          // 自动换行
     QAction *m_recordAction;  // 记录到文件：按当前显示格式持续写日志
+    QAction *m_openLogAction = nullptr;           // 打开正在写的那一份
     QAction *m_logLocationAction = nullptr;       // 日志位置：改目录
     QAction *m_resetLogDirectoryAction = nullptr; // 恢复默认位置
     QSet<QUuid> m_visibleEndpoints;

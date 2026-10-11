@@ -27,8 +27,8 @@ CommandPanel::CommandPanel(QWidget *parent) : QWidget(parent)
 
     refreshSetComboBox();
 
-    // 构造完就把"默认展开"落到控件上（最小宽度、内边距）。不能只靠 m_expanded 的
-    // 初值——那是"状态"不是"几何"，外部再调 setExpanded(true) 会因为值没变而直接返回。
+    // 构造完就把默认收起落到控件上（最大宽度 0、内容隐藏）。不能只靠 m_expanded 的
+    // 初值——那是"状态"不是"几何"。没有保存过展开状态时保持收起；读到上次展开再打开。
     applyExpandedState();
 }
 
@@ -96,6 +96,8 @@ void CommandPanel::setupUi()
             this, &CommandPanel::onSendCommand);
     connect(m_commandTable, &CommandTableWidget::batchSendRequested,
             this, &CommandPanel::onBatchSendRequested);
+    connect(m_commandTable, &CommandTableWidget::batchSendStopRequested,
+            this, &CommandPanel::onBatchSendStopRequested);
 
     m_mainLayout->addWidget(m_commandTable, 1);
 }
@@ -327,31 +329,72 @@ void CommandPanel::onSendCommand(const CommandItem &cmd)
     QTimer::singleShot(cmd.delayMs, this, [this, cmd] { emit sendCommand(cmd); });
 }
 
-void CommandPanel::onBatchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands)
+void CommandPanel::setBatchButtonLooping(bool looping)
+{
+    auto *button = m_commandTable ? m_commandTable->findChild<QPushButton *>(QStringLiteral("primaryButton"))
+                                  : nullptr;
+    if (!button) return;
+    button->setProperty("looping", looping);
+    button->setText(looping ? tr("停止循环") : tr("按序发送勾选项"));
+}
+
+void CommandPanel::onBatchSendStopRequested()
+{
+    // 代数加一：已经排上的发送和续轮回调看到代数不对就退出。
+    ++m_batchGeneration;
+    setBatchButtonLooping(false);
+    if (m_commandTable) m_commandTable->endSendRun();
+}
+
+void CommandPanel::scheduleBatch(const QList<int> &rows, const QList<CommandItem> &commands, bool loop)
 {
     // 批量发送，累加延时（第 n 条在第 n 条之前所有延时之和后发出）。
     //
     // **进度与发送在同一拍里推进**：定时器回调里先点亮该行的游标，再发出去。
     // 这是唯一的时序来源——若让表格另起一套定时器去"猜"进度，两套时钟迟早错开，
     // 而高亮跟实际发送不同步比没有高亮更让人困惑。
-    constexpr int RunTailHoldMs = 700; // 最后一拍发完后再留一会儿，让收尾可见
+    constexpr int RunTailHoldMs = 700; // 单轮最后一拍发完后再留一会儿，让收尾可见
+    // 循环时两条之间至少隔这一拍，避免延时全是 0 时把事件循环占满。
+    constexpr int LoopGapMs = 50;
 
-    m_commandTable->beginSendRun();
+    const int generation = m_batchGeneration;
+    if (m_commandTable) m_commandTable->beginSendRun();
 
     int totalDelay = 0;
     for (int i = 0; i < commands.size(); ++i) {
         totalDelay += commands.at(i).delayMs;
         const int row = rows.value(i, -1);
-        QTimer::singleShot(totalDelay, this, [this, command = commands.at(i), row] {
+        QTimer::singleShot(totalDelay, this, [this, command = commands.at(i), row, generation] {
+            if (generation != m_batchGeneration) return;
             m_commandTable->setSendCursor(row);
             emit sendCommand(command);
         });
     }
 
+    if (loop) {
+        const int gap = qMax(LoopGapMs, commands.isEmpty() ? LoopGapMs : commands.last().delayMs);
+        QTimer::singleShot(totalDelay + gap, this, [this, rows, commands, generation] {
+            if (generation != m_batchGeneration) return;
+            scheduleBatch(rows, commands, true);
+        });
+        return;
+    }
+
     // 一轮结束：收掉游标，但**保留已发送的绿色勾**——用户要能一眼看出这一轮覆盖了
     // 哪几条（这正是"表示目前发送到哪条指令了"的另一半）。
-    QTimer::singleShot(totalDelay + RunTailHoldMs, this,
-        [this] { m_commandTable->endSendRun(); });
+    QTimer::singleShot(totalDelay + RunTailHoldMs, this, [this, generation] {
+        if (generation != m_batchGeneration) return;
+        m_commandTable->endSendRun();
+    });
+}
+
+void CommandPanel::onBatchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands, bool loop)
+{
+    if (commands.isEmpty()) return;
+    // 新开一轮作废还没发出去的旧定时器，包括正在循环的那一轮。
+    ++m_batchGeneration;
+    setBatchButtonLooping(loop);
+    scheduleBatch(rows, commands, loop);
 }
 
 void CommandPanel::refreshSetComboBox()
@@ -431,8 +474,8 @@ void CommandPanel::loadPreferences()
 
     CommandManager::instance()->load(m_preferences);
 
-    // 恢复展开状态
-    bool expanded = m_preferences->value("commandPanel/expanded", true).toBool();
+    // 没有这个键时收起。已经保存过的展开/收起原样恢复。
+    bool expanded = m_preferences->value("commandPanel/expanded", false).toBool();
     setExpanded(expanded);
 
     // 恢复当前选中的指令集

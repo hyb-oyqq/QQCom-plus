@@ -6,7 +6,7 @@
 class QAction;
 class QPushButton;
 
-// 顶栏的**显示开关**组：前缀 / HEX / 换行。
+// 顶栏的**显示开关**组：显示前缀 / 始终显示 HEX / 自动换行。
 //
 // 与左邻的 FilterFlags 严格分工——那排管"哪些行进来"（过滤），本组管"每行长什么样"
 // （外观）。两者同住顶栏第一行，改动却走两条不同的路径：过滤只作用新行，要补到历史
@@ -22,14 +22,14 @@ class ViewToggles : public QWidget
 public:
     explicit ViewToggles(QWidget *parent = nullptr);
 
-    // 把三个按钮分别挂到命令上：文案与提示取自命令（不在此处另抄一份），勾选与可用性
-    // 双向同步。必须在 QAction 建好之后调用一次——按钮的显示状态由命令初始化。
-    void bind(QAction *pureData, QAction *hexEcho, QAction *lineWrap);
+    // 把三个按钮分别挂到命令上：勾选与可用性双向同步。顶栏文案用短名（菜单里写完整说明），
+    // 提示取自命令。必须在 QAction 建好之后调用一次——按钮的显示状态由命令初始化。
+    void bind(QAction *prefix, QAction *alwaysShowHex, QAction *autoWrap);
 
 private:
-    QPushButton *m_pure = nullptr;
-    QPushButton *m_hex = nullptr;
-    QPushButton *m_wrap = nullptr;
+    QPushButton *m_prefix = nullptr;
+    QPushButton *m_alwaysShowHex = nullptr;
+    QPushButton *m_autoWrap = nullptr;
 };
 
 #endif

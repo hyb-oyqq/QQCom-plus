@@ -75,7 +75,7 @@ enum class State
 struct Source
 {
     QUuid endpointId;         // 端点身份；为空表示尚未归属任何端点
-    int endpointIndex = -1;   // 0 = A，1 = B；UI 用它派生 "A · 串口" 行标识
+    int endpointIndex = -1;   // 0 = A，1 = B；监视区前缀用它画端口字母，文件日志用它拼 "A · 串口"
     int endpointKind = PortDraft::Serial; // PortDraft::Kind
     quint64 generation = 0;   // 端点代次：重开或换类型后自增，用来丢弃旧连接的残留事件
     QString endpointName;     // 配置名，如 "串口 A"；可为空
@@ -129,6 +129,8 @@ struct Message
 Source makeSource(const PortDraft &draft, int index);
 
 // 中文名称，供列显示、导出与筛选器使用；经 tr() 保留翻译能力。
+// 日志前缀和文件列共用的 ASCII 标记：RX/TX/STATE/WARN/ERR，AUTO/MAN/TIMER/FWD/SAMPLE。
+// 不走翻译，避免前缀里出现中文。
 QString directionName(Direction direction);
 QString originName(Origin origin);
 QString stateName(State state);

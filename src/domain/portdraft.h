@@ -23,6 +23,11 @@ struct PortDraft
     QUuid id = QUuid::createUuid();
     int kind = Serial; // PortDraft::Kind
     QVariantMap values;
+    // 异常断开后自动重新打开。用户主动停止会取消本次恢复，选项本身保留。
+    // 串口只在同名设备重新出现时打开；TCP 客户端和 UDP 按 AutoRecoverRetryMs 重试。
+    // TCP 服务器不使用：监听还在时客户端要自己再连，监听失败时再点一次即可。
+    bool autoRecover = false;
+    static constexpr int AutoRecoverRetryMs = 1000;
     // 接收组帧策略。贴在草稿上而不是运行时里：它随端点配置一起编辑、随 open 一起下发，
     // 且只影响字节流端点（UDP 数据报自带边界，不经过组帧器）。
     ReceiveFraming framing;

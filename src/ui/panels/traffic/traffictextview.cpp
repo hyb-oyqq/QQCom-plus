@@ -27,9 +27,35 @@ const QColor HexCompanionColor(0x6B, 0x76, 0x86);
 // （RX 与警告比初版各深了一档，初版在加粗后仍显轻）。改色先看这张表。
 const QColor TxColor(0x1D, 0x4E, 0xD8);     // 发送：工作台主蓝
 const QColor RxColor(0x04, 0x6C, 0x4E);     // 接收：饱和绿（深一档，加粗后更实）
+// 端口字母用独立色，不跟方向色走。A 琥珀、B 青：和顶栏 A/B 按钮、RX 绿、TX 蓝都错开，
+// 扫一行时先看见是哪个口，再看见收还是发。桥接等不属于某一端的行不画字母。
+const QColor PortAColor(0xB4, 0x53, 0x09);
+const QColor PortBColor(0x0E, 0x74, 0x90);
 const QColor StateColor(0x6D, 0x28, 0xD9);  // 状态迁移：紫
 const QColor WarningColor(0x92, 0x40, 0x0E); // 警告：深琥珀（同上，深一档）
 const QColor ErrorColor(0xC6, 0x28, 0x28);  // 错误：饱和红
+
+QColor portColor(int endpointIndex)
+{
+    if (endpointIndex == 0) return PortAColor;
+    if (endpointIndex == 1) return PortBColor;
+    return MetaColor;
+}
+
+QString portLetter(int endpointIndex)
+{
+    if (endpointIndex < 0 || endpointIndex > 25) return {};
+    return QString(QChar::fromLatin1('A' + char(endpointIndex)));
+}
+
+// 收发箭头只画在数据行上，用 ASCII，13px 下比单字符箭头清楚。
+// 发送 -->>，接收 <<--。状态、警告、错误不画箭头，也不补空格。
+QString directionArrow(Traffic::Direction direction)
+{
+    return direction == Traffic::Direction::Transmit
+        ? QStringLiteral("-->>")
+        : QStringLiteral("<<--");
+}
 
 QColor directionColor(Traffic::Direction direction)
 {
@@ -145,8 +171,7 @@ TrafficTextView::TrafficTextView(QWidget *parent) : QPlainTextEdit(parent)
     setMaximumBlockCount(m_blockBudget); // 从头部整块淘汰，回滚第 1 条在预算内永远可行
     setTextInteractionFlags(Qt::TextSelectableByKeyboard | Qt::TextSelectableByMouse);
     setCenterOnScroll(false);
-    // 文本控制台默认不折行：折行会让"一条消息一行"的行号语义变糊，
-    // 长报文水平滚动查看；自动换行是显示设置里的显式开关。
+    // 初次启动不折行，长报文水平滚动。「设置」里的「自动换行」再改成按窗口宽度折行。
     setLineWrapMode(QPlainTextEdit::NoWrap);
     // 整行等宽，行号、时间、载荷才能上下对齐，看起来才是命令行而不是比例字体的表格。
     // 字体**不在代码里设**：全局 QSS 的 font-family 会覆盖 setFont()（实测），
@@ -230,54 +255,67 @@ void TrafficTextView::appendMessages(
                 }
                 if (atMessageStart) {
                     atMessageStart = false;
-                    // 纯数据模式省略一切前缀；其余模式行号/时间/长度各自独立开关、
-                    // 同为元色，拼成一段一次插入：插入次数决定追加成本，
-                    // 每条消息多一次文档插入都会直接吃掉刷新预算。
-                    // 前缀与数据以冒号收尾分界（方向存在时冒号随方向色）：
-                    // "1 12:00:00.000 [12 B] RX: 数据"，比裸空格的分隔清晰得多。
-                    if (!options.pure) {
+                    // 关掉前缀后只留数据。行号、时间、长度各自独立，同为元色，拼成一段一次插入：
+                    // 插入次数决定追加成本，每条消息多一次文档插入都会直接吃掉刷新预算。
+                    // 端口和方向跟着前缀总开关，不再单独成项。
+                    // 前缀与数据以冒号收尾分界（冒号随方向色）：
+                    // "1328 17:27:40.249 [B] TX+FWD [133B] -->> 127.0.0.1:53327: data"。
+                    // 顺序：行号、时间、端口、方向、字节数、箭头、对端、冒号、载荷。
+                    // 各段按内容拼接，不补空格对齐。
+                    // 方向和来源只用 ASCII，不写中文。
+                    // 端口用方括号包住，和方向分色。没有端口的行不留空位。
+                    if (options.prefix) {
                         QString metaPrefix;
-                        if (options.number)
+                        if (options.prefixLineNumber)
                             metaPrefix += QStringLiteral("%1 ").arg(m_nextNumber);
-                        if (options.timestamp)
+                        if (options.prefixTimestamp)
                             metaPrefix += r.timestamp.toString(QStringLiteral("HH:mm:ss.zzz "));
-                        if (options.length)
-                            metaPrefix += QStringLiteral("[%1 B] ").arg(r.displayBytes());
-                        if (!options.direction && !metaPrefix.isEmpty())
-                            metaPrefix.chop(1); // 末尾空格让位给冒号
                         if (!metaPrefix.isEmpty()) {
                             cursor.setCharFormat(metaFormat);
                             cursor.insertText(metaPrefix);
                         }
-                        QTextCharFormat separatorFormat = metaFormat;
-                        if (options.direction) {
-                            // 方向是主语义；非自动来源（手动/定时/转发/示例）以复合标记
-                            // 挂在方向上，与导出的方向列同一套规则。
-                            const auto name = Traffic::directionName(r.direction);
-                            const QString dir = r.isData() && r.origin != Traffic::Origin::Automatic
-                                ? QStringLiteral("%1·%2").arg(name, Traffic::originName(r.origin))
-                                : name;
-                            QTextCharFormat dirFormat;
-                            dirFormat.setForeground(directionColor(r.direction));
-                            // 方向令牌维持现状：分色 + DemiBold——与元信息同级字重，
-                            // 前缀是一个整体，字重不齐会显得像两种信息。
-                            dirFormat.setFontWeight(QFont::DemiBold);
+                        // 方向是主语义。非自动来源用加号挂在后面：TX+FWD、TX+MAN、TX+TIMER。
+                        // 标记与文件日志同一套 ASCII，前缀里不出现中文。
+                        const auto name = Traffic::directionName(r.direction);
+                        const QString dir = r.isData() && r.origin != Traffic::Origin::Automatic
+                            ? QStringLiteral("%1+%2").arg(name, Traffic::originName(r.origin))
+                            : name;
+                        const QString letter = portLetter(r.source.endpointIndex);
+                        if (!letter.isEmpty()) {
+                            QTextCharFormat portFormat;
+                            portFormat.setForeground(portColor(r.source.endpointIndex));
+                            portFormat.setFontWeight(QFont::DemiBold);
+                            cursor.setCharFormat(portFormat);
+                            // 整段 [A]/[B] 一次插入，颜色断言按片段精确匹配。
+                            cursor.insertText(QStringLiteral("[%1] ").arg(letter));
+                        }
+                        QTextCharFormat dirFormat;
+                        dirFormat.setForeground(directionColor(r.direction));
+                        // 方向令牌维持现状：分色 + DemiBold——与元信息同级字重，
+                        // 前缀是一个整体，字重不齐会显得像两种信息。
+                        dirFormat.setFontWeight(QFont::DemiBold);
+                        cursor.setCharFormat(dirFormat);
+                        // 令牌单独插入：颜色测试按 "RX" 这类子串命中这一段。
+                        cursor.insertText(dir);
+                        // 字节数紧跟方向令牌，用元信息色，不染成方向色。
+                        // STATE/WARN/ERR 没有载荷，不标长度。
+                        if (options.prefixLength && r.isData()) {
+                            cursor.setCharFormat(metaFormat);
+                            cursor.insertText(QStringLiteral(" [%1B]").arg(r.displayBytes()));
                             cursor.setCharFormat(dirFormat);
-                            cursor.insertText(dir);
-                            // 对端地址跟在方向后面。收是谁发来的，发是写给谁的；
-                            // 多个客户端或数据报来源时，没有这一段就分不清是哪一个。
-                            // 串口没有对端，纯数据模式也不加任何前缀。
-                            if (r.isData() && r.source.hasPeer()) {
-                                const QChar arrow = r.direction == Traffic::Direction::Transmit
-                                    ? QChar(0x2192) : QChar(0x2190);
-                                cursor.insertText(QStringLiteral(" %1 %2").arg(arrow, r.source.peerAddress));
+                        }
+                        // 收发都画箭头。有对端时地址跟在箭头后：收是谁发来的，发是写给谁的。
+                        // 串口没有对端，箭头仍然留着。状态行不画箭头，也不留空位。
+                        if (r.isData()) {
+                            if (r.source.hasPeer()) {
+                                cursor.insertText(QStringLiteral(" %1 %2")
+                                    .arg(directionArrow(r.direction), r.source.peerAddress));
+                            } else {
+                                cursor.insertText(QStringLiteral(" %1").arg(directionArrow(r.direction)));
                             }
-                            separatorFormat = dirFormat;
                         }
-                        if (options.direction || !metaPrefix.isEmpty()) {
-                            cursor.setCharFormat(separatorFormat);
-                            cursor.insertText(QStringLiteral(": "));
-                        }
+                        cursor.setCharFormat(dirFormat);
+                        cursor.insertText(QStringLiteral(": "));
                     }
                 }
                 // 每个分片都显式带格式：ANSI 分色片段的边界由这里落进文档。
@@ -291,7 +329,8 @@ void TrafficTextView::appendMessages(
         // HEX 对照另起一行：与数据行头尾相接会把两条信息挤在一行，
         // 长报文下根本看不到对照；独占一行才便于上下比对字节。
         // 完整展开全部字节——对照的意义就在于看全，内存由文档总预算兜底。
-        if (!options.pure && options.hex && format != PayloadCodec::Format::Hex && !r.raw.isEmpty()) {
+        // 不受前缀开关控制：关掉行号/时间/方向后，对照行仍然单独跟在数据后面。
+        if (options.alwaysShowHex && format != PayloadCodec::Format::Hex && !r.raw.isEmpty()) {
             const auto hex = QString::fromLatin1(r.raw.toHex(' ')).toUpper();
             if (needSeparator) needSeparator = false; // 载荷以换行收尾：续块此时是空的
             else {

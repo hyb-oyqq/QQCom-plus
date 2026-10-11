@@ -27,7 +27,7 @@ https://gitee.com/qinjmin/qqcom/releases/download/v0.2.0/QQCom-0.2.0-win64.zip
 | `download.url` | Release zip 的 HTTPS 地址 |
 | `download.size` | zip 字节数 |
 | `download.sha256` | zip 的 SHA-256，用于发现下载损坏 |
-| `notesUrl` | Release 说明地址 |
+| `notesUrl` | Release 说明地址。安装包根目录另有版本说明文件，内容来自仓库根目录的 `更新记录.md` |
 
 客户端处理规则：
 
@@ -65,9 +65,9 @@ powershell.exe -File qqcom-updater.ps1 \
 
 ## 发布流程
 
-1. 修改 `version/version.json`，更新 `CHANGELOG.md`，提交并打 tag `v<version>`。
+1. 版本号直接改 `version/version.h` 里的主/次/修订号，构建只刷新时间戳。按 `更新记录.md` 文首格式写本版记录，提交并打 tag `v<version>`。
 2. 使用固定 Qt Kit 构建 Release，并运行 core/UI 测试。
-3. 使用 `scripts/package_release.ps1` 生成 `QQCom-<version>-win64.zip` 和 `manifest.json`。
+3. 使用 `scripts/package_release.ps1` 生成 `QQCom-<version>-win64.zip`、`manifest.json` 和版本说明文件。说明原样来自 `更新记录.md`，最新版本排在最前，并同时放进 zip 根目录和 `build/ota`。
 4. 创建 Gitee Release，上传 zip；把脚本输出的 SHA-256 填入清单。
 5. 在干净机器安装旧版本，验证清单检查、下载、文件覆盖、配置保留和重新启动。
 6. 把校验后的 manifest 发布到 `ota/stable.json`；灰度时先把 `channel` 设为 `beta`，验证后再切到 `stable`。

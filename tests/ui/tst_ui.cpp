@@ -50,8 +50,10 @@
 #include <QStyleOptionSpinBox>
 #include <QTabWidget>
 #include <QTcpServer>
+#include <QUdpSocket>
 #include <QTcpSocket>
 #include <QTextBlock>
+#include <QTextCursor>
 #include <QTextFragment>
 #include <QToolButton>
 #include <QTimer>
@@ -342,6 +344,23 @@ private slots:
         QCOMPARE(accepted(options), 0);
         options.endpoints.clear();
         QCOMPARE(accepted(options), 0);
+
+        // 桥接状态没有端点身份。A、B 有一端可见就留下，两端都关掉才隐藏。
+        auto bridge = sample(3, portA, 0, Traffic::Direction::State, {});
+        bridge.source = {};
+        bridge.statusText = QStringLiteral("桥接已建立 · A · COM3 → B · 127.0.0.1:9000");
+        model.replaceRecords({model.record(0), model.record(1), bridge});
+        options.tx = true;
+        options.rx = true;
+        options.endpoints = {a};
+        QCOMPARE(accepted(options), 2);
+        options.endpoints = {b};
+        options.rx = true;
+        QCOMPARE(accepted(options), 2);
+        options.endpoints = {a, b};
+        QCOMPARE(accepted(options), 3);
+        options.endpoints.clear();
+        QCOMPARE(accepted(options), 0);
     }
 
     // 内容条件的分组语义：关键词组内 OR、排除词压过关键词、大小写开关、
@@ -470,6 +489,8 @@ private slots:
         QVERIFY(text && model && bar && rebuild);
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
+        // 初次启动默认带 HEX 对照行。本用例按一条消息一块计数，先关掉对照。
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         // 还没收到任何记录时无从回溯，按钮应该是灰的。
         QVERIFY(!rebuild->isEnabled());
 
@@ -542,8 +563,8 @@ private slots:
 
         const QStringList directions{QStringLiteral("filterRx"), QStringLiteral("filterTx"),
             QStringLiteral("filterForward")};
-        const QStringList viewSwitches{QStringLiteral("viewPureData"), QStringLiteral("viewHexEcho"),
-            QStringLiteral("viewLineWrap")};
+        const QStringList viewSwitches{QStringLiteral("viewPrefix"), QStringLiteral("viewAlwaysShowHex"),
+            QStringLiteral("viewAutoWrap")};
         for (const auto &name : directions) {
             auto *button = flags->findChild<QPushButton *>(name);
             QVERIFY2(button, qPrintable(QStringLiteral("缺方向开关：") + name));
@@ -573,8 +594,8 @@ private slots:
             QVERIFY2(!views->findChild<QPushButton *>(name),
                 qPrintable(QStringLiteral("事件开关不该挪进显示开关组：") + name));
         }
-        for (const auto &name : {QStringLiteral("showStates"), QStringLiteral("showWarnings"),
-                 QStringLiteral("showErrors")}) {
+        for (const auto &name : {QStringLiteral("showState"), QStringLiteral("showWarning"),
+                 QStringLiteral("showError")}) {
             auto *action = window.findChild<QAction *>(name);
             QVERIFY2(action && action->isCheckable(),
                 qPrintable(QStringLiteral("缺菜单里的事件开关：") + name));
@@ -595,18 +616,21 @@ private slots:
         // 顶栏按钮与菜单项是同一个命令的两处门面（ViewToggles::bind）：任一侧改动、
         // 另一侧立刻跟上。两侧都不许"各记一份"，否则用户在菜单里看到的与顶栏按下的
         // 会是两个状态。
-        auto *pure = views->findChild<QPushButton *>(QStringLiteral("viewPureData"));
-        auto *hexEcho = views->findChild<QPushButton *>(QStringLiteral("viewHexEcho"));
-        auto *lineWrap = views->findChild<QPushButton *>(QStringLiteral("viewLineWrap"));
-        auto *pureAction = window.findChild<QAction *>(QStringLiteral("pureData"));
-        auto *hexAction = window.findChild<QAction *>(QStringLiteral("showHex"));
-        auto *wrapAction = window.findChild<QAction *>(QStringLiteral("wrapTraffic"));
+        auto *pure = views->findChild<QPushButton *>(QStringLiteral("viewPrefix"));
+        auto *hexEcho = views->findChild<QPushButton *>(QStringLiteral("viewAlwaysShowHex"));
+        auto *lineWrap = views->findChild<QPushButton *>(QStringLiteral("viewAutoWrap"));
+        auto *pureAction = window.findChild<QAction *>(QStringLiteral("prefix"));
+        auto *hexAction = window.findChild<QAction *>(QStringLiteral("alwaysShowHex"));
+        auto *wrapAction = window.findChild<QAction *>(QStringLiteral("autoWrap"));
         QVERIFY(pure && hexEcho && lineWrap && pureAction && hexAction && wrapAction);
         const QList<QPair<QPushButton *, QAction *>> mirrored{
             {pure, pureAction}, {hexEcho, hexAction}, {lineWrap, wrapAction}};
         for (const auto &pair : mirrored) {
-            // 文案取自命令本身：菜单与顶栏说的是同一件事，不在这里另抄一份。
-            QCOMPARE(pair.first->text(), pair.second->text());
+            // 顶栏用短名，菜单写完整说明。两边勾选必须一致，文案不必相同。
+            QVERIFY2(!pair.first->text().isEmpty() && !pair.second->text().isEmpty(),
+                qPrintable(pair.first->objectName()));
+            QVERIFY2(pair.first->text().size() < pair.second->text().size(),
+                qPrintable(pair.first->text() + QStringLiteral(" / ") + pair.second->text()));
             QCOMPARE(pair.first->isChecked(), pair.second->isChecked());
             // 按钮 → 命令。
             const bool flipped = !pair.second->isChecked();
@@ -617,19 +641,28 @@ private slots:
             QCOMPARE(pair.first->isChecked(), !flipped);
         }
 
-        // 关掉「前缀」后，行号、时间、HEX 那批开关置灰：顶栏按钮必须同步置灰，
+        // 关掉「显示前缀」后，行号、时间戳、数据长度置灰：顶栏按钮必须同步置灰，
         // 否则留下一个"看着能点、点了一下没反应"的死开关。
+        // HEX 和换行不跟前缀走，关掉前缀后仍然可以单独打开。
         if (!pure->isChecked()) pure->click();
         QVERIFY(pure->isChecked());
-        auto *number = window.findChild<QAction *>(QStringLiteral("showLineNumber"));
-        QVERIFY(number && number->isEnabled() && hexEcho->isEnabled());
+        auto *number = window.findChild<QAction *>(QStringLiteral("prefixLineNumber"));
+        auto *stamp = window.findChild<QAction *>(QStringLiteral("prefixTimestamp"));
+        auto *length = window.findChild<QAction *>(QStringLiteral("prefixLength"));
+        QVERIFY(number && stamp && length && number->isEnabled() && hexEcho->isEnabled());
         pure->click();
         QVERIFY(!pure->isChecked());
         QCOMPARE(number->isEnabled(), false);
-        QCOMPARE(hexEcho->isEnabled(), false);
+        QCOMPARE(stamp->isEnabled(), false);
+        QCOMPARE(length->isEnabled(), false);
+        QVERIFY(hexEcho->isEnabled());
+        QVERIFY(hexAction->isEnabled());
+        QVERIFY(wrapAction->isEnabled());
         pure->click();
         QVERIFY(pure->isChecked());
         QVERIFY(number->isEnabled());
+        QVERIFY(stamp->isEnabled());
+        QVERIFY(length->isEnabled());
 
         // '过滤 · N' 仍是两处条件的合计：只关掉 RX（条件条里一条内容条件都没有）也必须算进去。
         auto *rx = flags->findChild<QPushButton *>(QStringLiteral("filterRx"));
@@ -642,7 +675,7 @@ private slots:
         QVERIFY2(toggle->text().contains(QStringLiteral("· 1")), qPrintable(toggle->text()));
         QVERIFY(reset->isEnabled());
         // 菜单里的事件开关同样是条件：只关掉"警告"也要计数。
-        auto *warnings = window.findChild<QAction *>(QStringLiteral("showWarnings"));
+        auto *warnings = window.findChild<QAction *>(QStringLiteral("showWarning"));
         warnings->setChecked(false);
         QVERIFY2(toggle->text().contains(QStringLiteral("· 2")), qPrintable(toggle->text()));
         // 重置一次清干净：顶栏方向开关、菜单事件开关、条件条内容条件一起回到不过滤。
@@ -690,8 +723,23 @@ private slots:
                  QStringLiteral("followTraffic"), QStringLiteral("clearTraffic"),
                  QStringLiteral("commandPanelToggle")})
             QVERIFY2(row->findChild<QWidget *>(name), qPrintable(QStringLiteral("缺顶栏元素：") + name));
+        QCOMPARE(window.findChild<QPushButton *>(QStringLiteral("displaySettings"))->text(),
+                 QStringLiteral("设置"));
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("followTraffic"))->isChecked());
+        QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("commandPanelToggle"))->isChecked());
         QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("exportTraffic"))->icon().isNull());
         QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("clearTraffic"))->icon().isNull());
+        // 过滤旁的 A/B 是单字母开关，宽度应贴着字，不能被通用按钮的左右内边距撑成方块。
+        auto *portA = window.findChild<QPushButton *>(QStringLiteral("showPortA"));
+        auto *portB = window.findChild<QPushButton *>(QStringLiteral("showPortB"));
+        auto *filterToggle = window.findChild<QPushButton *>(QStringLiteral("filterToggle"));
+        QVERIFY(portA && portB && filterToggle);
+        // 样式宽度不含边框：16px 内容区 + 两侧 1px 边框 = 18。比按钮高度窄，才不像方块。
+        QCOMPARE(portA->width(), 18);
+        QCOMPARE(portB->width(), 18);
+        QVERIFY(portA->width() < filterToggle->height());
+        QCOMPARE(portA->height(), filterToggle->height());
+        QCOMPARE(portB->height(), filterToggle->height());
         const auto crowded = overlapInRow(row);
         QVERIFY2(crowded.isEmpty(), qPrintable(crowded));
     }
@@ -1061,7 +1109,10 @@ private slots:
         // 等待要盯**收尾完成**这个条件本身（最后一行由 sending 转 sent），不能只等
         // 第一行变 sent 就往下断言：游标是逐条推进的，第一行早早就是 sent 了，
         // 而最后一行还停在 sending —— 那时断言等于在抢时间窗。
-        for (auto *box : table->findChildren<QCheckBox *>()) box->setChecked(true);
+        for (auto *box : table->findChildren<QCheckBox *>()) {
+            if (box->objectName() == QStringLiteral("loopBatchSend")) continue;
+            box->setChecked(true);
+        }
         batch->click();
         QTRY_COMPARE_WITH_TIMEOUT(table->sendStateOf(2), QStringLiteral("sent"), 3000);
         QCOMPARE(table->sendStateOf(0), QStringLiteral("sent"));
@@ -1070,6 +1121,32 @@ private slots:
         // 重建表格必须把痕迹清干净：行号会被重排，留着高亮只会指到别的指令上。
         table->setCommandSet(set);
         for (int row = 0; row < 3; ++row) QVERIFY(table->sendStateOf(row).isEmpty());
+
+        // 「循环发送」在按钮左侧。勾上后同一批指令发完再来一轮，按钮变成「停止循环」。
+        auto *loop = table->findChild<QCheckBox *>(QStringLiteral("loopBatchSend"));
+        QVERIFY(loop);
+        QVERIFY2(loop->mapTo(table, QPoint()).x() < batch->mapTo(table, QPoint()).x(),
+            "循环发送应在按序发送按钮的左侧");
+        QVERIFY(!loop->isChecked());
+        loop->setChecked(true);
+        // 每条留出可见延时，游标才会在第一行停住，第二轮回来时才能被断言抓住。
+        for (auto *spin : table->findChildren<QSpinBox *>()) spin->setValue(80);
+        for (auto *box : table->findChildren<QCheckBox *>()) {
+            if (box == loop) continue;
+            box->setChecked(true);
+        }
+        batch->click();
+        QTRY_COMPARE(batch->text(), QStringLiteral("停止循环"));
+        QTRY_COMPARE_WITH_TIMEOUT(table->sendStateOf(0), QStringLiteral("sending"), 2000);
+        // 第一轮走完后游标离开第一行。再等它回到第一行，才是第二轮。
+        QTRY_VERIFY_WITH_TIMEOUT(table->sendStateOf(0) != QStringLiteral("sending"), 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(table->sendStateOf(0), QStringLiteral("sending"), 2000);
+        batch->click();
+        QTRY_COMPARE(batch->text(), QStringLiteral("按序发送勾选项"));
+        // 停之后不再开下一轮，第一行不会又被点成正在发送。
+        QTest::qWait(400);
+        QVERIFY(table->sendStateOf(0) != QStringLiteral("sending"));
+        loop->setChecked(false);
     }
 
     // ★ 展开/收起指令面板时，**数据区宽度原地不动、窗口宽度跟着变**（用户钦定）。
@@ -1089,7 +1166,12 @@ private slots:
         auto *splitter = window.findChild<QSplitter *>(QStringLiteral("horizontalSplitter"));
         auto *toggle = window.findChild<QPushButton *>(QStringLiteral("commandPanelToggle"));
         QVERIFY(splitter && toggle);
+        // 没有保存过展开状态时，面板默认收起，分栏里只有左列。先展开再量基准。
+        if (!toggle->isChecked()) toggle->setChecked(true);
+        QTest::qWait(50);
         QCOMPARE(splitter->count(), 2);
+        auto *panel = window.findChild<CommandPanel *>();
+        QVERIFY(panel);
 
         const int expandedData = splitter->widget(0)->width();
         const int expandedPanel = splitter->widget(1)->width();
@@ -1126,7 +1208,17 @@ private slots:
                 << "splitter" << splitter->width() << "shrunk" << (expandedWindow - collapsedWindow);
         // 数据区是锚点：两种状态下的宽度必须**逐像素相等**。
         QCOMPARE(collapsedData, expandedData);
-        QCOMPARE(splitter->widget(1)->width(), 0);
+        QCOMPARE(splitter->indexOf(panel), -1);
+        QCOMPARE(splitter->count(), 1);
+        // 扩展区移出分栏后，中间那条拖动条不存在，分栏宽度全部给左列。
+        QVERIFY2(!splitter->handle(1),
+            qPrintable(QStringLiteral("收起后扩展区拖动条仍在")));
+        QCOMPARE(splitter->width() - splitter->widget(0)->width(), 0);
+        auto *central = window.centralWidget();
+        const int leftInset = endpointBar->mapTo(central, QPoint(0, 0)).x();
+        const int rightInset = central->width()
+            - endpointBar->mapTo(central, QPoint(endpointBar->width(), 0)).x();
+        QCOMPARE(rightInset, leftInset);
         // 端口条同理：它在左列里，左列宽度不变，它就不该变——这是用户报的
         // "端口设置区域跟着拉长"的直接反面。
         QCOMPARE(endpointBar->width(), expandedBarWidth);
@@ -1145,7 +1237,14 @@ private slots:
         toggle->setChecked(true);
         QTest::qWait(50);
         QCOMPARE(splitter->widget(0)->width(), expandedData);
+        QCOMPARE(splitter->indexOf(panel), 1);
         QVERIFY2(splitter->widget(1)->width() > 0, qPrintable(QStringLiteral("面板应重新出现")));
+        QVERIFY2(splitter->handle(1)->isVisible(),
+            qPrintable(QStringLiteral("展开后扩展区拖动条应重新出现")));
+        const int expandedGap = splitter->width() - splitter->widget(0)->width()
+            - splitter->widget(1)->width();
+        QVERIFY2(expandedGap > 0,
+            qPrintable(QStringLiteral("展开后左右拖动条应重新占宽，实际 %1").arg(expandedGap)));
         const int onceExpandedWindow = window.width();
         QVERIFY2(onceExpandedWindow > collapsedWindow,
             qPrintable(QStringLiteral("展开后窗口应变宽：%1 → %2")
@@ -1159,6 +1258,7 @@ private slots:
         QTest::qWait(50);
         QCOMPARE(splitter->widget(0)->width(), expandedData);
         QCOMPARE(window.width(), collapsedWindow);
+        QVERIFY(!splitter->handle(1));
         toggle->setChecked(true);
         QTest::qWait(50);
         QCOMPARE(splitter->widget(0)->width(), expandedData);
@@ -1194,7 +1294,7 @@ private slots:
         QCOMPARE(message.displayBytes(), Q_INT64_C(4096)); // 显示真实长度，不是预览长度
         QVERIFY(message.isValid());
         QCOMPARE(Traffic::directionName(message.direction), QStringLiteral("TX"));
-        QCOMPARE(Traffic::originName(message.origin), QStringLiteral("转发"));
+        QCOMPARE(Traffic::originName(message.origin), QStringLiteral("FWD"));
         QCOMPARE(Traffic::stateName(message.state), QStringLiteral("部分写出"));
         QCOMPARE(Traffic::framingName(message.framing), QStringLiteral("流片段"));
         // 非数据类消息不参与收发字节统计，isData() 是唯一的判定入口。
@@ -1292,17 +1392,21 @@ private slots:
             + QStringLiteral("/preferences.ini");
         PreferencesStore sweep(nullptr, ini);
         for (const auto *key : {"filter/keywords", "filter/excludes", "filter/regex",
-                 "filter/caseSensitive", "filter/rx", "filter/tx", "filter/forward", "filter/states",
-                 "filter/warnings", "filter/errors", "filter/expanded",
-                 // 显示开关同样会落盘：某个用例把"同时显示 HEX"打开后不关，
+                 "filter/caseSensitive", "filter/rx", "filter/tx", "filter/forward", "filter/state",
+                 "filter/warning", "filter/error", "filter/states", "filter/warnings", "filter/errors",
+                 "filter/expanded",
+                 // 显示开关同样会落盘：某个用例把「始终显示 HEX」打开后不关，
                  // 下一个用例就会在"行数多一倍"的前提下断言——与过滤条件同一类串扰。
-                 "traffic/pure", "traffic/hex", "traffic/wrap",
+                 "traffic/prefix", "traffic/prefixLineNumber", "traffic/prefixTimestamp",
+                 "traffic/prefixLength", "traffic/alwaysShowHex", "traffic/autoWrap",
+                 "traffic/number", "traffic/timestamp", "traffic/direction", "traffic/length",
+                 "traffic/hex", "traffic/pure", "traffic/wrap", "traffic/follow",
                  // 编码格式与发送格式也会落盘，且后果最隐蔽：某个用例把发送格式切成
                  // GBK/UTF-8 后不切回来，下一个用例就会在"输入按文本编码"的前提下断言——
                  // 实测 `sendPreviewRejectsInvalidInput` 因此间歇失败，报的是
                  // `"01 GG"` 被解析成 7 字节（5 字符 + CRLF）而不是"输入错误"。
                  // 这类用例大多**显式设置** format，不依赖残留值，所以清掉是安全的。
-                 "traffic/format", "send/format", "send/suffix",
+                 "traffic/format", "send/format", "send/suffix", "send/enterToSend", "send/text",
                  "file/mode", "file/endpoint", "file/block", "file/direction",
                  "file/beforeId", "file/afterId", "file/beforeDelay", "file/afterDelay",
                  "file/send/beforeHex", "file/send/afterHex",
@@ -1506,8 +1610,11 @@ private slots:
         // 每条 UDP 接收记录都在监视区的 RX 后带上实际来源。
         TrafficTextView view;
         TrafficTextView::DisplayOptions options;
-        options.number = false;
-        options.timestamp = false;
+        options.prefixLineNumber = false;
+        options.prefixTimestamp = false;
+        // 这条只核对来源地址的位置。数据长度和 HEX 对照是另一组开关，这里关掉。
+        options.prefixLength = false;
+        options.alwaysShowHex = false;
         Traffic::Message message;
         message.id = 1;
         message.timestamp = QDateTime::currentDateTime();
@@ -1520,7 +1627,7 @@ private slots:
         message.raw = QByteArray("ping");
         message.rawLength = message.raw.size();
         view.appendMessages({message}, PayloadCodec::Format::Utf8, options);
-        QCOMPARE(view.toPlainText(), QStringLiteral("RX ← 127.0.0.1:9001: ping"));
+        QCOMPARE(view.toPlainText(), QStringLiteral("[A] RX <<-- 127.0.0.1:9001: ping"));
 
         Traffic::Message sent = message;
         sent.direction = Traffic::Direction::Transmit;
@@ -1529,7 +1636,27 @@ private slots:
         sent.rawLength = sent.raw.size();
         TrafficTextView sentView;
         sentView.appendMessages({sent}, PayloadCodec::Format::Utf8, options);
-        QCOMPARE(sentView.toPlainText(), QStringLiteral("TX·手动 → 127.0.0.1:9001: pong"));
+        QCOMPARE(sentView.toPlainText(), QStringLiteral("[A] TX+MAN -->> 127.0.0.1:9001: pong"));
+
+        // 字节数跟在方向后面，按内容拼接，不补空格。状态行不画箭头。
+        Traffic::Message rx = message;
+        rx.source.peerAddress.clear();
+        rx.source.endpointKind = PortDraft::Serial;
+        Traffic::Message tx = sent;
+        tx.source.peerAddress.clear();
+        Traffic::Message err = rx;
+        err.direction = Traffic::Direction::Error;
+        err.raw.clear();
+        err.rawLength = 0;
+        err.statusText = QStringLiteral("denied");
+        TrafficTextView::DisplayOptions withLength = options;
+        withLength.prefixLength = true;
+        TrafficTextView lengthView;
+        lengthView.appendMessages({rx, tx, err}, PayloadCodec::Format::Utf8, withLength);
+        const auto lengthLines = lengthView.toPlainText().split(QLatin1Char('\n'));
+        QCOMPARE(lengthLines.at(0), QStringLiteral("[A] RX [4B] <<--: ping"));
+        QCOMPARE(lengthLines.at(1), QStringLiteral("[A] TX+MAN [4B] -->>: pong"));
+        QCOMPARE(lengthLines.at(2), QStringLiteral("[A] ERR: denied"));
 
         // 关掉「转发」只从数据区拿走桥接产生的发送行。接收和手动发送留下。
         clearEndpointDrafts();
@@ -1577,11 +1704,12 @@ private slots:
         QVERIFY(text->toPlainText().contains(QStringLiteral("hand")));
         QVERIFY(text->toPlainText().contains(QStringLiteral("in")));
 
-        // 纯数据模式依旧不添加任何元信息。
+        // 关掉前缀后不加行号、时间、端口方向。HEX 对照仍可单独跟在数据后面。
         TrafficTextView pureView;
-        options.pure = true;
+        options.prefix = false;
+        options.alwaysShowHex = true;
         pureView.appendMessages({message}, PayloadCodec::Format::Utf8, options);
-        QCOMPARE(pureView.toPlainText(), QStringLiteral("ping"));
+        QCOMPARE(pureView.toPlainText(), QStringLiteral("ping\n70 69 6E 67"));
 
         PortSelectorWidget selector;
         PortDraft draft;
@@ -1721,6 +1849,11 @@ private slots:
         QCOMPARE(busy.count(), 1);
         QTRY_COMPARE_WITH_TIMEOUT(snapshots.count(), 1, 10000);
         QCOMPARE(busy.count(), 2);
+        QSignalSpy scans(&discovery, &PortDiscoveryService::scanFinished);
+        discovery.refresh();
+        QTRY_COMPARE_WITH_TIMEOUT(scans.count(), 1, 10000);
+        QCOMPARE(scans.first().at(0).toULongLong(), 2ULL);
+        QCOMPARE(busy.count(), 4);
         QVERIFY(!busy.last().first().toBool());
         const auto ports = qvariant_cast<QList<SerialPortDescriptor>>(snapshots.first().first());
         QSet<QString> names;
@@ -1872,33 +2005,54 @@ private slots:
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
         const auto fileName = directory.filePath("preferences.ini");
-        // 第一组面板：改显示开关即落盘（PreferencesStore::setValue 带 sync）。
-        PreferencesStore firstStore(nullptr, fileName);
-        TrafficPanel firstTraffic;
-        firstTraffic.setPreferences(&firstStore);
-        SendPanel firstSender;
-        firstSender.setPreferences(&firstStore);
-        auto *wrap = firstTraffic.findChild<QAction *>(QStringLiteral("wrapTraffic"));
-        auto *rx = firstTraffic.findChild<QPushButton *>(QStringLiteral("filterRx"));
-        auto *format = firstTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
-        auto *sendFormat = firstSender.findChild<QComboBox *>(QStringLiteral("sendFormat"));
-        QVERIFY(wrap && rx && format && sendFormat);
-        wrap->setChecked(true);
-        rx->setChecked(false);
-        format->setCurrentText(QStringLiteral("UTF-8"));
-        sendFormat->setCurrentText(QStringLiteral("GBK"));
+        // 第一组面板：改显示开关即写入偏好。QSettings 在 PreferencesStore 析构时刷盘，
+        // 所以每一组都放在自己的作用域里，下一组打开文件时上一组已经写完。
+        {
+            PreferencesStore firstStore(nullptr, fileName);
+            TrafficPanel firstTraffic;
+            firstTraffic.setPreferences(&firstStore);
+            SendPanel firstSender;
+            firstSender.setPreferences(&firstStore);
+            auto *wrap = firstTraffic.findChild<QAction *>(QStringLiteral("autoWrap"));
+            auto *rx = firstTraffic.findChild<QPushButton *>(QStringLiteral("filterRx"));
+            auto *format = firstTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
+            auto *sendFormat = firstSender.findChild<QComboBox *>(QStringLiteral("sendFormat"));
+            auto *enterToSend = firstSender.findChild<QCheckBox *>(QStringLiteral("enterToSend"));
+            auto *editor = firstSender.findChild<QPlainTextEdit *>(QStringLiteral("sendEditor"));
+            QVERIFY(wrap && rx && format && sendFormat && enterToSend && editor);
+            wrap->setChecked(false);
+            rx->setChecked(false);
+            format->setCurrentText(QStringLiteral("UTF-8"));
+            sendFormat->setCurrentText(QStringLiteral("GBK"));
+            enterToSend->setChecked(true);
+            editor->setPlainText(QStringLiteral("01 03 00 00 00 02 C4 0B"));
+        }
         // 第二组面板：从同一份配置读回，用户上次的选择原样恢复。
-        PreferencesStore secondStore(nullptr, fileName);
-        TrafficPanel secondTraffic;
-        secondTraffic.setPreferences(&secondStore);
-        SendPanel secondSender;
-        secondSender.setPreferences(&secondStore);
-        QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("wrapTraffic"))->isChecked(), true);
-        QCOMPARE(secondTraffic.findChild<QPushButton *>(QStringLiteral("filterRx"))->isChecked(), false);
-        QCOMPARE(secondTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->currentText(),
-                 QStringLiteral("UTF-8"));
-        QCOMPARE(secondSender.findChild<QComboBox *>(QStringLiteral("sendFormat"))->currentText(),
-                 QStringLiteral("GBK"));
+        {
+            PreferencesStore secondStore(nullptr, fileName);
+            TrafficPanel secondTraffic;
+            secondTraffic.setPreferences(&secondStore);
+            SendPanel secondSender;
+            secondSender.setPreferences(&secondStore);
+            QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("autoWrap"))->isChecked(), false);
+            QCOMPARE(secondTraffic.findChild<QPushButton *>(QStringLiteral("filterRx"))->isChecked(), false);
+            QCOMPARE(secondTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->currentText(),
+                     QStringLiteral("UTF-8"));
+            QCOMPARE(secondSender.findChild<QComboBox *>(QStringLiteral("sendFormat"))->currentText(),
+                     QStringLiteral("GBK"));
+            QCOMPARE(secondSender.findChild<QCheckBox *>(QStringLiteral("enterToSend"))->isChecked(), true);
+            QCOMPARE(secondSender.findChild<QPlainTextEdit *>(QStringLiteral("sendEditor"))->toPlainText(),
+                     QStringLiteral("01 03 00 00 00 02 C4 0B"));
+            // 清空也要记住。键存在且值为空时，不能退回示例正文。
+            secondSender.findChild<QPlainTextEdit *>(QStringLiteral("sendEditor"))->clear();
+        }
+        {
+            PreferencesStore thirdStore(nullptr, fileName);
+            SendPanel thirdSender;
+            thirdSender.setPreferences(&thirdStore);
+            QCOMPARE(thirdSender.findChild<QPlainTextEdit *>(QStringLiteral("sendEditor"))->toPlainText(),
+                     QString());
+        }
     }
 
     void pendingTrafficIsLoggedOnDestruction()
@@ -2153,9 +2307,11 @@ private slots:
             TrafficPanel panel2;
             panel2.setPreferences(&store2); // record 默认 false：此刻不应有文件
             auto *record2 = panel2.findChild<QAction *>(QStringLiteral("recordTraffic"));
-            QVERIFY(record2);
+            auto *openLog2 = panel2.findChild<QAction *>(QStringLiteral("openCurrentLog"));
+            QVERIFY(record2 && openLog2);
             QVERIFY2(record2->toolTip().indexOf(QStringLiteral("正在写 ")) < 0,
                      "未开启记录时不应声称正在写文件");
+            QVERIFY2(!openLog2->isEnabled(), "未记录时不能打开当前日志");
 
             const QDateTime now = QDateTime::currentDateTime();
             QList<QString> decoys;
@@ -2235,10 +2391,12 @@ private slots:
         TrafficPanel panel;
         panel.setPreferences(&store);
         auto *record = panel.findChild<QAction *>(QStringLiteral("recordTraffic"));
+        auto *openLog = panel.findChild<QAction *>(QStringLiteral("openCurrentLog"));
         auto *choose = panel.findChild<QAction *>(QStringLiteral("chooseLogDirectory"));
         auto *reset = panel.findChild<QAction *>(QStringLiteral("resetLogDirectory"));
-        QVERIFY(record && choose && reset);
+        QVERIFY(record && openLog && choose && reset);
         QVERIFY(record->isChecked());
+        QVERIFY2(openLog->isEnabled(), "正在记录时可以打开当前日志");
         QVERIFY(!reset->isEnabled());
         QCOMPARE(QDir::cleanPath(panel.logDirectory()), QDir::cleanPath(programLog));
         QVERIFY(choose->toolTip().contains(QDir::toNativeSeparators(programLog)));
@@ -2247,6 +2405,7 @@ private slots:
         QVERIFY(QFileInfo(first).fileName().startsWith(QStringLiteral("QQCom-log-")));
         QVERIFY(QFileInfo(first).fileName().endsWith(QStringLiteral(".txt")));
         QVERIFY(QFile::exists(first));
+        QVERIFY(openLog->toolTip().contains(QDir::toNativeSeparators(first)));
         QVERIFY(!QFile::exists(QDir(programLog).filePath(QStringLiteral("QQCom-log.txt"))));
         QVERIFY(store.value(QStringLiteral("traffic/recordPath")).toString().isEmpty());
         created.append(first);
@@ -2507,6 +2666,9 @@ private slots:
         // 正文断言依赖文本渲染：显式切 UTF-8，不依赖共享配置里的残留格式。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
+        // 默认字节数会插在方向和箭头之间，HEX 对照会把五种方向拆成隔行。本用例只看方向色。
+        window.findChild<QAction *>(QStringLiteral("prefixLength"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
                                      ->property("endpoint").toUuid();
         const auto make = [endpointId](quint64 id, Traffic::Direction direction, const char *body) {
@@ -2527,18 +2689,24 @@ private slots:
             make(4, Traffic::Direction::Warning, "warning-body"),
             make(5, Traffic::Direction::Error, "error-body")});
         QTRY_COMPARE(model->rowCount(), 5);
-        const auto fragmentColor = [text](int blockIndex, const QString &needle) {
+        const auto fragmentColor = [text](int blockIndex, const QString &needle, bool exact = false) {
             const QTextBlock block = text->document()->findBlockByNumber(blockIndex);
-            for (auto it = block.begin(); !it.atEnd(); ++it)
-                if (it.fragment().text().contains(needle))
-                    return it.fragment().charFormat().foreground().color();
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                const bool hit = exact ? it.fragment().text() == needle
+                                       : it.fragment().text().contains(needle);
+                if (hit) return it.fragment().charFormat().foreground().color();
+            }
             return QColor();
         };
+        QCOMPARE(fragmentColor(0, QStringLiteral("[A] "), true), QColor(0xB4, 0x53, 0x09));
         QCOMPARE(fragmentColor(0, QStringLiteral("RX")), QColor(0x04, 0x6C, 0x4E));
+        // 串口没有对端，箭头仍要画出来，否则只剩绿色 RX，看不出收还是发。
+        QVERIFY(text->document()->findBlockByNumber(0).text().contains(QStringLiteral("[A] RX <<--")));
+        QVERIFY(text->document()->findBlockByNumber(1).text().contains(QStringLiteral("[A] TX -->>")));
         QCOMPARE(fragmentColor(1, QStringLiteral("TX")), QColor(0x1D, 0x4E, 0xD8));
-        QCOMPARE(fragmentColor(2, QStringLiteral("状态")), QColor(0x6D, 0x28, 0xD9));
-        QCOMPARE(fragmentColor(3, QStringLiteral("警告")), QColor(0x92, 0x40, 0x0E));
-        QCOMPARE(fragmentColor(4, QStringLiteral("错误")), QColor(0xC6, 0x28, 0x28));
+        QCOMPARE(fragmentColor(2, QStringLiteral("STATE")), QColor(0x6D, 0x28, 0xD9));
+        QCOMPARE(fragmentColor(3, QStringLiteral("WARN")), QColor(0x92, 0x40, 0x0E));
+        QCOMPARE(fragmentColor(4, QStringLiteral("ERR")), QColor(0xC6, 0x28, 0x28));
         // 数据行的正文保持近黑（数据是主体）；错误/警告整行随类型着色。
         QCOMPARE(fragmentColor(0, QStringLiteral("rx-body")), QColor(0x1C, 0x24, 0x30));
         QCOMPARE(fragmentColor(3, QStringLiteral("warning-body")), QColor(0x92, 0x40, 0x0E));
@@ -2546,16 +2714,19 @@ private slots:
         // 前缀 DemiBold（用户钦定"前缀加粗 + 与正文同色，靠字重区分"）：行号/时间这类
         // 元信息与方向令牌必须同为 DemiBold，且元信息用正文色 #1C2430。这里钉的是字重
         // 与元色，防止以后有人把 Bold 当"够粗"、或把前缀退回更浅的灰。
-        const auto fragmentFormat = [text](int blockIndex, const QString &needle) {
+        const auto fragmentFormat = [text](int blockIndex, const QString &needle, bool exact = false) {
             const QTextBlock block = text->document()->findBlockByNumber(blockIndex);
-            for (auto it = block.begin(); !it.atEnd(); ++it)
-                if (it.fragment().text().contains(needle))
-                    return it.fragment().charFormat();
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                const bool hit = exact ? it.fragment().text() == needle
+                                       : it.fragment().text().contains(needle);
+                if (hit) return it.fragment().charFormat();
+            }
             return QTextCharFormat();
         };
         const auto metaFormat = fragmentFormat(0, QStringLiteral("1 ")); // 行号在前缀最前
         QCOMPARE(metaFormat.fontWeight(), int(QFont::DemiBold));
         QCOMPARE(metaFormat.foreground().color(), QColor(0x1C, 0x24, 0x30));
+        QCOMPARE(fragmentFormat(0, QStringLiteral("[A] "), true).fontWeight(), int(QFont::DemiBold));
         QCOMPARE(fragmentFormat(0, QStringLiteral("RX")).fontWeight(), int(QFont::DemiBold));
     }
 
@@ -2693,6 +2864,35 @@ private slots:
                                .arg(box->mapTo(&window, QPoint()).x())
                                .arg(editorRight)));
         }
+        // 回车发送与定时发送同属右侧列。默认关，回车仍是换行。
+        auto *enterToSend = window.findChild<QCheckBox *>(QStringLiteral("enterToSend"));
+        auto *enterHint = window.findChild<QLabel *>(QStringLiteral("enterToSendHint"));
+        QVERIFY(enterToSend && enterHint);
+        QVERIFY(!enterToSend->isChecked());
+        QVERIFY(!enterHint->isVisibleTo(&window));
+        QVERIFY2(enterToSend->mapTo(&window, QPoint()).x() >= editorRight,
+            qPrintable(QStringLiteral("回车发送应在正文右侧：x=%1，正文右缘=%2")
+                           .arg(enterToSend->mapTo(&window, QPoint()).x())
+                           .arg(editorRight)));
+        enterToSend->setChecked(true);
+        QVERIFY(enterHint->isVisibleTo(&window));
+
+        QVERIFY(enterHint->text().contains(QStringLiteral("Alt+回车")));
+        QVERIFY(editor->toolTip().contains(QStringLiteral("Alt+回车")));
+        auto *previewChip = window.findChild<QLabel *>(QStringLiteral("payloadPreview"));
+        QVERIFY(previewChip);
+        // 提示和 HEX 预览各占一块底色，中间留出空隙，不能再贴成同一段灰字。
+        QVERIFY(enterHint->mapTo(&window, QPoint()).x()
+            >= previewChip->mapTo(&window, QPoint()).x() + previewChip->width());
+        const auto chipFill = [](QWidget *chip) {
+            const QImage image = chip->grab().toImage();
+            return image.pixelColor(qMin(2, image.width() - 1), image.height() / 2);
+        };
+        const QColor hintFill = chipFill(enterHint);
+        const QColor previewFill = chipFill(previewChip);
+        QVERIFY(hintFill != previewFill);
+        enterToSend->setChecked(false);
+        QVERIFY(!enterHint->isVisibleTo(&window));
         // 定时发送同属右侧列。
         auto *repeat = window.findChild<QCheckBox *>("repeatSending");
         QVERIFY(repeat);
@@ -2718,6 +2918,14 @@ private slots:
                  qPrintable(QStringLiteral("B right edge %1 vs send left %2")
                                 .arg(targets.at(1)->mapTo(&window, QPoint()).x() + targets.at(1)->width())
                                 .arg(send->mapTo(&window, QPoint()).x())));
+        // 提示标签的高度不含 1px 边框，外缘才和按钮齐平。
+        QCOMPARE(enterHint->height() + 2, send->height());
+        QCOMPARE(previewChip->height(), send->height());
+        const int hintTop = enterHint->mapTo(&window, QPoint()).y() - 1;
+        const int hintBottom = hintTop + enterHint->height() + 2;
+        QCOMPARE(hintTop, send->mapTo(&window, QPoint()).y());
+        QCOMPARE(hintBottom, send->mapTo(&window, QPoint()).y() + send->height());
+        QCOMPARE(previewChip->mapTo(&window, QPoint()).y(), send->mapTo(&window, QPoint()).y());
         QCOMPARE(send->height(), targets.at(0)->height());
         QCOMPARE(targets.at(0)->height(), targets.at(1)->height());
         QVERIFY2(send->width() > targets.at(0)->width(),
@@ -2831,10 +3039,23 @@ private slots:
         QCOMPARE(beforeDelay->buttonSymbols(), QAbstractSpinBox::NoButtons);
         QCOMPARE(afterDelay->buttonSymbols(), QAbstractSpinBox::NoButtons);
         auto *block128 = window.findChild<QPushButton *>(QStringLiteral("fileTransferBlock128"));
+        auto *blockLabel = window.findChild<QLabel *>(QStringLiteral("fileTransferBlockLabel"));
         QVERIFY(block128 && !block128->isVisibleTo(&window));
+        QVERIFY(blockLabel && !blockLabel->isVisibleTo(&window));
+        QVERIFY(sendMode->findData(QStringLiteral("xmodem")) >= 0);
+        sendMode->setCurrentIndex(sendMode->findData(QStringLiteral("xmodem")));
+        QTest::qWait(30);
+        QVERIFY2(!block128->isVisibleTo(&window), "XMODEM 固定 128 字节，不提供分包选择");
+        QVERIFY2(!blockLabel->isVisibleTo(&window), "XMODEM 不应留下分包标签");
+        QVERIFY(!chunk->isVisibleTo(&window));
+        QVERIFY2(sendMode->toolTip().contains(QStringLiteral("XMODEM")),
+            qPrintable(sendMode->toolTip()));
+        QVERIFY2(sendMode->toolTip().contains(QStringLiteral("NAK")),
+            qPrintable(sendMode->toolTip()));
         sendMode->setCurrentIndex(sendMode->findData(QStringLiteral("ymodem")));
         QTest::qWait(30);
         QVERIFY(block128->isVisibleTo(&window));
+        QVERIFY(blockLabel->isVisibleTo(&window));
         QVERIFY(!chunk->isVisibleTo(&window));
         QVERIFY(!chunkGap->isVisibleTo(&window));
         sendMode->setCurrentIndex(sendMode->findData(QStringLiteral("raw")));
@@ -2842,6 +3063,7 @@ private slots:
         QVERIFY(chunk->isVisibleTo(&window));
         QVERIFY(chunkGap->isVisibleTo(&window));
         QVERIFY(!block128->isVisibleTo(&window));
+        QVERIFY(!blockLabel->isVisibleTo(&window));
         QVERIFY2(qAbs(midY(sendMode, &window) - midY(sendPath, &window)) <= 2,
             "端点/方式与文件路径应在同一行");
         auto *afterText = window.findChild<QLineEdit *>(QStringLiteral("fileTransferAfterText"));
@@ -3062,7 +3284,7 @@ private slots:
 
         // 定时发送：勾选即发第一拍，且**来源标记必须是 Scheduled**。
         // 这个参数以前在 sendRequested 的 lambda 里被丢掉了（形参只声明了两个），
-        // 于是每一拍都被记成"手动"，屏幕上显示 `TX·手动` 而不是 `TX·定时`。
+        // 于是每一拍都被记成手动，屏幕上显示 `TX+MAN` 而不是 `TX+TIMER`。
         const int rowsBeforeTick = model->rowCount();
         repeat->setChecked(true);
         QTRY_VERIFY(model->rowCount() > rowsBeforeTick);
@@ -3071,7 +3293,7 @@ private slots:
             if (model->record(row).origin == Traffic::Origin::Scheduled) { sawScheduled = true; break; }
         }
         repeat->setChecked(false); // 立刻停，别让定时器继续往模型里灌
-        QVERIFY2(sawScheduled, "定时发送的报文来源标记应为 Scheduled（界面显示 TX·定时）");
+        QVERIFY2(sawScheduled, "定时发送的报文来源标记应为 Scheduled（界面显示 TX+TIMER）");
 
         // 关闭端点后按钮必须回到禁用：可用性跟着连接状态走，不是一次性的。
         action->click();
@@ -3105,12 +3327,12 @@ private slots:
 
         const auto lastLine = [text] { return text->document()->lastBlock().text(); };
 
-        // 打开：状态行必须同时含"状态"与"已打开"两个要素——
+        // 打开：状态行必须同时含方向标记与"已打开"——
         // 只有端口参数（旧行为）就说明状态词没拼上。
         action->click();
         QTRY_COMPARE(action->text(), QStringLiteral("停止"));
         QTRY_VERIFY(lastLine().contains(QStringLiteral("已打开")));
-        QVERIFY2(lastLine().contains(QStringLiteral("状态")),
+        QVERIFY2(lastLine().contains(QStringLiteral("STATE")),
             qPrintable(QStringLiteral("状态行应带方向词：") + lastLine()));
         const QString openedLine = lastLine();
 
@@ -3383,6 +3605,74 @@ private slots:
             box->close();
     }
 
+    void autoRecoverRetriesAfterUnexpectedDisconnect()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.resize(1280, 720);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(model && b);
+        b->findChild<QComboBox *>(QStringLiteral("portType"))->setCurrentIndex(PortDraft::TcpClient);
+        QTest::qWait(20);
+        auto *recover = b->findChild<QCheckBox *>(QStringLiteral("autoRecover"));
+        QVERIFY(recover);
+        recover->setChecked(true);
+
+        QTcpServer listener;
+        QVERIFY(listener.listen(QHostAddress::LocalHost, 0));
+        b->findChild<QComboBox *>(QStringLiteral("client.host"))->setCurrentText(QStringLiteral("127.0.0.1"));
+        b->findChild<QSpinBox *>(QStringLiteral("client.port"))->setValue(listener.serverPort());
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("断开"));
+        QTRY_VERIFY(listener.hasPendingConnections());
+        auto *peer = listener.nextPendingConnection();
+        QVERIFY(peer);
+        const quint16 port = listener.serverPort();
+        // 先关掉监听，重连必然失败，等待态才观察得到。本机回连太快，监听还在时
+        // 按钮会在同一拍从「停止」回到「断开」。
+        listener.close();
+        peer->abort();
+        peer->deleteLater();
+
+        QTRY_COMPARE_WITH_TIMEOUT(action->text(), QStringLiteral("等待中"), 4000);
+        QCOMPARE(action->property("recovering").toBool(), true);
+        auto *statusB = window.findChildren<QLabel *>(QStringLiteral("EndpointState")).value(1);
+        QVERIFY(statusB);
+        QTRY_COMPARE(statusB->text(), QStringLiteral("等待恢复"));
+        QVERIFY(!b->findChild<QComboBox *>(QStringLiteral("portType"))->isEnabled());
+
+        const auto countErrors = [model] {
+            int n = 0;
+            for (int i = 0; i < model->rowCount(); ++i)
+                if (model->record(i).direction == Traffic::Direction::Error) ++n;
+            return n;
+        };
+        QTRY_VERIFY(countErrors() >= 1);
+        const int errorsWhileWaiting = countErrors();
+        QTest::qWait(1500);
+        QCOMPARE(action->text(), QStringLiteral("等待中"));
+        QCOMPARE(statusB->text(), QStringLiteral("等待恢复"));
+        // 第一次失败已经说明原因，后续每拍不再追加错误行。
+        QCOMPARE(countErrors(), errorsWhileWaiting);
+
+        QVERIFY2(listener.listen(QHostAddress::LocalHost, port),
+            qPrintable(listener.errorString()));
+        QTRY_VERIFY_WITH_TIMEOUT(listener.hasPendingConnections(), 4000);
+        QTRY_COMPARE(action->text(), QStringLiteral("断开"));
+        QVERIFY(b->draft().autoRecover);
+
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("连接"));
+        QVERIFY(b->draft().autoRecover);
+        QTest::qWait(1200);
+        QCOMPARE(action->text(), QStringLiteral("连接"));
+        QCOMPARE(statusB->text(), QStringLiteral("未连接"));
+    }
+
     void expandingCommandPanelKeepsFilterRowIntact()
     {
         clearEndpointDrafts();
@@ -3404,7 +3694,9 @@ private slots:
         QHash<QPushButton *, int> minimums;
         for (auto *button : barButtons) minimums.insert(button, button->minimumSizeHint().width());
 
-        // 指令面板已默认展开；先收起再展开，走一遍完整的状态切换。
+        // 初次启动默认收起。先展开再收起，走一遍完整的状态切换。
+        toggleExpand->setChecked(true);
+        QTest::qWait(30);
         toggleExpand->setChecked(false);
         QTest::qWait(30);
         QVERIFY2(!bar->findChild<QPushButton *>("filterRebuild")->isVisibleTo(&window) == false,
@@ -3499,6 +3791,31 @@ private slots:
         QVERIFY(bridge->hasFocus() || !bridge->isEnabled());
     }
 
+    // 建立和停止桥接都要在数据区留下状态行。状态栏「已建立」不算这条日志。
+    void bridgeWritesStatusLog()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.show();
+        auto *a = window.findChild<PortSelectorWidget *>("endpointA");
+        auto *bridge = window.findChild<QPushButton *>("bridgeButton");
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        QVERIFY(a && bridge && text);
+        a->setSerialPorts({{"COM3", "USB-SERIAL CH340", {}, "COM3"}});
+        auto *serial = a->findChild<QComboBox *>("serial.port");
+        serial->setCurrentIndex(serial->findData("COM3"));
+        QVERIFY(bridge->isEnabled());
+        bridge->click();
+        QTRY_VERIFY_WITH_TIMEOUT(text->toPlainText().contains(QStringLiteral("桥接已建立")), 2000);
+        const QString established = text->toPlainText();
+        QVERIFY(established.contains(QStringLiteral("A · COM3")));
+        QVERIFY(established.contains(QStringLiteral("↔")));
+        QVERIFY(established.contains(QStringLiteral("B · 0.0.0.0:9000")));
+        bridge->click();
+        QTRY_VERIFY_WITH_TIMEOUT(text->toPlainText().contains(QStringLiteral("桥接已停止")), 2000);
+    }
+
     void endpointActionOpensAndCloses()
     {
         // 端到端接线：点击动作按钮 → 运行时监听 → 状态回到按钮文案；
@@ -3579,6 +3896,8 @@ private slots:
         // 格式切换是"外观"：按契约立刻作用于**已收到/已显示**的行，新到达的消息也按新格式渲染
         // （r5 起不再是"只影响新行"的控制台语义）。切完先等掉那一刻必然发生的防抖重投影。
         // 已知字节流片段（HEX 01 03 00 00 00 02 C4 0B）渲染为 DEC，并带 ⏎ 续接标记——边界是消息的事实。
+        // DEC 下默认会再跟一行 HEX 对照。本用例一行一条，先关掉对照。
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         trafficFormat->setCurrentIndex(1); // DEC
         QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次重投影，等掉它再断言
         const QUuid endpointId = window.findChild<QPushButton *>("showPortA")
@@ -3670,7 +3989,7 @@ private slots:
         Traffic::Message warning;
         warning.direction = Traffic::Direction::Warning;
         QVERIFY(!warning.isData());
-        QCOMPARE(Traffic::directionName(warning.direction), QStringLiteral("警告"));
+        QCOMPARE(Traffic::directionName(warning.direction), QStringLiteral("WARN"));
     }
 
     // 文本视图的安全阀触发时同样必须播报：屏幕上看不到的几行，可能是用户唯一想
@@ -3813,7 +4132,9 @@ private slots:
         auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
         QVERIFY(text);
         // 换行语义属于文本类渲染：HEX/DEC 本身没有换行概念，切到 UTF-8 验证。
+        // 默认 HEX 对照会再占一块，关掉后块数才等于报文本身的行数。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->setCurrentText(QStringLiteral("UTF-8"));
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
 
         const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
                                      ->property("endpoint").toUuid();
@@ -3862,7 +4183,7 @@ private slots:
         // 保证最后一行就是数据行，断言才有稳定锚点。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
-        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         QByteArray raw(8192, Qt::Uninitialized);
         for (int i = 0; i < raw.size(); ++i)
             raw[i] = char(0x20 + (i % 0x5F));
@@ -3892,7 +4213,7 @@ private slots:
     }
 
     // 行内容开关按控制台语义生效：只影响新行，已固化的行不重排。
-    // 行号恒在；纯数据模式去掉行号/时间/方向/长度/HEX 等一切前缀与附注。
+    // 行号恒在；关掉前缀后去掉行号/时间/方向/长度。HEX 对照不跟前缀走。
     void displayTogglesShapeNewLines()
     {
         MainWindow window;
@@ -3918,38 +4239,45 @@ private slots:
         message.raw = QByteArray("OK");
         message.rawLength = 2;
 
-        // 关时间戳/方向，开长度与 HEX 对照：长度用真实字节数；
+        // 关时间戳、开长度与 HEX 对照。端口方向跟着「显示前缀」，不能单独关掉。
         // HEX 独占一行（不是接在数据行尾），便于上下比对字节。
-        window.findChild<QAction *>(QStringLiteral("showTimestamp"))->setChecked(false);
-        window.findChild<QAction *>(QStringLiteral("showDirection"))->setChecked(false);
-        window.findChild<QAction *>(QStringLiteral("showLength"))->setChecked(true);
-        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("prefixTimestamp"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("prefixLength"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(true);
+        QVERIFY(window.findChild<QAction *>(QStringLiteral("prefix"))->isChecked());
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 1);
         QCOMPARE(text->document()->blockCount(), 2); // 数据行 + HEX 对照行
         // 行号顶格左对齐：右对齐补空格在自动换行下像首行缩进，与续行错位。
-        // 前缀以冒号收尾，与数据的分界一眼可辨。
-        QCOMPARE(text->document()->firstBlock().text(), QStringLiteral("1 [2 B]: OK"));
+        // 前缀以冒号收尾，与数据的分界一眼可辨。长度跟在方向后面。
+        QCOMPARE(text->document()->firstBlock().text(), QStringLiteral("1 [A] RX [2B] <<--: OK"));
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("4F 4B"));
 
-        // 行号是独立开关：关掉后只剩长度与数据。
-        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(false);
-        window.findChild<QAction *>(QStringLiteral("showLineNumber"))->setChecked(false);
+        // 行号和长度各自独立：关掉后只剩端口方向与数据。
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("prefixLineNumber"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("prefixLength"))->setChecked(false);
         message.id = 2;
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 2);
-        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("[2 B]: OK"));
+        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("[A] RX <<--: OK"));
 
-        // 关掉前缀：一切前缀与附注消失，只剩数据本身。
-        window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(false);
+        // 关掉前缀：行号、时间、端口方向、长度一起消失。HEX 同显仍可单独打开。
+        window.findChild<QAction *>(QStringLiteral("prefix"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(true);
         message.id = 3;
+        const int blocksBefore = text->document()->blockCount();
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 3);
-        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("OK"));
+        QTRY_COMPARE(text->document()->blockCount(), blocksBefore + 2);
+        auto block = text->document()->findBlockByNumber(blocksBefore);
+        QCOMPARE(block.text(), QStringLiteral("OK"));
+        QCOMPARE(block.next().text(), QStringLiteral("4F 4B"));
         // 还原默认开关，不把本用例的状态带给后续用例。
-        window.findChild<QAction *>(QStringLiteral("pureData"))->setChecked(true);
-        window.findChild<QAction *>(QStringLiteral("showLineNumber"))->setChecked(true);
-        window.findChild<QAction *>(QStringLiteral("showLength"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("prefix"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("prefixLineNumber"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("prefixTimestamp"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("prefixLength"))->setChecked(true);
     }
 
     // 显示设置是"每行长什么样"的视图属性，不是"只对新数据生效"的到达时快照。
@@ -3966,13 +4294,15 @@ private slots:
         panel->setPreferences(nullptr); // 开关变化不落盘，避免污染共享配置
         auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
         auto *model = window.findChild<TrafficModel *>();
-        auto *clock = window.findChild<QAction *>(QStringLiteral("showTimestamp"));
-        auto *hexEcho = window.findChild<QAction *>(QStringLiteral("showHex"));
+        auto *clock = window.findChild<QAction *>(QStringLiteral("prefixTimestamp"));
+        auto *hexEcho = window.findChild<QAction *>(QStringLiteral("alwaysShowHex"));
         QVERIFY(text && model && clock && hexEcho);
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
         QVERIFY2(clock->isChecked(), "默认应带时间戳，否则本用例的前提不成立");
-        QVERIFY2(!hexEcho->isChecked(), "默认不应带 HEX 对照，否则本用例的前提不成立");
+        // 初次启动不带 HEX 对照。本用例要验证关掉对照后的行数，先打开再关掉。
+        hexEcho->setChecked(true);
+        hexEcho->setChecked(false);
 
         const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
                                      ->property("endpoint").toUuid();
@@ -4042,10 +4372,11 @@ private slots:
         QVERIFY(text && model);
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("HEX"));
-        // 关掉时间戳/方向，行内容只剩行号 + 数据，断言更聚焦。
-        window.findChild<QAction *>(QStringLiteral("showTimestamp"))->setChecked(false);
-        window.findChild<QAction *>(QStringLiteral("showDirection"))->setChecked(false);
-        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(true);
+        // 关掉时间戳和数据长度，行内容只剩行号、端口方向和数据。
+        window.findChild<QAction *>(QStringLiteral("prefixTimestamp"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("prefixLength"))->setChecked(false);
+        QVERIFY(window.findChild<QAction *>(QStringLiteral("prefix"))->isChecked());
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(true);
         const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
                                      ->property("endpoint").toUuid();
         Traffic::Message message;
@@ -4060,7 +4391,7 @@ private slots:
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 1);
         QCOMPARE(text->document()->blockCount(), 1); // 只有数据行，没有 HEX 对照行
-        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("1: 4F 4B"));
+        QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("1 [A] RX <<--: 4F 4B"));
         // 切 UTF-8：对照行恢复出现，且**已显示的那一行**也要一起重画为 UTF-8 + 对照行。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
@@ -4071,9 +4402,9 @@ private slots:
         QTRY_COMPARE(model->rowCount(), 2);
         QCOMPARE(text->document()->blockCount(), 4); // 两行各带一个 HEX 对照行
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("4F 4B"));
-        window.findChild<QAction *>(QStringLiteral("showHex"))->setChecked(false);
-        window.findChild<QAction *>(QStringLiteral("showTimestamp"))->setChecked(true);
-        window.findChild<QAction *>(QStringLiteral("showDirection"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("prefixTimestamp"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("prefixLength"))->setChecked(true);
     }
 
     // 错误/警告日志的独立开关：关闭后事件不进显示、数据不受影响；开启后恢复。
@@ -4112,24 +4443,92 @@ private slots:
         // 不能把基线建立在"重投影还没发生"上（旧断言正是这么过期的：它赌的是 HEX 还没重画）。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
+        // 默认 HEX 对照会让一条消息占两块。本用例按一条消息一行计数，先关掉。
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次重投影，等掉它
         const auto baseline = text->document()->lastBlock().text();
         QVERIFY2(baseline.endsWith(QStringLiteral("data")), // 不再是 HEX 的 …64 61 74 61
             qPrintable(QStringLiteral("切格式后基线行应已变 UTF-8：") + baseline));
         // 关闭错误日志：错误事件进模型不进显示，数据行纹丝不动。
         // 事件开关住在显示设置菜单里（QAction），不在顶栏。
-        window.findChild<QAction *>(QStringLiteral("showErrors"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("showError"))->setChecked(false);
         panel->appendMessages({makeMessage(2, Traffic::Direction::Error, "boom")});
         QTRY_COMPARE(model->rowCount(), 2);
         QCOMPARE(text->lineCount(), 1);
         QCOMPARE(text->document()->lastBlock().text(), baseline);
         // 重新开启：后续错误事件恢复显示。
-        window.findChild<QAction *>(QStringLiteral("showErrors"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("showError"))->setChecked(true);
         panel->appendMessages({makeMessage(3, Traffic::Direction::Error, "boom2")});
         QTRY_COMPARE(text->lineCount(), 2);
         QVERIFY2(text->document()->lastBlock().text().endsWith(QStringLiteral("boom2")),
             qPrintable(QStringLiteral("错误行实况：")
                 + text->document()->lastBlock().text()));
+        // 已经显示的错误行必须跟着开关立刻收起，不能等「应用过滤」。
+        auto *apply = window.findChild<QPushButton *>(QStringLiteral("filterRebuild"));
+        window.findChild<QAction *>(QStringLiteral("showError"))->setChecked(false);
+        QTRY_VERIFY(!text->document()->toPlainText().contains(QStringLiteral("boom2")));
+        QVERIFY(text->document()->toPlainText().contains(QStringLiteral("data")));
+        if (apply)
+            QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+        window.findChild<QAction *>(QStringLiteral("showError"))->setChecked(true);
+        QTRY_VERIFY(text->document()->toPlainText().contains(QStringLiteral("boom2")));
+
+        // 状态迁移、警告和错误同属显示设置，已有行都要立刻跟随。
+        const auto makeEvent = [endpointId](quint64 id, Traffic::Direction direction, const QString &text) {
+            Traffic::Message message;
+            message.id = id;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = direction;
+            message.source.endpointId = endpointId;
+            message.source.endpointIndex = 0;
+            message.source.endpointKind = PortDraft::Serial;
+            message.statusText = text;
+            message.rawLength = 0;
+            return message;
+        };
+        panel->appendMessages({
+            makeEvent(4, Traffic::Direction::State, QStringLiteral("已打开")),
+            makeEvent(5, Traffic::Direction::Warning, QStringLiteral("重连")),
+        });
+        QTRY_VERIFY(text->document()->toPlainText().contains(QStringLiteral("已打开")));
+        QVERIFY(text->document()->toPlainText().contains(QStringLiteral("重连")));
+        window.findChild<QAction *>(QStringLiteral("showState"))->setChecked(false);
+        QTRY_VERIFY(!text->document()->toPlainText().contains(QStringLiteral("已打开")));
+        QVERIFY(text->document()->toPlainText().contains(QStringLiteral("重连")));
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+        window.findChild<QAction *>(QStringLiteral("showWarning"))->setChecked(false);
+        QTRY_VERIFY(!text->document()->toPlainText().contains(QStringLiteral("重连")));
+        window.findChild<QAction *>(QStringLiteral("showState"))->setChecked(true);
+        QTRY_VERIFY(text->document()->toPlainText().contains(QStringLiteral("已打开")));
+        window.findChild<QAction *>(QStringLiteral("showWarning"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("showError"))->setChecked(true);
+
+        // 顶栏 A/B、RX/TX、转发一点就作用到已有行，不能等「应用过滤」。
+        panel->appendMessages({
+            makeMessage(6, Traffic::Direction::Transmit, "sent"),
+            makeMessage(7, Traffic::Direction::Receive, "got"),
+        });
+        QTRY_VERIFY(text->document()->toPlainText().contains(QStringLiteral("sent")));
+        auto *rx = window.findChild<QPushButton *>(QStringLiteral("filterRx"));
+        auto *tx = window.findChild<QPushButton *>(QStringLiteral("filterTx"));
+        QVERIFY(rx && tx && apply);
+        rx->setChecked(false);
+        QTRY_VERIFY(!text->document()->toPlainText().contains(QStringLiteral("got")));
+        QVERIFY(text->document()->toPlainText().contains(QStringLiteral("sent")));
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+        tx->setChecked(false);
+        QTRY_VERIFY(!text->document()->toPlainText().contains(QStringLiteral("sent")));
+        rx->setChecked(true);
+        tx->setChecked(true);
+        QTRY_VERIFY(text->document()->toPlainText().contains(QStringLiteral("got")));
+        QVERIFY(text->document()->toPlainText().contains(QStringLiteral("sent")));
+
+        auto *portA = window.findChild<QPushButton *>(QStringLiteral("showPortA"));
+        portA->setChecked(false);
+        QTRY_VERIFY(!text->document()->toPlainText().contains(QStringLiteral("data")));
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+        portA->setChecked(true);
+        QTRY_VERIFY(text->document()->toPlainText().contains(QStringLiteral("data")));
     }
 
     // 外观重投影不得改变"哪些行在屏幕上"（设计稿 §5 决策表）：改显示设置 / 编码格式只换
@@ -4214,6 +4613,26 @@ private slots:
         QCOMPARE(visibleRows(), 1); // 仍是保底空块，没有被"凭空"重放出内容
     }
 
+    // 没有保存过展开状态时，扩展区收起，并且一开始就不在分栏里。
+    void extensionPanelStartsCollapsed()
+    {
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+        auto *toggle = window.findChild<QPushButton *>(QStringLiteral("commandPanelToggle"));
+        auto *panel = window.findChild<CommandPanel *>();
+        auto *splitter = window.findChild<QSplitter *>(QStringLiteral("horizontalSplitter"));
+        QVERIFY(toggle && panel && splitter);
+        QVERIFY(!panel->isExpanded());
+        QVERIFY(!toggle->isChecked());
+        QCOMPARE(splitter->count(), 1);
+        QCOMPARE(splitter->indexOf(panel), -1);
+        QVERIFY(!splitter->handle(1));
+        QCOMPARE(splitter->width() - splitter->widget(0)->width(), 0);
+    }
+
     // 窗口几何与「扩展」按钮状态都要记忆（用户钦定）：退出时落盘，下次启动恢复。
     // 两者必须**自洽**——上次是"面板收起 + 窄窗口"，重开就不能是"面板收起 + 宽窗口"。
     void windowGeometryAndPanelStateAreRemembered()
@@ -4228,6 +4647,9 @@ private slots:
             QTest::qWait(30);
             auto *toggle = window.findChild<QPushButton *>(QStringLiteral("commandPanelToggle"));
             QVERIFY(toggle);
+            // 初次启动已经是收起。先展开再收起，退出时记下的才是用户选过的收起状态。
+            toggle->setChecked(true);
+            QTest::qWait(30);
             toggle->setChecked(false); // 收起指令面板（会顺带把窗口就地收窄）
             QTest::qWait(50);
             savedWidth = window.width();
@@ -4238,6 +4660,21 @@ private slots:
             QVERIFY(pin->text().isEmpty());
             QVERIFY(!pin->icon().isNull());
             QCOMPARE(pin->toolButtonStyle(), Qt::ToolButtonIconOnly);
+            QCOMPARE(pin->iconSize(), QSize(12, 12));
+            auto *actions = window.findChild<QWidget *>(QStringLiteral("StatusActions"));
+            auto *pinChip = window.findChild<QWidget *>(QStringLiteral("StatusPin"));
+            auto *chip = window.findChild<QWidget *>(QStringLiteral("EndpointChip"));
+            QVERIFY(actions && pinChip && chip);
+            QCOMPARE(actions->height(), chip->height());
+            QCOMPARE(pinChip->height(), chip->height());
+            const int gap = pinChip->mapTo(&window, QPoint(0, 0)).x()
+                - actions->mapTo(&window, QPoint(actions->width(), 0)).x();
+            QVERIFY2(gap >= 4,
+                qPrintable(QStringLiteral("检查更新与置顶应分开，实际间距 %1").arg(gap)));
+            const int pinMid = pin->mapTo(&window, QPoint(0, pin->height() / 2)).y();
+            const int chipMid = chip->mapTo(&window, QPoint(0, chip->height() / 2)).y();
+            QVERIFY2(qAbs(pinMid - chipMid) <= 1,
+                qPrintable(QStringLiteral("置顶与端点状态中线差 %1").arg(pinMid - chipMid)));
             QVERIFY(!pin->isChecked());
             QVERIFY(!window.windowFlags().testFlag(Qt::WindowStaysOnTopHint));
             const int widthBeforePin = window.width();
@@ -4264,6 +4701,12 @@ private slots:
             qPrintable(QStringLiteral("上次是收起状态，重开应仍是收起；实际 expanded=")
                 + QString::number(panel->isExpanded())));
         QVERIFY(!toggle->isChecked());
+        auto *splitter = again.findChild<QSplitter *>(QStringLiteral("horizontalSplitter"));
+        QVERIFY(splitter);
+        QCOMPARE(splitter->indexOf(panel), -1);
+        QVERIFY2(!splitter->handle(1),
+            qPrintable(QStringLiteral("启动时扩展区已收起，左右拖动条应不存在")));
+        QCOMPARE(splitter->width() - splitter->widget(0)->width(), 0);
         auto *pinAgain = again.findChild<QToolButton *>(QStringLiteral("stayOnTop"));
         QVERIFY(pinAgain && pinAgain->isChecked());
         QVERIFY(again.windowFlags().testFlag(Qt::WindowStaysOnTopHint));
@@ -4490,7 +4933,7 @@ private slots:
         auto *model = window.findChild<TrafficModel *>();
         auto *keywords = window.findChild<QLineEdit *>(QStringLiteral("filterKeywords"));
         auto *apply = window.findChild<QPushButton *>(QStringLiteral("filterRebuild"));
-        auto *timestamp = window.findChild<QAction *>(QStringLiteral("showTimestamp"));
+        auto *timestamp = window.findChild<QAction *>(QStringLiteral("prefixTimestamp"));
         QVERIFY(text && model && keywords && apply && timestamp);
         QVERIFY(timestamp->isChecked()); // 默认显示时间戳，下面用它当"外观"开关
 
@@ -4585,14 +5028,16 @@ private slots:
         auto *model = window.findChild<TrafficModel *>();
         auto *keywords = window.findChild<QLineEdit *>(QStringLiteral("filterKeywords"));
         auto *apply = window.findChild<QPushButton *>(QStringLiteral("filterRebuild"));
-        auto *timestamp = window.findChild<QAction *>(QStringLiteral("showTimestamp"));
+        auto *timestamp = window.findChild<QAction *>(QStringLiteral("prefixTimestamp"));
         auto *format = window.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
         auto *clear = window.findChild<QPushButton *>(QStringLiteral("clearTraffic"));
         QVERIFY(text && model && keywords && apply && timestamp && format && clear);
 
         // 归一化到确定起点，避免被同一次运行里更早的用例留下的共享偏好影响。
+        // 切到 UTF-8 后默认 HEX 对照会让一条消息占两行。本用例一行一条，先关掉。
         keywords->clear();
         format->setCurrentText(QStringLiteral("HEX"));
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         timestamp->setChecked(true);
         window.findChild<QPushButton *>(QStringLiteral("showPortA"))->setChecked(true);
         if (auto *rx = window.findChild<QPushButton *>(QStringLiteral("filterRx")))
@@ -4722,6 +5167,8 @@ private slots:
         keywords->clear();
         clear->click();
         format->setCurrentText(QStringLiteral("DEC")); // DEC 渲染 = 十进制字节值，如 "0 255"
+        // DEC 下默认 HEX 对照会让一条消息占两行。本用例一行一条。
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         window.findChild<QPushButton *>(QStringLiteral("showPortA"))->setChecked(true);
         if (auto *rx = window.findChild<QPushButton *>(QStringLiteral("filterRx")))
             rx->setChecked(true);
@@ -4778,6 +5225,8 @@ private slots:
         QVERIFY(text && model);
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
+        // 默认 HEX 对照会插在数据行和续行之间。本用例只看报文本身的两块。
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         const QUuid endpointId = window.findChild<QPushButton *>(QStringLiteral("showPortA"))
                                      ->property("endpoint").toUuid();
         Traffic::Message message;
@@ -4866,7 +5315,30 @@ private slots:
         }
         qApp->setStyleSheet(previousFramingStyle);
         auto *enabled = selector->findChild<QCheckBox *>(QStringLiteral("framingEnabled"));
+        auto *recover = selector->findChild<QCheckBox *>(QStringLiteral("autoRecover"));
         QVERIFY(enabled);
+        QVERIFY(recover);
+        // 自动恢复在主参数行，和类型、动作按钮同一行，不跟组帧控件藏在高级区。
+        auto *typeBox = selector->findChild<QComboBox *>(QStringLiteral("portType"));
+        auto *action = selector->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(typeBox && action);
+        const int recoverY = recover->mapTo(selector, QPoint(0, 0)).y();
+        QVERIFY(qAbs(recoverY - typeBox->mapTo(selector, QPoint(0, 0)).y()) <= 8);
+        QVERIFY(recover->mapTo(selector, QPoint(0, 0)).x() > typeBox->mapTo(selector, QPoint(0, 0)).x());
+        QVERIFY(recover->mapTo(selector, QPoint(0, 0)).x() < action->mapTo(selector, QPoint(0, 0)).x());
+        QVERIFY(recoverY < framingControls->mapTo(selector, QPoint(0, 0)).y());
+        QVERIFY(!recover->isChecked());
+        recover->setChecked(true);
+        QCOMPARE(selector->draft().autoRecover, true);
+        // TCP 服务器不提供自动恢复：勾选隐藏，草稿也不再带这个标志。
+        typeBox->setCurrentIndex(PortDraft::TcpServer);
+        QTest::qWait(20);
+        QVERIFY(!recover->isVisible());
+        QVERIFY(!selector->draft().autoRecover);
+        typeBox->setCurrentIndex(PortDraft::Serial);
+        QTest::qWait(20);
+        QVERIFY(recover->isVisible());
+        QVERIFY(!recover->isChecked());
         QVERIFY(mode->findData(int(ReceiveFraming::IdleTimeout)) >= 0);
         QCOMPARE(idle->value(), 10);
         mode->setCurrentIndex(mode->findData(int(ReceiveFraming::IdleTimeout)));
@@ -4927,10 +5399,195 @@ private slots:
         auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
         QVERIFY(text);
         QCOMPARE(text->lineWrapMode(), QPlainTextEdit::NoWrap);
-        window.findChild<QAction *>(QStringLiteral("wrapTraffic"))->setChecked(true);
+        window.findChild<QAction *>(QStringLiteral("autoWrap"))->setChecked(true);
         QCOMPARE(text->lineWrapMode(), QPlainTextEdit::WidgetWidth);
-        window.findChild<QAction *>(QStringLiteral("wrapTraffic"))->setChecked(false);
+        window.findChild<QAction *>(QStringLiteral("autoWrap"))->setChecked(false);
         QCOMPARE(text->lineWrapMode(), QPlainTextEdit::NoWrap);
+        window.findChild<QAction *>(QStringLiteral("autoWrap"))->setChecked(true);
+        QCOMPARE(text->lineWrapMode(), QPlainTextEdit::WidgetWidth);
+    }
+
+    // 回车发送：默认回车仍换行。勾上后回车走发送按钮同一条路，换行改成 Alt+回车。
+    void enterToSendUsesAltEnterForNewLine()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        auto *editor = window.findChild<QPlainTextEdit *>(QStringLiteral("sendEditor"));
+        auto *enterToSend = window.findChild<QCheckBox *>(QStringLiteral("enterToSend"));
+        auto *send = window.findChild<QPushButton *>(QStringLiteral("PrimaryButton"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        auto *targetA = window.findChild<QPushButton *>(QStringLiteral("sendTargetA"));
+        auto *targetB = window.findChild<QPushButton *>(QStringLiteral("sendTargetB"));
+        QVERIFY(editor && enterToSend && send && model && b && targetA && targetB);
+
+        // offscreen 下 setFocus 不一定生效。事件直接交给输入框，和焦点在框内时同一条过滤路径。
+        const auto pressEnter = [editor](Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+            QTest::keyClick(editor, Qt::Key_Return, modifiers);
+        };
+        auto cursor = editor->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        editor->setTextCursor(cursor);
+        const QString before = editor->toPlainText();
+        pressEnter();
+        QCOMPARE(editor->toPlainText(), before + QLatin1Char('\n'));
+        // 把默认回车插进去的换行清掉，后面只断言 Alt+回车。
+        editor->setPlainText(QStringLiteral("AT"));
+
+        if (!targetB->isChecked()) targetB->click();
+        if (targetA->isChecked()) targetA->click();
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(action);
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("停止"));
+        auto *format = window.findChild<QComboBox *>(QStringLiteral("sendFormat"));
+        auto *suffix = window.findChild<QComboBox *>(QStringLiteral("sendSuffix"));
+        QVERIFY(format && suffix);
+        format->setCurrentText(QStringLiteral("UTF-8"));
+        suffix->setCurrentIndex(0);
+        QTRY_VERIFY(send->isEnabled());
+
+        enterToSend->setChecked(true);
+        const int rowsBefore = model->rowCount();
+        pressEnter();
+        QTRY_VERIFY(model->rowCount() > rowsBefore);
+        QCOMPARE(editor->toPlainText(), QStringLiteral("AT"));
+        QCOMPARE(model->record(model->rowCount() - 1).raw, QByteArray("AT"));
+
+        cursor = editor->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        editor->setTextCursor(cursor);
+        pressEnter(Qt::AltModifier);
+        QCOMPARE(editor->toPlainText(), QStringLiteral("AT\n"));
+        // Alt+回车只换行，不再多发一拍。
+        QCOMPARE(model->rowCount(), rowsBefore + 1);
+
+        enterToSend->setChecked(false);
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("监听"));
+    }
+
+    // 串口被占用时勾选自动恢复再打开：按钮进入「等待中」，再点一次必须停住，
+    // 不能被已经排队的重试失败重新点亮。用绑定冲突的 UDP 代替真实串口占用。
+    void occupiedOpenEntersWaitingAndSecondClickCancels()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(b);
+        b->findChild<QComboBox *>(QStringLiteral("portType"))->setCurrentIndex(PortDraft::Udp);
+        QTest::qWait(20);
+        auto *recover = b->findChild<QCheckBox *>(QStringLiteral("autoRecover"));
+        QVERIFY(recover);
+        recover->setChecked(true);
+
+        QUdpSocket held;
+        QVERIFY(held.bind(QHostAddress::LocalHost, 0, QUdpSocket::DontShareAddress));
+        const quint16 port = held.localPort();
+        auto *bind = b->findChild<QComboBox *>(QStringLiteral("udp.address"));
+        QVERIFY(bind);
+        if (bind->findData(QStringLiteral("127.0.0.1")) < 0)
+            bind->addItem(QStringLiteral("127.0.0.1"), QStringLiteral("127.0.0.1"));
+        bind->setCurrentIndex(bind->findData(QStringLiteral("127.0.0.1")));
+        b->findChild<QSpinBox *>(QStringLiteral("udp.port"))->setValue(port);
+        b->findChild<QComboBox *>(QStringLiteral("udp.target"))->setCurrentText(QString());
+
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QCOMPARE(action->text(), QStringLiteral("绑定"));
+        action->click();
+        QTRY_COMPARE_WITH_TIMEOUT(action->text(), QStringLiteral("等待中"), 4000);
+        QCOMPARE(action->property("recovering").toBool(), true);
+        QCOMPARE(action->property("open").toBool(), false);
+        auto *statusB = window.findChildren<QLabel *>(QStringLiteral("EndpointState")).value(1);
+        QVERIFY(statusB);
+        QTRY_COMPARE(statusB->text(), QStringLiteral("等待恢复"));
+
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("绑定"));
+        QCOMPARE(action->property("recovering").toBool(), false);
+        QTRY_COMPARE(statusB->text(), QStringLiteral("未连接"));
+        // 占用还在。若取消挡不住在途重试，按钮会在下一拍又回到「等待中」。
+        QTest::qWait(1500);
+        QCOMPARE(action->text(), QStringLiteral("绑定"));
+        QCOMPARE(statusB->text(), QStringLiteral("未连接"));
+        QVERIFY(b->draft().autoRecover);
+    }
+
+    // 桥接转发的日志必须先记本端收到，再记对端转发写出。
+    void forwardLogFollowsReceive()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("UTF-8"));
+
+        auto *a = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointA"));
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(a && b);
+        a->findChild<QComboBox *>(QStringLiteral("portType"))->setCurrentIndex(PortDraft::Udp);
+        b->findChild<QComboBox *>(QStringLiteral("portType"))->setCurrentIndex(PortDraft::Udp);
+        QTest::qWait(20);
+
+        const auto bindLoopback = [](PortSelectorWidget *selector) {
+            auto *bind = selector->findChild<QComboBox *>(QStringLiteral("udp.address"));
+            if (bind->findData(QStringLiteral("127.0.0.1")) < 0)
+                bind->addItem(QStringLiteral("127.0.0.1"), QStringLiteral("127.0.0.1"));
+            bind->setCurrentIndex(bind->findData(QStringLiteral("127.0.0.1")));
+            selector->findChild<QComboBox *>(QStringLiteral("udp.target"))->setCurrentText(QString());
+        };
+        bindLoopback(a);
+        bindLoopback(b);
+        a->findChild<QSpinBox *>(QStringLiteral("udp.port"))->setValue(0);
+        b->findChild<QSpinBox *>(QStringLiteral("udp.port"))->setValue(0);
+        b->findChild<QComboBox *>(QStringLiteral("udp.target"))->setCurrentText(QStringLiteral("127.0.0.1"));
+        b->findChild<QSpinBox *>(QStringLiteral("udp.targetPort"))->setValue(9);
+
+        auto *actionA = a->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        auto *actionB = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        actionA->click();
+        actionB->click();
+        QTRY_COMPARE(actionA->text(), QStringLiteral("解绑"));
+        QTRY_COMPARE(actionB->text(), QStringLiteral("解绑"));
+
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        QVERIFY(text);
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("已打开")));
+        const QRegularExpression bound(QStringLiteral("127\\.0\\.0\\.1:(\\d+)"));
+        const auto boundMatch = bound.match(text->toPlainText());
+        QVERIFY2(boundMatch.hasMatch(), qPrintable(text->toPlainText()));
+        const quint16 portA = quint16(boundMatch.captured(1).toUInt());
+        QVERIFY(portA > 0);
+
+        auto *direction = window.findChild<QComboBox *>(QStringLiteral("routeDirection"));
+        auto *bridge = window.findChild<QPushButton *>(QStringLiteral("bridgeButton"));
+        QVERIFY(direction && bridge);
+        direction->setCurrentIndex(0); // A → B
+        bridge->click();
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("桥接已建立")));
+
+        QUdpSocket sender;
+        QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
+        QCOMPARE(sender.writeDatagram("ls", QHostAddress::LocalHost, portA), qint64(2));
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("TX+FWD")));
+        const QString log = text->toPlainText();
+        const int rx = log.indexOf(QStringLiteral("[A] RX"));
+        const int fwd = log.indexOf(QStringLiteral("[B] TX+FWD"));
+        QVERIFY2(rx >= 0 && fwd > rx,
+            qPrintable(QStringLiteral("应先收到再转发：\n") + log));
     }
 };
 

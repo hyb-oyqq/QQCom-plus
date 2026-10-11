@@ -25,7 +25,7 @@ release\QQCom_ui_tests.exe -o ui-results.txt,txt
 cd ..\..
 ```
 
-UI/traffic 性能工程引用主窗口版本头，新检出先运行一次主工程构建，或执行 `powershell -NoProfile -File scripts/update_version.ps1` 生成该头。qmake 后再 nmake，避免运行旧目标。测试返回非零或报告中出现 FAIL 都视为失败。无桌面环境可使用 `offscreen` 平台；字体、DPI、原生窗口布局问题仍需 Windows 平台验证。
+UI/traffic 性能工程引用主窗口版本头 `version/version.h`。qmake 后再 nmake，避免运行旧目标。测试返回非零或报告中出现 FAIL 都视为失败。无桌面环境可使用 `offscreen` 平台；字体、DPI、原生窗口布局问题仍需 Windows 平台验证。
 
 测试程序使用独立应用身份或临时文件，不能把生产配置路径写入测试夹具。截图产物可通过 `QQCOM_UI_ARTIFACT_DIR` 指定到构建目录。压测仅对自有本地/测试设备执行，结果放入 `build/`。
 
@@ -45,12 +45,7 @@ UI/traffic 性能工程引用主窗口版本头，新检出先运行一次主工
 
 ## 版本与发布
 
-`version/version.json` 是版本和产品名的来源。qmake 在 Windows 配置时调用 `scripts/update_version.ps1`，生成忽略跟踪的 `version/version.h`，标题为 `QQCom v主.次.修订 Build:yyyyMMddHHmm`。普通构建只更新时间，不增加版本号。
-
-```powershell
-powershell -NoProfile -File scripts/update_version.ps1 -Mode patch
-# 同样支持 -Mode minor 或 -Mode major
-```
+版本号改 `version/version.h` 里 `VER MANAGER` 区块的 `QQCOM_VERSION_MAJOR`、`QQCOM_VERSION_MINOR`、`QQCOM_VERSION_PATCH`。qmake 在 Windows 配置时调用 `version/update_version.ps1`，只刷新同一区块的时间戳和 `QQCom v主.次.修订 Build:yyyyMMddHHmm` 标题，不改这三个数字。Qt Creator 的「构建」不会每次重跑 qmake，所以日常构建要把 `version/stamp_version.bat` 加到 Make 之前：项目设置、构建和运行、构建步骤、添加构建步骤、自定义过程步骤。命令填 `%{sourceDir}\version\stamp_version.bat`，工作目录填 `%{sourceDir}`，再用向上箭头把它移到 Make 上面。Make 会因 `version.h` 变新而重编引用它的源文件。
 
 主工程链接后通过 `scripts/deploy_qt_windows.pri` 部署同一 Kit 的运行库。手动部署测试或交付目录：
 

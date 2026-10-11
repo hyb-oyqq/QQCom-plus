@@ -8,10 +8,13 @@ msvc: QMAKE_CXXFLAGS += /utf-8
 
 include(version/version.pri)
 
+# qmake 配置时只刷新 version.h 里的构建时间。版本号改头文件里的 MAJOR/MINOR/PATCH。
+# 每次点「构建」刷新时间戳不能写在这里：Qt Creator 的构建步骤只有 qmake 和 Make，
+# 且 qmake 只在 .pro 变化时重跑。日常构建用 version\stamp_version.bat，加到 Make 之前。
 win32 {
-    VERSION_UPDATE_SCRIPT = $$shell_path($$PWD/scripts/update_version.ps1)
+    VERSION_UPDATE_SCRIPT = $$shell_path($$PWD/version/update_version.ps1)
     VERSION_UPDATE_ROOT = $$shell_path($$PWD)
-    !system(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$VERSION_UPDATE_SCRIPT" -Root "$$VERSION_UPDATE_ROOT" -Mode build) {
+    !system(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$$VERSION_UPDATE_SCRIPT" -Root "$$VERSION_UPDATE_ROOT") {
         error("Unable to update version metadata before build")
     }
 }

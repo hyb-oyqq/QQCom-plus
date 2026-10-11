@@ -56,7 +56,10 @@ signals:
     void sendCommand(const CommandItem &cmd);
     // rows 与 commands 一一对应且同序：面板按累加延时逐条发时，用行号把进度回报给表格
     // （只带 commands 的话面板不知道该点亮哪一行——行号只有表格自己知道）。
-    void batchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands);
+    // loop 为真时发完最后一条回到第一条，直到用户再点一次按钮。
+    void batchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands, bool loop);
+    // 循环进行中再点按钮：停在当前轮，不再排下一轮。
+    void batchSendStopRequested();
 
 private slots:
     void addCommand();
@@ -123,6 +126,7 @@ private:
     QTableWidget *m_table = nullptr;
     QPushButton *m_addButton = nullptr;
     QPushButton *m_removeButton = nullptr;
+    QCheckBox *m_loopSend = nullptr;
     QPushButton *m_batchSendButton = nullptr;
     QWidget *m_dropIndicator = nullptr;
 

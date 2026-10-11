@@ -2,6 +2,7 @@
 #define COMMANDPANEL_H
 
 #include "domain/commanditem.h"
+#include <QList>
 #include <QWidget>
 #include <QUuid>
 
@@ -47,7 +48,9 @@ private slots:
     void onCommandsChanged();
     void onSendCommand(const CommandItem &cmd);
     // rows 与 commands 一一对应且同序：时序与进度都在这一个函数里排，两边不会错开。
-    void onBatchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands);
+    // loop 为真时这一轮的最后一条发完后，再排同样的一轮。
+    void onBatchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands, bool loop);
+    void onBatchSendStopRequested();
     void refreshSetComboBox();
 
 protected:
@@ -61,6 +64,9 @@ private:
     void savePreferences();
     void applyExpandedState();
     void updateMargins();
+    // 按累加延时排一轮。loop 且这一轮还没被取消时，最后一条发出后再排下一轮。
+    void scheduleBatch(const QList<int> &rows, const QList<CommandItem> &commands, bool loop);
+    void setBatchButtonLooping(bool looping);
 
     QVBoxLayout *m_mainLayout = nullptr;
     QWidget *m_topBarWidget = nullptr;  // 顶部工具栏容器，用于整体显示/隐藏
@@ -75,7 +81,8 @@ private:
 
 
     PreferencesStore *m_preferences = nullptr;
-    bool m_expanded = true;
+    // 没有保存过展开状态时收起。构造时先落到几何上，偏好读到后再改。
+    bool m_expanded = false;
     bool m_updatingSets = false;
     QUuid m_currentSetId;
     // 展开时的最小宽度与两项宽度来源（顶栏 / 表格内容）：
@@ -84,6 +91,8 @@ private:
     int m_topBarMinimumWidth = 0;
     int m_commandTableMinimumWidth = 0;
     int m_expandedMinimumWidth = 0;
+    // 循环发送的代数。每次新开一轮或用户停止都加一，旧定时器看到代数不对就不再发、不再续轮。
+    int m_batchGeneration = 0;
 };
 
 #endif

@@ -34,6 +34,8 @@ public:
     // 打开期间锁定类型与参数，避免"边连边改"造成配置与运行态不一致。
     // connecting 只属于还在拨号的客户端：按钮改成「正在连接」，颜色仍是未打开的蓝。
     void setConnectionOpen(bool open, bool connecting = false);
+    // 打开失败或异常断开后正在等待重新打开。按钮文案是「等待中」，点下去取消本次等待。
+    void setRecovering(bool recovering);
     void setSerialPorts(const QList<SerialPortDescriptor> &ports);
     void setAddressHistory(const QStringList &remote, const QStringList &local);
     void commitAddressHistory();
@@ -48,6 +50,8 @@ signals:
     void actionRequested();
 
 private:
+    void applyBusyState();
+    void syncAutoRecover(); // TCP 服务器不提供自动恢复，其余类型显示勾选
     void notifyChange();
     void updateValidation();
     void updateActionLabels();
@@ -71,6 +75,7 @@ private:
     QLabel *m_framingThresholdLabel = nullptr;
     QLabel *m_framingThresholdUnit = nullptr; // "字节" 单位标签：同上，跟随兜底设置一起置灰
     QSpinBox *m_framingThreshold = nullptr;
+    QCheckBox *m_autoRecover = nullptr;
     QCheckBox *m_framingKeepBoundary = nullptr;
     QCheckBox *m_framingLogHints = nullptr;
     QLabel *m_framingHint = nullptr; // 当前组帧方式的一行说明
@@ -89,6 +94,7 @@ private:
     QPushButton *m_action;
     bool m_open = false;
     bool m_connecting = false;
+    bool m_recovering = false;
     QString m_validationError;
     // 上次校验的错误字段：自动展开只响应"新出现"的错误，程序化载入的遗留错误不展开。
     QSet<QWidget *> m_lastInvalid;

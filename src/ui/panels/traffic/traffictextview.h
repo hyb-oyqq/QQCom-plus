@@ -33,23 +33,23 @@ class TrafficTextView : public QPlainTextEdit
 public:
     // 行前缀的开关组合。视图是**投影**：同一批记录可以按不同开关组合反复重画，
     // 所以这些开关不再"只在到达时生效"，而是每行长什么样。
-    // pure 为真时其余前缀选项被忽略——只显示数据本身。
+    // prefix 为假时行号、时间、端口方向、长度都被忽略。HEX 对照不在其中，仍按 alwaysShowHex 单独决定。
     struct DisplayOptions
     {
-        bool number = true;    // 行号（会话内绝对计数）
-        bool timestamp = true; // 行首 HH:mm:ss.zzz
-        bool direction = true; // RX/TX 方向标记（含手动/定时等来源复合标记）
-        bool length = false;   // [N B] 真实字节数（不受预览截断影响）
-        bool hex = false;      // 数据后另起一行显示 HEX 对照（HEX 格式下无意义，自动省略）
-        bool pure = false;     // 纯数据视图：无行号、时间、方向等一切前缀
+        bool prefix = true;            // 前缀总开关：端口、方向、箭头和对端随它一起出现
+        bool prefixLineNumber = true;  // 行号（会话内绝对计数）
+        bool prefixTimestamp = true;   // 行首 HH:mm:ss.zzz
+        bool prefixLength = true;      // 方向后面的 [NB]；端口方向关掉时改放在时间后面
+        bool alwaysShowHex = true;     // 数据后另起一行显示 HEX 对照（HEX 格式下无意义，自动省略）
 
         // 面板用它判断"外观是否变了、要不要重投影"。写成显式比较而不是依赖
         // 默认的 operator==：C++17 下没有默认比较，且逐字段列出更不容易漏改。
+        // 状态/警告/错误不在这里：它们决定哪些行进来，归 TrafficFilter::Options。
         bool operator==(const DisplayOptions &other) const
         {
-            return number == other.number && timestamp == other.timestamp
-                && direction == other.direction && length == other.length && hex == other.hex
-                && pure == other.pure;
+            return prefix == other.prefix && prefixLineNumber == other.prefixLineNumber
+                && prefixTimestamp == other.prefixTimestamp && prefixLength == other.prefixLength
+                && alwaysShowHex == other.alwaysShowHex;
         }
         bool operator!=(const DisplayOptions &other) const { return !(*this == other); }
     };

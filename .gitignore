@@ -94,9 +94,6 @@ CMakeLists.txt.user*
 /tests/stress/qa/
 __pycache__/
 
-# Generated version header (scripts/update_version.ps1)
-/version/version.h
-
 # Local AI assistant workspace data
 /.workbuddy/
 .gstack/

@@ -9,6 +9,7 @@
 namespace {
 // 主窗口经队列槽把桥接开关送到 I/O 线程，类型必须在首次跨线程调用前登记。
 const int bridgeLinkMetaTypeId = qRegisterMetaType<BridgeLink>();
+const int portDraftMetaTypeId = qRegisterMetaType<PortDraft>();
 } // namespace
 
 EndpointRuntime::EndpointRuntime(QObject *parent) : QObject(parent)
@@ -74,6 +75,23 @@ QString endpointIdentity(int index, const PortDraft &draft)
 
 } // namespace
 
+void EndpointRuntime::suppressRecover(int index)
+{
+    if (index < 0 || index >= EndpointCount) return;
+    m_recoverSuppressed[index].store(true, std::memory_order_release);
+}
+
+void EndpointRuntime::recoverEndpoint(int index, const PortDraft &draft, bool portPresent)
+{
+    if (index < 0 || index >= EndpointCount) return;
+    // 取消已经生效：这一拍作废。标志留给随后排进来的拍，直到用户再次打开。
+    if (m_recoverSuppressed[index].load(std::memory_order_acquire)) return;
+    if (m_transports[index]) return; // 已经打开或正在打开，这一拍不再重入
+    if (draft.kind == PortDraft::TcpServer) return;
+    if (draft.kind == PortDraft::Serial && !portPresent) return;
+    openEndpoint(index, draft);
+}
+
 void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
 {
     if (index < 0 || index >= EndpointCount) return;
@@ -83,6 +101,8 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
     emit endpointPeersChanged(index, {});
     m_generations[index]++;
     m_pendingFailureGeneration[index] = 0; // 换代即作废旧失败合并锚点，避免串代误并
+    // 用户再次打开，之前的「取消等待」不再拦截这次以及随后的恢复。
+    m_recoverSuppressed[index].store(false, std::memory_order_release);
     m_drafts[index] = draft;
 
     auto *transport = TransportFactory::create(draft.kind, index, this);
@@ -102,8 +122,16 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             if (gen != m_generations[index]) return;
             // 传输层主动报告关闭（例如 TCP 对端断开、串口设备错误）时，
             // 也要把尚未达到空闲超时的残留字节交给监视区，不能静默丢掉尾帧。
-            if (state == int(Transport::State::Closed))
+            if (state == int(Transport::State::Closed)) {
                 flushFramers(index, ReceiveFramer::Closed);
+                retireTransport(index);
+                // 自动恢复的重复失败不写状态行。第一次错误已说明原因，界面保持「等待恢复」。
+                if (m_drafts[index].autoRecover && m_recoverNoticeSent[index]) {
+                    m_pendingFailureGeneration[index] = 0;
+                    emit endpointStateChanged(index, state, detail);
+                    return;
+                }
+            }
             // 一次失败被传输层拆成"errorOccurred + Closed"两条信号；错误行已经给出了完整
             // 原因，这条随之而来的 Closed 若再单独成行，用户看到的就是"错误 xx"＋"状态 打开失败"
             // 两条（他反馈的"错误跟状态感觉重复了"）。所以它只负责把端点确实回到 Closed
@@ -111,6 +139,8 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             const bool mergedIntoRecentError = state == int(Transport::State::Closed)
                 && m_pendingFailureGeneration[index] == generation;
             m_pendingFailureGeneration[index] = 0; // 任何一次状态上报都消费掉这个锚点
+            if (state == int(Transport::State::Open))
+                m_recoverNoticeSent[index] = false;
             if (!mergedIntoRecentError) {
                 auto message = makeMessage(index, Traffic::Direction::State, Traffic::Origin::Automatic,
                     {}, Traffic::Framing::Message);
@@ -126,11 +156,10 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
         [this, index, generation](quint64 gen, const Traffic::Source &source,
                                    const QByteArray &payload, int framing) {
             if (gen != m_generations[index]) return;
-            if (!payload.isEmpty()) {
+            if (!payload.isEmpty())
                 emit rawDataReceived(index, source, payload);
-                forwardReceived(index, payload);
-            }
             // 数据报自带边界，直接就是一条；字节流片段才交给组帧器。
+            // 先发布本端收到，再写转发。反过来日志会先出现对端 TX+FWD，再出现本端 RX。
             if (Traffic::Framing(framing) != Traffic::Framing::Stream) {
                 // UDP 没有握手。首次收到某个来源的数据报，就在数据区记一条对端已出现。
                 // 只记来源，不改用户指定的发送目标。
@@ -152,9 +181,13 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
                     Traffic::Origin::Automatic, payload, Traffic::Framing(framing));
                 message.source = source; // 传输层带 peer/代次的完整来源
                 publish(std::move(message));
+                if (!payload.isEmpty())
+                    forwardReceived(index, payload);
                 return;
             }
             feedFramer(index, source, payload);
+            if (!payload.isEmpty())
+                forwardReceived(index, payload);
         });
     connect(transport, &AbstractTransport::peerListChanged, this,
         [this, index, generation](quint64 gen, const QList<Transport::PeerInfo> &peers) {
@@ -179,6 +212,8 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
     connect(transport, &AbstractTransport::errorOccurred, this,
         [this, index, generation](quint64 gen, const QString &text) {
             if (gen != m_generations[index]) return;
+            // 自动恢复已经记过一次等待说明后，后续每拍失败不再写日志。
+            if (m_drafts[index].autoRecover && m_recoverNoticeSent[index]) return;
             // 失败的唯一一条日志：错误行正文就是完整原因。传输层随后若紧跟一条同代次
             // Closed（打开失败 / 设备错误 / 连接断开都会），状态处理器会把它并进这里，
             // 不再单独成行——但"端点已回到 Closed"仍会照常上报给界面。
@@ -188,6 +223,18 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             message.statusText = QStringLiteral("%1 · %2")
                 .arg(endpointIdentity(index, m_drafts[index]), text);
             publish(std::move(message));
+            // 自动恢复的打开失败不再每拍写一条错误：第一次失败已经说明原因。
+            if (m_drafts[index].autoRecover && !m_recoverNoticeSent[index]) {
+                m_recoverNoticeSent[index] = true;
+                auto notice = makeMessage(index, Traffic::Direction::Warning, Traffic::Origin::Automatic,
+                    {}, Traffic::Framing::Message);
+                notice.statusText = m_drafts[index].kind == PortDraft::Serial
+                    ? tr("%1 · 等待串口重新出现后自动打开").arg(endpointIdentity(index, m_drafts[index]))
+                    : tr("%1 · 将按 %2 秒间隔自动重试")
+                          .arg(endpointIdentity(index, m_drafts[index]))
+                          .arg(PortDraft::AutoRecoverRetryMs / 1000);
+                publish(std::move(notice));
+            }
         });
 
     transport->start(draft, generation);
@@ -196,6 +243,7 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
 void EndpointRuntime::closeEndpoint(int index)
 {
     if (index < 0 || index >= EndpointCount) return;
+    m_recoverNoticeSent[index] = false;
     closeTransport(index);
     m_observedUdpPeers[index].clear();
 
@@ -239,16 +287,37 @@ void EndpointRuntime::sendPayload(int index, const QByteArray &payload, int orig
     publish(std::move(message));
 }
 
-void EndpointRuntime::setBridge(const BridgeLink &link)
+void EndpointRuntime::setBridge(const BridgeLink &link, const PortDraft &endpointA, const PortDraft &endpointB)
 {
     const bool turningOn = link.enabled && !m_bridge.enabled;
+    const bool turningOff = !link.enabled && m_bridge.enabled;
     m_bridge = link;
-    if (!m_bridge.enabled) return;
-    if (m_bridge.direction < int(BridgeDirection::AtoB) || m_bridge.direction > int(BridgeDirection::Both))
+    if (m_bridge.enabled
+        && (m_bridge.direction < int(BridgeDirection::AtoB)
+            || m_bridge.direction > int(BridgeDirection::Both)))
         m_bridge.direction = int(BridgeDirection::Both);
-    // 只在建立时清空。停止和意外断开都不丢缓冲，已经在路上的字节按原会话走完。
-    if (turningOn)
+    if (!turningOn && !turningOff) return;
+
+    // 调用方传来的是界面上当前配置。还没打开时运行时草稿是空的，日志仍要写出端口名。
+    const auto named = [](const PortDraft &given, const PortDraft &opened) {
+        return portShortLabel(given).isEmpty() ? opened : given;
+    };
+    // 桥接是 A、B 之间的状态，不属于某一端。身份留空，显示层按「任一端可见」保留这行。
+    auto message = makeMessage(-1, Traffic::Direction::State, Traffic::Origin::Automatic,
+        {}, Traffic::Framing::Message);
+    if (turningOn) {
+        static const char *arrows[] = {"→", "←", "↔"};
+        const int arrow = qBound(0, m_bridge.direction, 2);
+        message.statusText = tr("桥接已建立 · %1 %2 %3")
+            .arg(endpointIdentity(0, named(endpointA, m_drafts[0])),
+                 QString::fromUtf8(arrows[arrow]),
+                 endpointIdentity(1, named(endpointB, m_drafts[1])));
+        // 只在建立时清空。停止和意外断开都不丢缓冲，已经在路上的字节按原会话走完。
         discardPendingInput();
+    } else {
+        message.statusText = tr("桥接已停止");
+    }
+    publish(std::move(message));
 }
 
 void EndpointRuntime::discardPendingInput()
@@ -276,6 +345,15 @@ void EndpointRuntime::forwardReceived(int index, const QByteArray &payload)
         message.statusText = tr("本地接受 %1/%2 字节").arg(accepted).arg(payload.size());
     }
     publish(std::move(message));
+}
+
+void EndpointRuntime::retireTransport(int index)
+{
+    auto *&transport = m_transports[index];
+    if (!transport) return;
+    m_generations[index]++;
+    transport->deleteLater();
+    transport = nullptr;
 }
 
 void EndpointRuntime::closeTransport(int index)
@@ -384,6 +462,8 @@ void EndpointRuntime::removeDisconnectedPeers(int index, const QList<Transport::
 
 Traffic::Source EndpointRuntime::sourceOf(int index) const
 {
+    // 桥接状态不属于某一端，index 为 -1。不能拿它去按下标读草稿。
+    if (index < 0 || index >= EndpointCount) return {};
     auto source = Traffic::makeSource(m_drafts[index], index);
     source.generation = m_generations[index];
     return source;

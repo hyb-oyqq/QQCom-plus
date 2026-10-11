@@ -28,12 +28,32 @@ public:
     struct Options
     {
         QSet<QUuid> endpoints; // 集合为空表示不显示任何端点的记录
+        // 桥接状态不属于 A 或 B。只要 A、B 有一端在显示，这条日志就留下。
         bool rx = true;
         bool tx = true;
         bool forwards = true; // 桥接转发产生的发送行。关掉只影响显示，不停止转发。
         bool states = true;   // 状态迁移（端口打开/关闭/重连等）
         bool warnings = true; // 警告日志
         bool errors = true;   // 错误日志
+
+        // 顶栏显示开关和显示设置里的事件开关：点了就作用到已有行。
+        // 关键词、排除词、大小写仍等「应用过滤」。
+        void copyLiveVisibilityFrom(const Options &current)
+        {
+            endpoints = current.endpoints;
+            rx = current.rx;
+            tx = current.tx;
+            forwards = current.forwards;
+            states = current.states;
+            warnings = current.warnings;
+            errors = current.errors;
+        }
+        bool liveVisibilityDiffers(const Options &other) const
+        {
+            return endpoints != other.endpoints || rx != other.rx || tx != other.tx
+                || forwards != other.forwards || states != other.states
+                || warnings != other.warnings || errors != other.errors;
+        }
         // 内容条件：关键词任一命中即通过（组内 OR），排除词命中任一即隐藏（黑名单）。
         // 两者共用同一套候选文本视图，见 Matcher。
         QStringList keywords;

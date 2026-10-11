@@ -19,10 +19,11 @@ constexpr int GlyphSize = 14;
 //   程序改命令（恢复偏好、纯数据模式联动置灰）→ 按钮跟上 → 推回命令时两侧相等 → 返回。
 // 两侧都不加 QSignalBlocker：按钮的 toggled 还要驱动图标换色（bindToggleIcon），
 // 拦住它反而漏刷新——那正是"琥珀底上出现灰字形"这类错字的来源。
-void bindToggleButton(QPushButton *button, QAction *action)
+void bindToggleButton(QPushButton *button, QAction *action, const QString &shortText)
 {
     if (!button || !action) return;
-    button->setText(action->text());
+    // 顶栏必须用短名。菜单项和这里是同一个 QAction，菜单写完整说明后不能把长文案带上来。
+    button->setText(shortText);
     button->setToolTip(action->toolTip());
     button->setChecked(action->isChecked());
     button->setEnabled(action->isEnabled());
@@ -30,7 +31,7 @@ void bindToggleButton(QPushButton *button, QAction *action)
     QObject::connect(action, &QAction::toggled, button, [button](bool on) {
         if (button->isChecked() != on) button->setChecked(on);
     });
-    // 命令 → 按钮：可用性。关掉「前缀」会把行号、HEX 那批开关置灰，顶栏按钮必须同步，
+    // 命令 → 按钮：可用性。关掉「前缀」会把行号、时间那批开关置灰，顶栏按钮必须同步，
     // 否则会出现"按钮亮着但点了没反应"的死开关。
     QObject::connect(action, &QAction::changed, button,
         [button, action] { button->setEnabled(action->isEnabled()); });
@@ -59,19 +60,21 @@ ViewToggles::ViewToggles(QWidget *parent) : QWidget(parent)
     row->setSpacing(4);
 
     // 文案与提示都在 bind 里由命令侧覆盖；这里只保证构造期按钮是可用的形状。
-    m_pure = makeToggle(this, QStringLiteral("viewPureData"),
-        QStringLiteral(":/icons/format-clear.svg"));
-    m_hex = makeToggle(this, QStringLiteral("viewHexEcho"), QStringLiteral(":/icons/numeric.svg"));
-    m_wrap = makeToggle(this, QStringLiteral("viewLineWrap"), QStringLiteral(":/icons/wrap.svg"));
+    // 点亮表示正在显示前缀：每行先是行首标记，再是正文。
+    m_prefix = makeToggle(this, QStringLiteral("viewPrefix"),
+        QStringLiteral(":/icons/prefix.svg"));
+    m_alwaysShowHex = makeToggle(this, QStringLiteral("viewAlwaysShowHex"),
+        QStringLiteral(":/icons/numeric.svg"));
+    m_autoWrap = makeToggle(this, QStringLiteral("viewAutoWrap"), QStringLiteral(":/icons/wrap.svg"));
 
-    for (auto *button : {m_pure, m_hex, m_wrap}) row->addWidget(button);
+    for (auto *button : {m_prefix, m_alwaysShowHex, m_autoWrap}) row->addWidget(button);
     // 三个开关按自己的 sizeHint 占位，这一行的下限由布局自己算（见 rowmetrics.h）。
     pinRowToContents(row);
 }
 
-void ViewToggles::bind(QAction *pureData, QAction *hexEcho, QAction *lineWrap)
+void ViewToggles::bind(QAction *prefix, QAction *alwaysShowHex, QAction *autoWrap)
 {
-    bindToggleButton(m_pure, pureData);
-    bindToggleButton(m_hex, hexEcho);
-    bindToggleButton(m_wrap, lineWrap);
+    bindToggleButton(m_prefix, prefix, QStringLiteral("前缀"));
+    bindToggleButton(m_alwaysShowHex, alwaysShowHex, QStringLiteral("HEX"));
+    bindToggleButton(m_autoWrap, autoWrap, QStringLiteral("换行"));
 }

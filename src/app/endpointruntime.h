@@ -6,6 +6,8 @@
 #include <QObject>
 #include <QSet>
 #include <QTimer>
+
+#include <atomic>
 #include "app/receiveframer.h"
 #include "domain/bridgelink.h"
 #include "domain/portdraft.h"
@@ -20,7 +22,7 @@
 //   openEndpoint(index, draft)  关旧实例 → 新代次 → 新建传输并 start
 //   closeEndpoint(index)        用户关闭；此后旧实例事件按代次丢弃
 //   sendPayload(index, payload, origin)  写入并把结果装配成 TX 消息
-//   setBridge(link)                      建立或停止 A/B 转发
+//   setBridge(link, a, b)                建立或停止 A/B 转发；a、b 只用于状态日志
 //
 // 负责连接生命周期、按来源隔离的接收组帧、消息装配及事件发布。
 // 桥接只做一件事：一端收到的原始字节原样写到另一端。周期发送尚未实现。
@@ -36,8 +38,15 @@ public:
 public slots:
     void openEndpoint(int index, const PortDraft &draft);
     void closeEndpoint(int index);
+    // 自动恢复的一拍。GUI 只在「正在等待恢复」时按间隔调用。
+    // 串口在 portPresent 为真（扫描到同名设备）时才打开；网络端点忽略该标志。
+    void recoverEndpoint(int index, const PortDraft &draft, bool portPresent);
+    // 用户取消等待。可从 GUI 线程直接调用：只写原子标志，已经排队的恢复拍会直接跳过。
+    // 用户再次打开时由 openEndpoint 清掉。
+    void suppressRecover(int index);
     void sendPayload(int index, const QByteArray &payload, int origin);
-    void setBridge(const BridgeLink &link);
+    // 后两个草稿只用于状态日志里的端口名。不替换已打开会话的配置。
+    void setBridge(const BridgeLink &link, const PortDraft &endpointA = {}, const PortDraft &endpointB = {});
     void shutdown();
 
 signals:
@@ -55,6 +64,8 @@ private:
         QTimer *idle = nullptr;
     };
     void closeTransport(int index);
+    // 异常关闭后释放传输对象，自动恢复才能在下一拍重新打开。代次照常作废。
+    void retireTransport(int index);
     Traffic::Source sourceOf(int index) const;
     // 装配一条消息：会话内 id、墙钟 + 单调时钟、来源身份。
     Traffic::Message makeMessage(int index, Traffic::Direction direction, Traffic::Origin origin,
@@ -72,6 +83,10 @@ private:
     void discardPendingInput();
     void forwardReceived(int index, const QByteArray &payload);
 
+    // 打开失败的自动恢复只记一条警告。成功或用户停止后清掉，下次失败再记。
+    bool m_recoverNoticeSent[EndpointCount] = {};
+    // 用户已经取消等待。GUI 线程写、I/O 线程读，所以用原子量，不能等队列槽。
+    std::atomic<bool> m_recoverSuppressed[EndpointCount] = {};
     AbstractTransport *m_transports[EndpointCount] = {};
     BridgeLink m_bridge;
     PortDraft m_drafts[EndpointCount];

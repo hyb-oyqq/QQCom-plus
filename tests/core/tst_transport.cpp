@@ -124,6 +124,27 @@ private slots:
         QCOMPARE(original.readAll(), originalBytes);
     }
 
+    void runtimeRetriesOnlyTheNamedSerialPort()
+    {
+        EndpointRuntime runtime;
+        QList<int> states;
+        connect(&runtime, &EndpointRuntime::endpointStateChanged, this,
+            [&states](int, int state, const QString &) { states.append(state); });
+
+        PortDraft missing;
+        missing.kind = PortDraft::Serial;
+        missing.autoRecover = true;
+        missing.values.insert(QStringLiteral("serial.port"), QStringLiteral("COM_MISSING"));
+        missing.values.insert(QStringLiteral("serial.baud"), QStringLiteral("115200"));
+        runtime.recoverEndpoint(0, missing, false);
+        QCOMPARE(states.size(), 0);
+        QVERIFY(runtime.findChildren<AbstractTransport *>().isEmpty());
+
+        runtime.recoverEndpoint(0, missing, true);
+        QTRY_VERIFY(!states.isEmpty());
+        QCOMPARE(states.last(), int(Transport::State::Closed));
+    }
+
     void framerHandlesFragmentedBoundariesAndTinyThreshold()
     {
         ReceiveFraming config;
@@ -1026,7 +1047,19 @@ private slots:
         BridgeLink link;
         link.enabled = true;
         link.direction = int(BridgeDirection::AtoB);
+        const int beforeBridge = messages.count();
         runtime.setBridge(link);
+        QVERIFY(messages.count() > beforeBridge);
+        {
+            const auto notice = messages.at(beforeBridge).at(0).value<Traffic::Message>();
+            QCOMPARE(notice.direction, Traffic::Direction::State);
+            QCOMPARE(notice.source.endpointIndex, -1);
+            QVERIFY(notice.source.endpointId.isNull());
+            QVERIFY(notice.statusText.contains(QStringLiteral("桥接已建立")));
+            QVERIFY(notice.statusText.contains(QStringLiteral("→")));
+            QVERIFY(notice.statusText.contains(QStringLiteral(":%1").arg(portA)));
+            QVERIFY(notice.statusText.contains(QStringLiteral(":%1").arg(portB)));
+        }
         QCOMPARE(outsider.write(QByteArray("live"), QUuid()), qint64(4));
         QTRY_COMPARE(sinkBData.count(), 1);
         QCOMPARE(sinkBData.at(0).at(2).toByteArray(), QByteArray("live"));
@@ -1044,6 +1077,18 @@ private slots:
             return count;
         };
         QTRY_COMPARE(forwarded(), 1);
+        int receiveId = 0;
+        int forwardId = 0;
+        for (const auto &params : messages) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            if (message.raw != QByteArray("live")) continue;
+            if (message.direction == Traffic::Direction::Receive && message.source.endpointIndex == 0)
+                receiveId = int(message.id);
+            if (message.direction == Traffic::Direction::Transmit && message.origin == Traffic::Origin::Forward)
+                forwardId = int(message.id);
+        }
+        QVERIFY(receiveId > 0);
+        QVERIFY(forwardId > receiveId);
         QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [&](const QList<QVariant> &params) {
             const auto message = params.at(0).value<Traffic::Message>();
             return message.direction == Traffic::Direction::Transmit
@@ -1069,7 +1114,14 @@ private slots:
         QCOMPARE(sinkBData.count(), 1);
 
         link.enabled = false;
+        const int beforeStop = messages.count();
         runtime.setBridge(link);
+        QVERIFY(messages.count() > beforeStop);
+        {
+            const auto notice = messages.at(beforeStop).at(0).value<Traffic::Message>();
+            QCOMPARE(notice.direction, Traffic::Direction::State);
+            QCOMPARE(notice.statusText, QStringLiteral("桥接已停止"));
+        }
         QCOMPARE(outsider.write(QByteArray("after"), QUuid()), qint64(5));
         QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QList<QVariant> &params) {
             const auto message = params.at(0).value<Traffic::Message>();
@@ -1153,6 +1205,212 @@ private slots:
         QFile destination(destinationPath);
         QVERIFY(destination.open(QIODevice::ReadOnly));
         QCOMPARE(destination.readAll(), expected);
+    }
+
+    void xmodemRoundTripOverRawLoopback()
+    {
+        QTemporaryDir sourceDir;
+        QTemporaryDir destinationDir;
+        QVERIFY(sourceDir.isValid());
+        QVERIFY(destinationDir.isValid());
+
+        const QString sourcePath = sourceDir.filePath(QStringLiteral("payload.bin"));
+        QFile source(sourcePath);
+        QVERIFY(source.open(QIODevice::WriteOnly));
+        // 129 字节：两包，第二包只剩 1 字节，其余用 0x1A 填充。
+        QByteArray expected(129, '\0');
+        for (int i = 0; i < expected.size(); ++i) expected[i] = char(i & 0xff);
+        expected[128] = char(0x1a);
+        QCOMPARE(source.write(expected), qint64(expected.size()));
+        source.close();
+
+        LoopbackRuntime senderRuntime;
+        LoopbackRuntime receiverRuntime;
+        FileTransferService sender;
+        FileTransferService receiver;
+        senderRuntime.sink = &receiver;
+        receiverRuntime.sink = &sender;
+        sender.setRuntime(&senderRuntime);
+        receiver.setRuntime(&receiverRuntime);
+
+        QSignalSpy senderFinished(&sender, &FileTransferService::transferFinished);
+        QSignalSpy receiverFinished(&receiver, &FileTransferService::transferFinished);
+        QSignalSpy failures(&sender, &FileTransferService::transferFailed);
+        QSignalSpy receiverFailures(&receiver, &FileTransferService::transferFailed);
+        QSignalSpy senderStats(&sender, &FileTransferService::statsChanged);
+
+        const QString destinationPath = destinationDir.filePath(QStringLiteral("saved.bin"));
+        receiver.startXModemReceive(0, destinationPath);
+        sender.startXModemSend(0, sourcePath);
+        QTRY_COMPARE_WITH_TIMEOUT(senderFinished.count(), 1, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(receiverFinished.count(), 1, 3000);
+        QCOMPARE(failures.count(), 0);
+        QCOMPARE(receiverFailures.count(), 0);
+        QVERIFY(!senderRuntime.sent.isEmpty());
+        QCOMPARE(quint8(senderRuntime.sent.first().at(0)), quint8(0x01));
+        QCOMPARE(senderRuntime.sent.first().size(), 133);
+
+        QFile destination(destinationPath);
+        QVERIFY(destination.open(QIODevice::ReadOnly));
+        // 协议不传长度。第二包只有 1 字节有效数据，其余 127 字节 0x1A 原样保留。
+        QByteArray padded = expected;
+        padded.append(QByteArray(127, char(0x1a)));
+        QCOMPARE(destination.readAll(), padded);
+        QVERIFY(!senderStats.isEmpty());
+        QCOMPARE(senderStats.last().at(0).toLongLong(), qint64(expected.size()));
+    }
+
+    void xmodemNakRetriesTheSameBlock()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString sourcePath = dir.filePath(QStringLiteral("two.bin"));
+        QFile source(sourcePath);
+        QVERIFY(source.open(QIODevice::WriteOnly));
+        const QByteArray payload(200, 'Z');
+        QCOMPARE(source.write(payload), qint64(payload.size()));
+        source.close();
+
+        LoopbackRuntime runtime;
+        FileTransferService sender;
+        sender.setRuntime(&runtime);
+        sender.startXModemSend(0, sourcePath);
+        sender.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x43)));
+        QTRY_COMPARE(runtime.sent.size(), 1);
+        const QByteArray first = runtime.sent.at(0);
+        QCOMPARE(first.size(), 133);
+        QCOMPARE(quint8(first.at(0)), quint8(0x01));
+        QCOMPARE(quint8(first.at(1)), quint8(0x01));
+        QCOMPARE(quint8(first.at(2)), quint8(0xfe));
+        QCOMPARE(first.mid(3, 128), QByteArray(128, 'Z'));
+
+        sender.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x15)));
+        QTRY_COMPARE(runtime.sent.size(), 2);
+        QCOMPARE(runtime.sent.at(1), first);
+
+        sender.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x06)));
+        QTRY_COMPARE(runtime.sent.size(), 3);
+        QCOMPARE(quint8(runtime.sent.at(2).at(1)), quint8(0x02));
+        QCOMPARE(runtime.sent.at(2).mid(3, 72), QByteArray(72, 'Z'));
+        QCOMPARE(runtime.sent.at(2).mid(3 + 72, 56), QByteArray(56, char(0x1a)));
+        sender.stop();
+    }
+
+    void xmodemChecksumModeUses132ByteFrames()
+    {
+        QTemporaryDir sourceDir;
+        QTemporaryDir destinationDir;
+        QVERIFY(sourceDir.isValid());
+        QVERIFY(destinationDir.isValid());
+        const QString sourcePath = sourceDir.filePath(QStringLiteral("sum.bin"));
+        QFile source(sourcePath);
+        QVERIFY(source.open(QIODevice::WriteOnly));
+        const QByteArray payload(10, 'A');
+        QCOMPARE(source.write(payload), qint64(payload.size()));
+        source.close();
+
+        LoopbackRuntime runtime;
+        FileTransferService sender;
+        sender.setRuntime(&runtime);
+        sender.startXModemSend(0, sourcePath);
+        sender.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x15)));
+        QTRY_COMPARE(runtime.sent.size(), 1);
+        const QByteArray frame = runtime.sent.at(0);
+        QCOMPARE(frame.size(), 132);
+        QCOMPARE(quint8(frame.at(0)), quint8(0x01));
+        QCOMPARE(quint8(frame.at(1)), quint8(0x01));
+        QCOMPARE(quint8(frame.at(2)), quint8(0xfe));
+        quint8 sum = 0;
+        for (int i = 3; i < 131; ++i) sum = quint8(sum + quint8(frame.at(i)));
+        QCOMPARE(quint8(frame.at(131)), sum);
+
+        LoopbackRuntime receiverRuntime;
+        FileTransferService receiver;
+        receiver.setRuntime(&receiverRuntime);
+        QSignalSpy finished(&receiver, &FileTransferService::transferFinished);
+        const QString destinationPath = destinationDir.filePath(QStringLiteral("out.bin"));
+        receiver.startXModemReceive(0, destinationPath);
+        QTRY_VERIFY(receiverRuntime.sent.contains(QByteArray(1, char(0x43))));
+        // 对端只认 NAK，不会等 C。132 字节帧到达后应锁定校验和并 ACK。
+        receiver.rawDataReceived(0, Traffic::Source{}, frame);
+        QTRY_COMPARE(receiverRuntime.sent.last(), QByteArray(1, char(0x06)));
+        receiver.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x04)));
+        QTRY_COMPARE(finished.count(), 1);
+        QFile destination(destinationPath);
+        QVERIFY(destination.open(QIODevice::ReadOnly));
+        QByteArray padded = payload;
+        padded.append(QByteArray(118, char(0x1a)));
+        QCOMPARE(destination.readAll(), padded);
+    }
+
+    void xmodemReceiverRejects1kAndAcceptsDuplicate()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("out.bin"));
+        LoopbackRuntime runtime;
+        FileTransferService receiver;
+        receiver.setRuntime(&runtime);
+        QSignalSpy failed(&receiver, &FileTransferService::transferFailed);
+        QSignalSpy finished(&receiver, &FileTransferService::transferFinished);
+        receiver.startXModemReceive(0, path);
+        QTRY_VERIFY(runtime.sent.contains(QByteArray(1, char(0x43))));
+
+        auto packet = [](quint8 block, char fill) {
+            QByteArray data(128, fill);
+            quint16 crc = 0;
+            for (char byte : data) {
+                crc ^= quint16(quint8(byte)) << 8;
+                for (int bit = 0; bit < 8; ++bit)
+                    crc = (crc & 0x8000) ? quint16((crc << 1) ^ 0x1021) : quint16(crc << 1);
+            }
+            QByteArray frame;
+            frame.append(char(0x01));
+            frame.append(char(block));
+            frame.append(char(~block));
+            frame.append(data);
+            frame.append(char((crc >> 8) & 0xff));
+            frame.append(char(crc & 0xff));
+            return frame;
+        };
+
+        const int before = runtime.sent.size();
+        receiver.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x02)) + QByteArray(1028, 'K'));
+        QTRY_VERIFY(runtime.sent.size() > before);
+        QCOMPARE(runtime.sent.last(), QByteArray(1, char(0x15)));
+        QCOMPARE(failed.count(), 0);
+
+        receiver.rawDataReceived(0, Traffic::Source{}, packet(1, 'A'));
+        QTRY_COMPARE(runtime.sent.last(), QByteArray(1, char(0x06)));
+        receiver.rawDataReceived(0, Traffic::Source{}, packet(1, 'A'));
+        QTRY_COMPARE(runtime.sent.last(), QByteArray(1, char(0x06)));
+        receiver.rawDataReceived(0, Traffic::Source{}, QByteArray(1, char(0x04)));
+        QTRY_COMPARE(finished.count(), 1);
+
+        QFile destination(path);
+        QVERIFY(destination.open(QIODevice::ReadOnly));
+        QCOMPARE(destination.readAll(), QByteArray(128, 'A'));
+    }
+
+    void xmodemReceiverNaksABadCrc()
+    {
+        QTemporaryDir destinationDir;
+        QVERIFY(destinationDir.isValid());
+        LoopbackRuntime runtime;
+        FileTransferService receiver;
+        receiver.setRuntime(&runtime);
+        receiver.startXModemReceive(0, destinationDir.filePath(QStringLiteral("out.bin")));
+        QTRY_VERIFY(runtime.sent.contains(QByteArray(1, char(0x43))));
+
+        QByteArray packet(133, '\0');
+        packet[0] = char(0x01);
+        packet[1] = char(0x01);
+        packet[2] = char(0xfe);
+        packet[3] = 'A';
+        receiver.rawDataReceived(0, Traffic::Source{}, packet);
+        QTRY_VERIFY(runtime.sent.contains(QByteArray(1, char(0x15))));
+        QVERIFY(!runtime.sent.contains(QByteArray(1, char(0x06))));
+        receiver.stop();
     }
 
     void rawTransferRunsSideCommandsAndPublishesCrc()

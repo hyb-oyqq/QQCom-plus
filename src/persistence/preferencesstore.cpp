@@ -60,6 +60,11 @@ QVariant PreferencesStore::value(const QString &key, const QVariant &fallback) c
     return m_settings->value(key, fallback);
 }
 
+bool PreferencesStore::contains(const QString &key) const
+{
+    return m_settings->contains(key);
+}
+
 void PreferencesStore::setValue(const QString &key, const QVariant &value)
 {
     // 显示偏好不带 sync：QSettings 在自身析构（即应用退出）时统一落盘，

@@ -33,8 +33,9 @@ public:
     // 端点连接状态：发送按钮只在"选中目标里有已连接的"时可用。
     void setEndpointOpen(int index, bool open);
     void setPayload(const QByteArray &bytes);
-    // 组合根注入的偏好存储：编码格式与行尾在会话间保持用户上次的选择。
+    // 组合根注入的偏好存储：编码格式、行尾和手动输入框在会话间保持用户上次的选择。
     void setPreferences(PreferencesStore *store);
+    ~SendPanel() override;
     void setRuntime(EndpointRuntime *runtime);
     void handleRawDataReceived(int index, const Traffic::Source &source, const QByteArray &payload);
     // 三个标签页里最高的那一页。高度不跟当前页走，切换时分栏不用重分配。
@@ -70,8 +71,10 @@ private:
     // 手动发送页的正文跟着文件页的 sizeHint 长高或缩短，三页一样高。
     void syncManualToFilePages();
     void issueSend(bool scheduled = false);
+    void updateEnterToSendHint();
     void loadPreferences();
     void savePreferences();
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -83,9 +86,11 @@ protected:
     QComboBox *m_format;
     QComboBox *m_suffix;
     QPlainTextEdit *m_editor;
+    QLabel *m_enterHint = nullptr;
     QLabel *m_preview;
     bool m_previewError = false;
     QPushButton *m_sendButton;
+    QCheckBox *m_enterToSend = nullptr;
     QCheckBox *m_repeat;
     QSpinBox *m_interval;
     QTimer *m_repeatTimer;

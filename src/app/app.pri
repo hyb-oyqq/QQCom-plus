@@ -7,6 +7,7 @@ SOURCES += \
     $$PWD/commandmanager.cpp \
     $$PWD/endpointruntime.cpp \
     $$PWD/filetransferservice.cpp \
+    $$PWD/payloadchecksum.cpp \
     $$PWD/receiveframer.cpp
 
 HEADERS += \
@@ -14,4 +15,5 @@ HEADERS += \
     $$PWD/commandmanager.h \
     $$PWD/endpointruntime.h \
     $$PWD/filetransferservice.h \
+    $$PWD/payloadchecksum.h \
     $$PWD/receiveframer.h

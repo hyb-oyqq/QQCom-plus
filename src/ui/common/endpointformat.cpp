@@ -77,9 +77,10 @@ QString portDraftDetails(const PortDraft &draft)
     const auto port = v.value("serial.port").toString();
     const auto parity = v.value("serial.parity", "None").toString();
     const auto flow = v.value("serial.flow", "None").toString();
-    return QObject::tr("串口：%1\n波特率：%2 bps\n数据位：%3\n校验：%4\n停止位：%5\n流控：%6")
+    return QObject::tr("串口：%1\n波特率：%2 bps\n数据位：%3\n校验：%4\n停止位：%5\n流控：%6\n自动恢复：%7")
         .arg(port.isEmpty() ? QObject::tr("未选择串口") : port,
              v.value("serial.baud", "115200").toString(), v.value("serial.bits", "8").toString(),
              parityNames.value(parity, parity), v.value("serial.stop", "1").toString(),
-             flow == "None" ? QObject::tr("无流控") : flow);
+             flow == "None" ? QObject::tr("无流控") : flow,
+             draft.autoRecover ? QObject::tr("开") : QObject::tr("关"));
 }

@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QSet>
 #include "domain/trafficmessage.h"
 #include "ui/panels/portselector/portselectorwidget.h"
 #include "transport/transporttypes.h"
@@ -17,6 +18,7 @@ class QSplitter;
 class QToolButton;
 class QThread;
 class EndpointRuntime;
+class PortDiscoveryService;
 class PreferencesStore;
 class RouteEditorWidget;
 class SendPanel;
@@ -80,6 +82,7 @@ private:
     void fitSendPane(int height);
     void saveEndpointDrafts();
     void toggleEndpoint(int index);
+    void recoverEndpoints();
     void handleEndpointState(int index, int state, const QString &detail);
     void handleEndpointPeers(int index, const QStringList &peers);
     void handleMessage(const Traffic::Message &message);
@@ -92,6 +95,8 @@ private:
     // 面板已被压成 0 宽、分栏也已重分配，那时再读几何拿到的是错误值。
     // 由 showEvent / resizeEvent / splitterMoved / 切换前一刻共同维护。
     void recordExpandedGeometry();
+    // 扩展区折叠后把它移出横向分栏。分栏里只剩左列时，左右拖动条不存在，也不占宽度。
+    void syncExtensionPanel(bool expanded);
     void updateRateLabels();
     void handleCommandSend(const CommandItem &command);
 
@@ -100,6 +105,7 @@ private:
     QList<PortDraft> m_ports;
     QList<PortSelectorWidget *> m_selectors;
     QTimer *m_autoRefresh;
+    QTimer *m_recoverTimer = nullptr;
     QSplitter *m_dataSplitter;
     QSplitter *m_horizontalSplitter = nullptr;  // 水平分割器：左侧数据区，右侧指令面板
     bool m_dataRatioApplied = false;
@@ -141,6 +147,18 @@ private:
     QThread *m_ioThread = nullptr;
     EndpointRuntime *m_runtime = nullptr;
     Transport::State m_endpointStates[2] = {Transport::State::Closed, Transport::State::Closed};
+    // 异常断开后置位，用户取消等待或重新打开后清掉。只在这一位为真时才按秒重试。
+    bool m_recoverArmed[2] = {};
+    // 用户取消了本次等待。在途的重试失败不能再把等待重新打开，直到用户再次点打开。
+    bool m_recoverCancelled[2] = {};
+    // 用户点停止后，随后到达的 Closed 不能再当成异常断开。
+    bool m_userStop[2] = {};
+    // 串口断线时的扫描代次。必须看到更新的一次扫描，才认为“设备重新出现”是新事实。
+    quint64 m_serialRecoverAfterScan[2] = {};
+    quint64 m_serialScanGeneration = 0;
+    // 最近一次串口扫描快照。重试前用它确认同名设备已经重新出现。
+    QSet<QString> m_presentSerialPorts;
+    PortDiscoveryService *m_discovery = nullptr;
     QStringList m_endpointPeers[2];
     qint64 m_rxBytes = 0;
     qint64 m_txBytes = 0;

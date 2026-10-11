@@ -217,12 +217,11 @@ int main(int argc, char **argv)
         const char *const VariantNames[4] = {"setCharFormat + insertText（现状）",
             "整段包一层 editBlock", "insertText(text, format) 重载", "editBlock + 重载"};
         TrafficTextView::DisplayOptions opt;
-        opt.number = true;
-        opt.timestamp = true;
-        opt.direction = true;
-        opt.length = true;
-        opt.hex = false;
-        opt.pure = false;
+        opt.prefix = true;
+        opt.prefixLineNumber = true;
+        opt.prefixTimestamp = true;
+        opt.prefixLength = true;
+        opt.alwaysShowHex = false;
 
         std::printf("\n========================================================\n");
         std::printf("视图投影基准  载荷 %d B/条（遮成可打印 ASCII，一条一行）\n", payloadBytes);

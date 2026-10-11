@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `src/domain` | 端口草稿、接收组帧配置、消息、指令与分组值对象 | 不依赖控件或通信实例 |
 | `src/transport` | Serial / TCP Client / TCP Server / UDP 的打开、关闭、读写和 peer 状态 | QObject + Qt 异步 I/O，不持有 QWidget |
-| `src/app` | EndpointRuntime、ReceiveFramer、CommandManager、CommandFormats | 运行时协调、纯字节组帧、分组管理与格式适配 |
+| `src/app` | EndpointRuntime、ReceiveFramer、CommandManager、CommandFormats、PayloadChecksum、FileTransferService | 运行时协调、纯字节组帧、分组管理、格式适配、文件载荷校验与传输协议 |
 | `src/discovery` | 在线程池枚举串口，合并重叠请求，发布变化快照 | 不操作界面；网卡枚举目前仍由端口控件完成 |
 | `src/persistence` | QSettings 偏好、地址历史及旧产品配置迁移 | 显示偏好延迟落盘，地址历史显式同步 |
 | `src/ui/common` | 编码、格式化、图标、尺寸与公共对话框 | 不重复实现业务文件格式 |
@@ -54,6 +54,8 @@ flowchart LR
 ## 指令与持久化
 
 `CommandManager` 管分组、当前组、撤销状态与配置读写，按单工作区使用。`CommandFormats` 是 QQCom JSON / JCom / BLE 文件格式的唯一适配入口；导入生成新身份，导出由 QSaveFile 原子提交。配置中的字段与枚举保持兼容，产品改名不改变文件格式。
+
+`PayloadChecksum` 是文件载荷 CRC16-XMODEM 与 CRC32-IEEE 的唯一实现。协议层和发送区预览都调用它，包内校验和整文件累计使用同一套结果。
 
 `PreferencesStore` 默认采用 QStandardPaths 的应用配置目录；显式传入文件路径时不自动迁移。QQCom 默认配置不存在时才复制旧配置，目标存在时优先保留新配置，迁移失败通过 `saveFailed` 上报。测试使用临时路径和独立应用身份。
 

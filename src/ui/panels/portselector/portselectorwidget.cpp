@@ -153,7 +153,7 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
 
     // 每行的参数落进四列：前导标签列（左对齐、定宽）→ 主字段（拉伸）→ 尾部标签列
     // （右对齐、定宽）→ 尾部字段（定宽）。两列标签与尾部字段都按全局最宽者定宽，
-    // A/B 两行、四种端点类型的"波特率 / 监听端口 / 端口"因此落在同一条竖线上。
+    // A/B 两行、四种端点类型的"波特率 / 监听端口 / 远端端口"因此落在同一条竖线上。
     enum Column { Lead, Trail, Plain };
     QList<QLabel *> leadLabels;
     QList<QLabel *> trailLabels;
@@ -210,7 +210,7 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     host->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     host->setMinimumWidth(200);
     addInlineLabel(client, tr("远端地址"), host, Lead);
-    addInlineLabel(client, tr("端口"), addNumber("client.port", 1, 65535), Trail);
+    addInlineLabel(client, tr("远端端口"), addNumber("client.port", 1, 65535), Trail);
 
     auto *server = makePage(m_pages);
     auto *bind = addBindAddress("server.address");
@@ -270,7 +270,16 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     m_advancedIconIdle = tintedIcon(QStringLiteral(":/icons/tune.svg"), QColor("#647590"));
     m_advancedIconActive = tintedIcon(QStringLiteral(":/icons/tune.svg"), QColor("#3465d5"));
     updateAdvancedToggle();
+
+    // 自动恢复是连接行为，常驻主行，不跟组帧参数藏在高级区。
+    m_autoRecover = new QCheckBox(tr("自动恢复"));
+    m_autoRecover->setObjectName(QStringLiteral("autoRecover"));
+    m_autoRecover->setToolTip(tr("异常断开或打开失败后每 %1 秒重试。串口被占用时等它空出来再打开；点「等待中」可取消。TCP 服务器不提供此项。")
+        .arg(PortDraft::AutoRecoverRetryMs / 1000));
+    m_autoRecover->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    row->addWidget(m_autoRecover);
     row->addWidget(m_advanced);
+    connect(m_autoRecover, &QCheckBox::toggled, this, &PortSelectorWidget::notifyChange);
 
     // The button is the state: its text and colour cover closed/open, so no status label.
     m_action = new QPushButton;
@@ -364,6 +373,7 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     connect(m_type, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         if (m_loading) return;
         m_draft.kind = m_type->currentData().toInt();
+        syncAutoRecover();
         updateActionLabels();
         notifyChange();
     });
@@ -378,29 +388,56 @@ void PortSelectorWidget::setEndpointLabel(const QString &label)
     m_badge->setToolTip(tr("端点 %1").arg(label));
 }
 
-void PortSelectorWidget::setConnectionOpen(bool open, bool connecting)
+void PortSelectorWidget::syncAutoRecover()
 {
-    connecting = connecting && !open;
-    if (m_open == open && m_connecting == connecting) return;
-    m_open = open;
-    m_connecting = connecting;
-    // 打开期间锁定类型与参数：连接中的端点不接受"边连边改"，
-    // 想换配置先关闭——状态机因此只需要处理干净的状态边界。
-    const bool busy = open || connecting;
+    // TCP 服务器没有可重拨的连接。勾选藏起来，草稿里也不再带这个标志，
+    // 避免上次在别的类型上勾过之后切过来仍按 1 秒重试监听。
+    const bool offered = m_type->currentData().toInt() != PortDraft::TcpServer;
+    m_autoRecover->setVisible(offered);
+    if (!offered && m_autoRecover->isChecked()) {
+        const QSignalBlocker blocker(m_autoRecover);
+        m_autoRecover->setChecked(false);
+    }
+}
+
+void PortSelectorWidget::applyBusyState()
+{
+    // 打开、拨号、等待恢复期间都不改配置。想换参数先点停止。
+    const bool busy = m_open || m_connecting || m_recovering;
     m_type->setEnabled(!busy);
+    if (m_autoRecover) m_autoRecover->setEnabled(!busy);
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it)
         it.value()->setEnabled(!busy);
     updateActionLabels();
     updateValidation();
 }
 
+void PortSelectorWidget::setRecovering(bool recovering)
+{
+    if (m_recovering == recovering) return;
+    m_recovering = recovering;
+    applyBusyState();
+}
+
+void PortSelectorWidget::setConnectionOpen(bool open, bool connecting)
+{
+    connecting = connecting && !open;
+    if (open) m_recovering = false; // 连上才结束等待；拨号中仍保持「等待中」
+    if (m_open == open && m_connecting == connecting && !open) return;
+    m_open = open;
+    m_connecting = connecting;
+    applyBusyState();
+}
+
 void PortSelectorWidget::updateActionLabels()
 {
     const int kind = m_type->currentData().toInt();
-    m_action->setText(portActionName(kind, m_open, m_connecting));
+    m_action->setText(m_recovering ? tr("等待中") : portActionName(kind, m_open, m_connecting));
     m_action->setIcon(actionStateIcon(portActionIconName(kind, m_open), ActionIconSize));
     // Blue invites the connect action; red marks the one that tears it down.
+    // 等待恢复还没连上，用琥珀，不跟已打开的红停混在一起。
     m_action->setProperty("open", m_open);
+    m_action->setProperty("recovering", m_recovering);
     m_action->style()->unpolish(m_action);
     m_action->style()->polish(m_action);
     const auto current = draft();
@@ -850,6 +887,10 @@ void PortSelectorWidget::setDraft(const PortDraft &draft)
     m_framingKeepBoundary->setChecked(draft.framing.mode == ReceiveFraming::Delimiter
         ? draft.framing.includeDelimiter : draft.framing.includeLengthPrefix);
     m_framingLogHints->setChecked(draft.framing.logHints);
+    {
+        const QSignalBlocker recoverBlocker(m_autoRecover);
+        m_autoRecover->setChecked(draft.kind != PortDraft::TcpServer && draft.autoRecover);
+    }
     syncFramingControls();
     // 通过 itemData 定位类型，草稿里的 kind 与下拉框顺序解耦；越界值回落串口。
     const int typeIndex = m_type->findData(draft.kind);
@@ -891,6 +932,7 @@ void PortSelectorWidget::setDraft(const PortDraft &draft)
     // 先校验再解除载入态：载入期间的校验不算用户编辑，不能触发"校验错误自动展开
     // 高级面板"——否则启动恢复草稿时，上次会话遗留的无效组帧配置会把高级面板顶开。
     updateValidation();
+    syncAutoRecover();
     m_loading = false;
 }
 
@@ -898,6 +940,7 @@ PortDraft PortSelectorWidget::draft() const
 {
     auto result = m_draft;
     result.kind = m_type->currentData().toInt();
+    result.autoRecover = result.kind != PortDraft::TcpServer && m_autoRecover->isChecked();
     applyFramingToDraft(result);
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it) {
         if (it.key() == "serial.port")
@@ -995,9 +1038,11 @@ void PortSelectorWidget::updateValidation()
     apply(m_framingDelimiter, QString());
     m_validationError = messages.join('\n');
     // 动作按钮：配置有效才可打开；已打开或正在连接时保持可点（用于关闭/取消）。
-    m_action->setEnabled(m_open || m_connecting || m_validationError.isEmpty());
-    m_action->setToolTip(m_open || m_connecting || m_validationError.isEmpty()
-                             ? QString() : m_validationError);
+    m_action->setEnabled(m_open || m_connecting || m_recovering || m_validationError.isEmpty());
+    m_action->setToolTip(m_recovering
+                             ? tr("正在等待串口空闲后自动打开，点击取消")
+                             : (m_open || m_connecting || m_validationError.isEmpty()
+                                    ? QString() : m_validationError));
     // No inline marker: invalid fields carry a red border, the reason sits on each field.
     // An invalid field hidden behind the collapsed row would leave the message unreachable.
     // 自动展开只响应"新出现"的错误：程序化载入（setDraft / 串口扫描）会让上次会话

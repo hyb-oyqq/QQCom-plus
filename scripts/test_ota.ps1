@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
+$notesName = -join ([char]0x56FA, [char]0x4EF6, [char]0x66F4, [char]0x65B0, [char]0x8BB0, [char]0x5F55) + '.md'
 $packageScript = Join-Path $PSScriptRoot 'package_release.ps1'
 $validateScript = Join-Path $PSScriptRoot 'validate_ota_manifest.ps1'
 $updaterScript = Join-Path $PSScriptRoot 'qqcom-updater.ps1'
@@ -63,12 +64,28 @@ try {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($package)
     try {
         $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+        $notesEntry = $zip.Entries | Where-Object { $_.FullName.Replace('\', '/') -eq $notesName } | Select-Object -First 1
+        if ($notesEntry) {
+            $notesReader = New-Object System.IO.StreamReader($notesEntry.Open(), [System.Text.UTF8Encoding]::new($false))
+            try { $notesText = $notesReader.ReadToEnd() } finally { $notesReader.Dispose() }
+        } else {
+            $notesText = ''
+        }
     } finally {
         $zip.Dispose()
     }
     Assert-True ($entries -contains 'QQCom.exe') '压缩包根目录有 QQCom.exe'
     Assert-True ($entries -contains 'qqcom-updater.ps1') '压缩包带有更新器'
+    Assert-True ($entries -contains $notesName) '压缩包根目录有版本说明'
     Assert-True (($entries -contains 'plugins/platforms/old.txt') -or ($entries -contains 'plugins\platforms\old.txt')) '压缩包保留 plugins 目录'
+    $normalizedNotes = $notesText.Replace("`r`n", "`n")
+    $fallback = [System.Text.Encoding]::UTF8.GetString([byte[]](0xE6,0x9C,0xAC,0xE6,0xAC,0xA1,0xE5,0x8F,0x91,0xE5,0xB8,0x83))
+    Assert-True ($normalizedNotes.StartsWith("# V0.2.0`n`n$fallback")) '缺少变更记录时仍写出当前版本说明'
+    Assert-True ($notesText.Contains("# V0.1.0 2026-10-07")) '版本说明包含变更记录中的历史版本'
+    Assert-True ($notesText.Contains('1.完成 QQCom 工程改名和模块化目录整理。')) '多条变更按序号写出'
+    $historyIndex = $notesText.IndexOf("# V0.1.0 2026-10-07")
+    Assert-True ($historyIndex -gt $notesText.IndexOf("# V0.2.0")) '版本说明按新版本在前排列'
+    Assert-True (Test-Path -LiteralPath (Join-Path $outputDir $notesName)) '发布目录也写出版本说明'
 
     $validOk = $true
     try { & $validateScript -ManifestPath $manifest -PackagePath $package } catch { $validOk = $false }
@@ -210,6 +227,7 @@ try {
     Assert-True ((Get-Content -LiteralPath (Join-Path $install 'notes.txt') -Raw) -eq 'LOCAL') '安装目录里的本地文件被保留'
     Assert-True ((Get-Content -LiteralPath (Join-Path $userData 'preferences.ini') -Raw) -eq 'preferences=1') '用户配置目录保持不变'
     Assert-True (Test-Path -LiteralPath (Join-Path $install 'qqcom-updater.ps1')) '新的更新器脚本已写入安装目录'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $install $notesName) -Raw -Encoding UTF8).Contains('# V0.2.0')) '版本说明随更新写入安装目录'
 } finally {
     if ($failures.Count -eq 0) {
         # 更新器会立刻启动新的 QQCom.exe，文件句柄可能晚几百毫秒才放开。

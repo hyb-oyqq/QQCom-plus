@@ -21,7 +21,7 @@
 
 ## 实际顺序
 
-1. 用 Qt 6.10.1 MSVC 2022 x64 构建 `build/release/release/QQCom.exe`。版本源仍是 `version/version.json` 的 `0.1.0`，没有为这次发布递增版本。
+1. 用 Qt 6.10.1 MSVC 2022 x64 构建 `build/release/release/QQCom.exe`。版本仍是 `version/version.h` 的 `0.1.0`，没有为这次发布递增版本。
 2. 用 `scripts/package_release.ps1` 生成 `build/ota/QQCom-0.1.0-win64.zip` 和 `build/ota/manifest.json`。下载地址写成上面的 Gitee Release 地址。
 3. 用 `scripts/validate_ota_manifest.ps1` 核对清单里的大小和 SHA-256。
 4. 在 Gitee 网页创建发行版，不勾选「这是一个预览版本」。版本号 `v0.1.0`，目标分支 `master`，标题 `v0.1.0`，附件是上面的 zip。网页创建说明见 https://help.gitee.com/repository/release/create/。
@@ -33,7 +33,7 @@
 
 ## 下次发布
 
-1. 先提交要发布的代码。执行 `scripts/update_version.ps1 -Mode patch`，更新 `CHANGELOG.md`，再提交并推送。
+1. 先提交要发布的代码。版本号直接改 `version/version.h` 里的三个数字，构建只刷新时间戳。按 `更新记录.md` 文首格式写本版记录，再提交并推送。
 2. 运行 `build.bat`，确认 `QQCom.exe` 标题里的版本是新版本。
 3. 打包并校验。把下面命令里的版本号换成新版本：
 

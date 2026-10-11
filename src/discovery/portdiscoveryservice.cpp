@@ -10,11 +10,13 @@ PortDiscoveryService::PortDiscoveryService(QObject *parent) : QObject(parent)
     connect(&m_watcher, &QFutureWatcher<QList<SerialPortDescriptor>>::finished, this, [this] {
         const auto ports = m_watcher.result();
         m_refreshing = false;
+        ++m_generation;
         // 自动刷新时列表通常不变；只在快照真正变化时发布，避免重建下拉框打断浏览。
         if (ports != m_published) {
             m_published = ports;
             emit portsChanged(ports);
         }
+        emit scanFinished(m_generation, ports);
         emit refreshingChanged(false);
     });
 }

@@ -1,17 +1,19 @@
 #include "domain/trafficmessage.h"
 
 #include <QObject>
+#include <QString>
 
 namespace Traffic {
 
 QString directionName(Direction direction)
 {
+    // 前缀和文件日志共用这些标记，保持 ASCII，不跟界面语言走。
     switch (direction) {
-    case Direction::Receive: return QObject::tr("RX");
-    case Direction::Transmit: return QObject::tr("TX");
-    case Direction::State: return QObject::tr("状态");
-    case Direction::Warning: return QObject::tr("警告");
-    case Direction::Error: return QObject::tr("错误");
+    case Direction::Receive: return QStringLiteral("RX");
+    case Direction::Transmit: return QStringLiteral("TX");
+    case Direction::State: return QStringLiteral("STATE");
+    case Direction::Warning: return QStringLiteral("WARN");
+    case Direction::Error: return QStringLiteral("ERR");
     }
     return {};
 }
@@ -19,11 +21,11 @@ QString directionName(Direction direction)
 QString originName(Origin origin)
 {
     switch (origin) {
-    case Origin::Automatic: return QObject::tr("接收");
-    case Origin::Manual: return QObject::tr("手动");
-    case Origin::Scheduled: return QObject::tr("定时");
-    case Origin::Forward: return QObject::tr("转发");
-    case Origin::Sample: return QObject::tr("示例");
+    case Origin::Automatic: return QStringLiteral("AUTO");
+    case Origin::Manual: return QStringLiteral("MAN");
+    case Origin::Scheduled: return QStringLiteral("TIMER");
+    case Origin::Forward: return QStringLiteral("FWD");
+    case Origin::Sample: return QStringLiteral("SAMPLE");
     }
     return {};
 }

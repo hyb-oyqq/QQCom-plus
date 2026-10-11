@@ -179,6 +179,9 @@ void CommandTableWidget::setupUi()
     m_removeButton = new QPushButton(tr("删除勾选"), this);
     m_removeButton->setObjectName("removeChecked");
     m_removeButton->setToolTip(tr("删除所有已勾选的指令，删除前会先确认"));
+    m_loopSend = new QCheckBox(tr("循环发送"), this);
+    m_loopSend->setObjectName(QStringLiteral("loopBatchSend"));
+    m_loopSend->setToolTip(tr("勾选后「按序发送勾选项」发完最后一条回到第一条，再点一次按钮停止"));
     m_batchSendButton = new QPushButton(tr("按序发送勾选项"), this);
     // objectName 保持 primaryButton：QSS 按它画主操作按钮的强调底，改名字会静默丢样式。
     // （测试要定位它时也用这个名字，别再另起一个。）
@@ -188,20 +191,25 @@ void CommandTableWidget::setupUi()
     connect(m_addButton, &QPushButton::clicked, this, &CommandTableWidget::addCommand);
     connect(m_removeButton, &QPushButton::clicked, this, &CommandTableWidget::removeCommand);
     connect(m_batchSendButton, &QPushButton::clicked, this, [this] {
+        // 循环进行中按钮文案是「停止循环」。再点一次只停，不重新开一轮。
+        if (m_batchSendButton->property("looping").toBool()) {
+            emit batchSendStopRequested();
+            return;
+        }
         // 勾选行号与指令一起交给面板：面板负责时序，表格负责"点亮哪一行"，
         // 而行号只有这里知道（见 batchSendRequested 的说明）。
         const QList<int> rows = checkedRows();
         QList<CommandItem> commands;
         commands.reserve(rows.size());
         for (int row : rows) commands.append(commandFromRow(row));
-        if (!commands.isEmpty()) {
-            emit batchSendRequested(rows, commands);
-        }
+        if (!commands.isEmpty())
+            emit batchSendRequested(rows, commands, m_loopSend && m_loopSend->isChecked());
     });
 
     buttonLayout->addWidget(m_addButton);
     buttonLayout->addWidget(m_removeButton);
     buttonLayout->addStretch();
+    buttonLayout->addWidget(m_loopSend);
     buttonLayout->addWidget(m_batchSendButton);
 
     layout->addLayout(buttonLayout);

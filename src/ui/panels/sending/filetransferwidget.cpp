@@ -227,6 +227,7 @@ void FileTransferWidget::buildPage(Page *page)
     page->mode = new QComboBox;
     page->mode->setObjectName(scopedName(prefix, QStringLiteral("Mode")));
     page->mode->addItem(QStringLiteral("RAW"), QStringLiteral("raw"));
+    page->mode->addItem(QStringLiteral("XMODEM"), QStringLiteral("xmodem"));
     page->mode->addItem(QStringLiteral("YMODEM"), QStringLiteral("ymodem"));
     pinFixed(page->mode);
 
@@ -241,7 +242,7 @@ void FileTransferWidget::buildPage(Page *page)
         page->block128 = new QPushButton(QStringLiteral("128"));
         page->block128->setObjectName(QStringLiteral("fileTransferBlock128"));
         page->block128->setCheckable(true);
-        page->block128->setToolTip(tr("YMODEM 数据块 128 字节"));
+        page->block128->setToolTip(tr("XMODEM 固定 128 字节。YMODEM 可选 128 或 1024"));
         pinFixed(page->block128);
         page->block1024 = new QPushButton(QStringLiteral("1024"));
         page->block1024->setObjectName(QStringLiteral("fileTransferBlock1024"));
@@ -273,7 +274,9 @@ void FileTransferWidget::buildPage(Page *page)
         page->chunkGap->setButtonSymbols(QAbstractSpinBox::NoButtons);
         page->chunkGap->setToolTip(tr("发完一包后，再隔这么久发下一包。0 表示马上发下一包"));
         pinFixed(page->chunkGap);
-        topRow->addWidget(new QLabel(tr("分包")));
+        page->blockLabel = new QLabel(tr("分包"));
+        page->blockLabel->setObjectName(QStringLiteral("fileTransferBlockLabel"));
+        topRow->addWidget(page->blockLabel);
         topRow->addWidget(page->block128);
         topRow->addWidget(page->block1024);
         topRow->addWidget(page->chunk);
@@ -560,6 +563,11 @@ bool FileTransferWidget::ymodemSelected(const Page *page) const
     return page->mode->currentData().toString() == QLatin1String("ymodem");
 }
 
+bool FileTransferWidget::xmodemSelected(const Page *page) const
+{
+    return page->mode->currentData().toString() == QLatin1String("xmodem");
+}
+
 int FileTransferWidget::endpoint(const Page *page) const
 {
     return page->endpointB->isChecked() ? 1 : 0;
@@ -739,12 +747,16 @@ void FileTransferWidget::startTransfer(Page *page)
     sides.afterDelayMs = page->afterDelay->value();
     const QString path = page->path->text().trimmed();
     if (page->sending) {
-        if (ymodemSelected(page))
+        if (xmodemSelected(page))
+            m_service->startXModemSend(target, path, sides);
+        else if (ymodemSelected(page))
             m_service->startYModemSend(target, path, page->block128->isChecked() ? 128 : 1024, sides);
         else
             m_service->startRawSend(target, path, sides,
                 page->chunk ? page->chunk->value() : 16 * 1024,
                 page->chunkGap ? page->chunkGap->value() : 0);
+    } else if (xmodemSelected(page)) {
+        m_service->startXModemReceive(target, path, sides);
     } else if (ymodemSelected(page)) {
         m_service->startYModemReceive(target, path, sides);
     } else {
@@ -767,25 +779,30 @@ void FileTransferWidget::updatePage(Page *page)
     const bool ready = m_openFlags[endpoint(page)];
     const bool hasPath = !page->path->text().trimmed().isEmpty();
     const bool ymodem = ymodemSelected(page);
+    const bool xmodem = xmodemSelected(page);
+    const bool framed = xmodem || ymodem;
     page->mode->setEnabled(!busy);
     page->endpointA->setEnabled(!busy);
     page->endpointB->setEnabled(!busy);
     if (page->block128) {
+        // XMODEM 固定 128，标签和按钮一起藏，避免只剩「分包」几个字。
+        if (page->blockLabel)
+            page->blockLabel->setVisible(ymodem);
         page->block128->setVisible(ymodem);
         page->block1024->setVisible(ymodem);
         page->block128->setEnabled(!busy && ymodem);
         page->block1024->setEnabled(!busy && ymodem);
     }
     if (page->chunk) {
-        page->chunk->setVisible(!ymodem);
-        page->chunk->setEnabled(!busy && !ymodem);
+        page->chunk->setVisible(!framed);
+        page->chunk->setEnabled(!busy && !framed);
     }
     if (page->chunkGap) {
-        page->chunkGap->setVisible(!ymodem);
-        page->chunkGap->setEnabled(!busy && !ymodem);
+        page->chunkGap->setVisible(!framed);
+        page->chunkGap->setEnabled(!busy && !framed);
     }
     if (page->chunkGapLabel)
-        page->chunkGapLabel->setVisible(!ymodem);
+        page->chunkGapLabel->setVisible(!framed);
     page->path->setEnabled(!busy);
     page->browse->setEnabled(!busy);
     page->beforeFormat->setEnabled(!busy);
@@ -813,6 +830,9 @@ void FileTransferWidget::updatePage(Page *page)
     } else if (ymodem) {
         page->path->setPlaceholderText(tr("选择 YMODEM 保存目录"));
         page->browse->setText(tr("选择目录"));
+    } else if (xmodem) {
+        page->path->setPlaceholderText(tr("选择 XMODEM 保存文件"));
+        page->browse->setText(tr("保存为"));
     } else {
         page->path->setPlaceholderText(tr("选择 RAW 保存文件"));
         page->browse->setText(tr("保存为"));
@@ -827,7 +847,11 @@ void FileTransferWidget::updatePage(Page *page)
         page->startButton->setToolTip(page->sending
                 ? tr("先发前置指令，再把文件发到所选端点，最后发后置指令")
                 : tr("先发前置指令，再把端点上的数据保存到本机，最后发后置指令"));
-    if (!ymodem) {
+    if (xmodem) {
+        page->mode->setToolTip(page->sending
+                ? tr("XMODEM：128 字节块，单次 EOT，不传文件名。对端发 C 用 CRC16（133 字节），发 NAK 用 1 字节校验和（132 字节）")
+                : tr("XMODEM 写入所选文件。先发 C 要 CRC，超时再发 NAK。对端直接发来 132 字节帧时按校验和接收。单次 EOT 结束。长度按 128 字节对齐，末尾可能含 0x1A"));
+    } else if (!ymodem) {
         page->mode->setToolTip(page->sending
                 ? tr("RAW 按原始字节发送。分包是每次连续写出的字节数，间隔是发完一包后再发下一包的等待")
                 : tr("RAW 把收到的字节写入文件。点停止后才保存；前后指令等待期间的字节不写入"));
@@ -1048,7 +1072,7 @@ void FileTransferWidget::updateStats(qint64 transferred, qint64 total, int retri
     m_showingLive = true;
     m_liveText = parts.join(QStringLiteral(" · "));
     m_liveTip = tr("速率和用时从文件内容第一次发出或写入开始算，不含前置等待。"
-                   "CRC16（XMODEM）和 CRC32（IEEE）只累计文件载荷，不含 YMODEM 帧头和前后指令。"
+                   "CRC16（XMODEM）和 CRC32（IEEE）只累计文件载荷，不含协议帧头和前后指令。"
                    "重试与 CRC 错误只在出现时显示");
     refreshFooter(&m_send);
     refreshFooter(&m_receive);
