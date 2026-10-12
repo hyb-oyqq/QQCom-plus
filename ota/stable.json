@@ -3,13 +3,13 @@
     "product":  "QQCom",
     "channel":  "stable",
     "version":  "1.0.1",
-    "releaseDate":  "2026-10-12T07:50:00.7269109Z",
+    "releaseDate":  "2026-10-12T12:36:57.4016340Z",
     "mandatory":  false,
     "download":  {
                      "type":  "zip",
                      "url":  "https://gitee.com/qinjmin/qqcom/releases/download/v1.0.1/QQCom-1.0.1-win64.zip",
-                     "size":  33630041,
-                     "sha256":  "44890dfbb47e1d5d131614730bc6c1066b3b023098572e6c09c791a09f209b6c"
+                     "size":  33656270,
+                     "sha256":  "5a54d212dac2b9d75f94ebe23dc254e42a8ca02b5f1e6e309c39517d4734feda"
                  },
     "notesUrl":  "https://gitee.com/qinjmin/qqcom/releases/tag/v1.0.1"
 }
