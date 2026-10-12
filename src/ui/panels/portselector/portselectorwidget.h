@@ -36,6 +36,9 @@ public:
     void setConnectionOpen(bool open, bool connecting = false);
     // 打开失败或异常断开后正在等待重新打开。按钮文案是「等待中」，点下去取消本次等待。
     void setRecovering(bool recovering);
+    // 点了监听/连接/绑定却没打开。原因写在这一行下面，直到打开成功或用户改了参数。
+    // 纯数据不把错误画进数据区，按钮文字也不会变，所以这条必须自己可见。
+    void setOpenFailure(const QString &text);
     void setSerialPorts(const QList<SerialPortDescriptor> &ports);
     void setAddressHistory(const QStringList &remote, const QStringList &local);
     void commitAddressHistory();
@@ -92,6 +95,7 @@ private:
     QIcon m_advancedIconIdle;
     QIcon m_advancedIconActive;
     QPushButton *m_action;
+    QLabel *m_openFailure = nullptr; // 打开失败原因，平时隐藏
     bool m_open = false;
     bool m_connecting = false;
     bool m_recovering = false;

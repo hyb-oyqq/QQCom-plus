@@ -6,14 +6,16 @@
 
 // Closed: the action to take. Opening: a client is still dialling. Open: the action that stops it.
 // The button states itself, so the connecting wait lives on the same label.
+// Two ASCII spaces sit between the two glyphs so the short labels match the send button.
+// 「正在连接」is already four characters; do not pad it.
 QString portActionName(int kind, bool open, bool connecting)
 {
     if (connecting && !open && kind == PortDraft::TcpClient)
         return QObject::tr("正在连接");
     switch (kind) {
-    case PortDraft::TcpServer: return open ? QObject::tr("停止") : QObject::tr("监听");
-    case PortDraft::Udp: return open ? QObject::tr("解绑") : QObject::tr("绑定");
-    default: return open ? QObject::tr("断开") : QObject::tr("连接");
+    case PortDraft::TcpServer: return open ? QObject::tr("停  止") : QObject::tr("监  听");
+    case PortDraft::Udp: return open ? QObject::tr("解  绑") : QObject::tr("绑  定");
+    default: return open ? QObject::tr("断  开") : QObject::tr("连  接");
     }
 }
 

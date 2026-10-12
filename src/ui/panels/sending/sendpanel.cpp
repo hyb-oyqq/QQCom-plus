@@ -157,9 +157,17 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     // 底色由 QSS 画在标签上。标签默认不填背景，不打开这个属性色块出不来。
     m_preview->setAttribute(Qt::WA_StyledBackground, true);
 
-    m_enterToSend = new QCheckBox(tr("回车发送"));
+    // 回车发送、回车清空用可切换按钮，按下为黄，和 A/B 同一套。完整说法在悬停里。
+    m_enterToSend = new QPushButton(tr("回车发送"));
     m_enterToSend->setObjectName(QStringLiteral("enterToSend"));
-    m_enterToSend->setToolTip(tr("勾选后，在输入框按回车即发送。需要换行时按 Alt+回车"));
+    m_enterToSend->setCheckable(true);
+    m_enterToSend->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_enterToSend->setToolTip(tr("按下后，在输入框按回车即发送。需要换行时按 Alt+回车"));
+    m_clearOnEnter = new QPushButton(tr("回车清空"));
+    m_clearOnEnter->setObjectName(QStringLiteral("clearOnEnter"));
+    m_clearOnEnter->setCheckable(true);
+    m_clearOnEnter->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_clearOnEnter->setAttribute(Qt::WA_AlwaysShowToolTips);
     m_enterHint = new QLabel(tr("回车发送，Alt+回车换行"));
     m_enterHint->setObjectName(QStringLiteral("enterToSendHint"));
     m_enterHint->setAttribute(Qt::WA_StyledBackground, true);
@@ -167,9 +175,9 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     m_enterHint->setVisible(false);
     // 过滤器会读勾选框。装在它创建之后，样式抛光才不会碰到未初始化的成员。
     m_editor->installEventFilter(this);
-    m_repeat = new QCheckBox(tr("定时发送"));
+    m_repeat = new QCheckBox(tr("定时"));
     m_repeat->setObjectName("repeatSending");
-    m_repeat->setToolTip(tr("按固定周期重复发送主输入框的内容；取消勾选即停止"));
+    m_repeat->setToolTip(tr("定时发送：按固定周期重复发送主输入框的内容；取消勾选即停止"));
     m_interval = new QSpinBox;
     m_interval->setObjectName("repeatInterval"); // 用例要能定位它（"始终可输入、只收数字"）
     m_interval->setButtonSymbols(QAbstractSpinBox::NoButtons);
@@ -180,7 +188,8 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     m_interval->setToolTip(tr("发送间隔，单位毫秒"));
     // **始终可输入**（用户钦定）：勾选前就能把间隔设好，勾上即按该值跑。
     // 它是 QSpinBox——非数字键（含粘贴的非法文本）会被它自带的校验器挡掉，不必另做处理。
-    m_sendButton = new QPushButton(tr("发送"));
+    // 字间两个空格，和端口动作按钮同一疏密。指令表里的「发送」是另一颗按钮，不加。
+    m_sendButton = new QPushButton(tr("发  送"));
     m_sendButton->setObjectName("PrimaryButton");
     m_sendButton->setIcon(actionStateIcon(QStringLiteral(":/icons/send.svg"), GlyphSize));
     m_sendButton->setIconSize(QSize(GlyphSize, GlyphSize));
@@ -195,7 +204,7 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     auto *manualPage = new QWidget;
     manualPage->setObjectName(QStringLiteral("manualSendPage"));
 
-    // 右栏三行：怎么发（编码/末尾）→ 发几拍（定时/间隔）→ 发给谁（目标 + 发送）。
+    // 右栏三行：怎么编码 → 定时、回车发送、回车清空 → 发给谁。
     // 两段等比例弹簧把正文高度减去三行之后的空白平分，所以行距相等。
     // 第一行贴着正文上沿；最后一行落在预览那一行里，和字节数同一高度。
     auto *encodeRow = new QHBoxLayout;
@@ -210,12 +219,12 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     auto *repeatRow = new QHBoxLayout;
     repeatRow->setContentsMargins(0, 0, 0, 0);
     repeatRow->setSpacing(4);
-    // 间隔框与「末尾」下拉框同宽并共用右缘，勾选框紧贴在它左边。
-    // 回车发送贴在定时左边。勾上之后正文下方写出换行键。
-    repeatRow->addWidget(m_enterToSend, 0, Qt::AlignVCenter);
-    repeatRow->addStretch(1);
+    // 定时、间隔、回车发送、回车清空同一行。间隔紧跟定时。
     repeatRow->addWidget(m_repeat, 0, Qt::AlignVCenter);
     repeatRow->addWidget(m_interval, 0, Qt::AlignVCenter);
+    repeatRow->addWidget(m_enterToSend, 0, Qt::AlignVCenter);
+    repeatRow->addWidget(m_clearOnEnter, 0, Qt::AlignVCenter);
+    repeatRow->addStretch(1);
 
     auto *actionRow = new QHBoxLayout;
     actionRow->setContentsMargins(0, 0, 0, 0);
@@ -305,16 +314,18 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     });
     connect(m_repeatTimer, &QTimer::timeout, this, [this] { issueSend(true); });
     connect(m_interval, &QSpinBox::valueChanged, this, [this](int ms) {
+        fitIntervalWidth();
         if (m_repeatTimer->isActive()) m_repeatTimer->start(ms);
     });
     connect(m_sendButton, &QPushButton::clicked, this, [this] {
         issueSend(false);
         // 单次发送不打断进行中的定时任务：两者目标相同、语义一致。
     });
-    connect(m_enterToSend, &QCheckBox::toggled, this, [this](bool) {
+    connect(m_enterToSend, &QPushButton::toggled, this, [this](bool) {
         updateEnterToSendHint();
         savePreferences();
     });
+    connect(m_clearOnEnter, &QPushButton::toggled, this, &SendPanel::savePreferences);
     updateEnterToSendHint();
     connect(m_editor, &QPlainTextEdit::textChanged, this, &SendPanel::updatePreview);
     // 输入框内容与格式、行尾同一份偏好。加载期间 m_loading 会挡住这次回写。
@@ -362,19 +373,18 @@ void SendPanel::showEvent(QShowEvent *event)
 void SendPanel::unifyActionWidths()
 {
     const QList<QWidget *> controls{
-        m_format, m_suffix, m_interval, m_targetA, m_targetB, m_sendButton};
+        m_format, m_suffix, m_interval, m_targetA, m_targetB, m_sendButton,
+        m_enterToSend, m_clearOnEnter};
 
     // 下拉框按全部条目取宽，字体 / DPI / 翻译变化时跟着走。
     // 这些 sizeHint 按内容计算，不受下面写死的宽高影响，所以不必先清掉固定尺寸
     // （清掉会在 resizeEvent 里来回触发布局）。
-    // 格式和末尾取同一个宽度，间隔框也用这个宽度，右缘才能落在同一条线上。
+    // 格式和末尾同宽。间隔框按当前文字另算宽度，不必再把下拉框撑到量程最大值。
     if (m_format) fitComboToItems(m_format);
     if (m_suffix) fitComboToItems(m_suffix);
     int fieldWidth = 0;
     if (m_format) fieldWidth = qMax(fieldWidth, m_format->sizeHint().width());
     if (m_suffix) fieldWidth = qMax(fieldWidth, m_suffix->sizeHint().width());
-    // 间隔框要容下量程最大值和 " ms"，否则单位会被右缘裁掉。
-    if (m_interval) fieldWidth = qMax(fieldWidth, m_interval->sizeHint().width());
 
     int controlHeight = 0;
     for (auto *control : controls) {
@@ -394,18 +404,29 @@ void SendPanel::unifyActionWidths()
             previewRow->setFixedHeight(controlHeight);
     }
     if (fieldWidth > 0) {
-        for (QWidget *field : {static_cast<QWidget *>(m_format),
-                 static_cast<QWidget *>(m_suffix), static_cast<QWidget *>(m_interval)}) {
+        for (QWidget *field : {static_cast<QWidget *>(m_format), static_cast<QWidget *>(m_suffix)}) {
             if (field) field->setFixedWidth(fieldWidth);
         }
     }
+    // 间隔框按当前「1000 ms」收紧。sizeHint 会按量程最大值 3600000 留空，ms 后面就空一截。
+    fitIntervalWidth();
 
     // 只取齐 A、B 的宽度。发送按钮吃掉本行剩余宽度，不跟字母开关绑成同一个宽。
     for (auto *button : {m_targetA, m_targetB}) {
         if (button) button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     }
     unifyButtonWidths({m_targetA, m_targetB});
+    unifyButtonWidths({m_enterToSend, m_clearOnEnter});
     syncManualToFilePages();
+}
+
+void SendPanel::fitIntervalWidth()
+{
+    if (!m_interval) return;
+    // 样式表左右各 6px，边框各 1px。再留 2px，避免字形贴着圆角被裁掉。
+    const int width = m_interval->fontMetrics().horizontalAdvance(m_interval->text()) + 16;
+    if (m_interval->width() == width) return;
+    m_interval->setFixedWidth(width);
 }
 
 void SendPanel::syncManualToFilePages()
@@ -554,6 +575,10 @@ void SendPanel::updateEnterToSendHint()
     m_editor->setToolTip(on
         ? tr("回车发送当前内容。要在输入框里换行，按 Alt+回车")
         : QString());
+    // 没开回车发送时清空没有入口，置灰但保留勾选。提示在置灰时也要能看见。
+    if (!m_clearOnEnter) return;
+    m_clearOnEnter->setEnabled(on);
+    m_clearOnEnter->setToolTip(tr("回车清空：回车发送成功后清空输入框。点「发送」和定时发送不清空。"));
 }
 
 bool SendPanel::eventFilter(QObject *watched, QEvent *event)
@@ -566,7 +591,11 @@ bool SendPanel::eventFilter(QObject *watched, QEvent *event)
     const bool enter = key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter;
     // Shift/Ctrl 留给输入法、系统快捷键。Alt+回车是勾选后唯一的换行键。
     if (enter && !(key->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))) {
+        // 按钮不可用时 issueSend 直接返回，输入框保持原样，避免没发出去却被清空。
+        const bool accepted = m_sendButton->isEnabled();
         issueSend(false);
+        if (accepted && m_clearOnEnter && m_clearOnEnter->isChecked())
+            m_editor->clear();
         return true;
     }
     if (enter && (key->modifiers() & Qt::AltModifier)
@@ -630,6 +659,7 @@ void SendPanel::loadPreferences()
         m_format->setCurrentText(format);
     m_suffix->setCurrentIndex(m_preferences->value("send/suffix", 0).toInt());
     m_enterToSend->setChecked(m_preferences->value(QStringLiteral("send/enterToSend"), false).toBool());
+    m_clearOnEnter->setChecked(m_preferences->value(QStringLiteral("send/clearOnEnter"), false).toBool());
     // 键不存在时保留构造时填入的示例。键存在时连空字符串也恢复，用户清空过输入框要记住。
     if (m_preferences->contains(QStringLiteral("send/text")))
         m_editor->setPlainText(m_preferences->value(QStringLiteral("send/text")).toString());
@@ -644,5 +674,6 @@ void SendPanel::savePreferences()
     m_preferences->setValue("send/format", m_format->currentText());
     m_preferences->setValue("send/suffix", m_suffix->currentIndex());
     m_preferences->setValue(QStringLiteral("send/enterToSend"), m_enterToSend->isChecked());
+    m_preferences->setValue(QStringLiteral("send/clearOnEnter"), m_clearOnEnter->isChecked());
     m_preferences->setValue(QStringLiteral("send/text"), m_editor->toPlainText());
 }

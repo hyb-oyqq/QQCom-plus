@@ -85,8 +85,8 @@ git diff --check
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 `
   -BinaryDir build/release/release `
-  -Version 1.0.0 `
-  -BaseUrl https://gitee.com/qinjmin/qqcom/releases/download/v1.0.0
+  -Version 1.0.1 `
+  -BaseUrl https://gitee.com/qinjmin/qqcom/releases/download/v1.0.1
 ```
 
 发布流程、清单校验、安全要求和更新策略见 [OTA 方案](docs/OTA.md)。

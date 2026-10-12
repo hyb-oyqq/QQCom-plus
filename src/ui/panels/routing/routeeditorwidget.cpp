@@ -81,16 +81,10 @@ RouteEditorWidget::RouteEditorWidget(QWidget *parent) : QWidget(parent)
 
 void RouteEditorWidget::setEndpoints(const QList<PortDraft> &ports, bool ready)
 {
-    // Any endpoint edit invalidates a running bridge; the link must be re-established.
-    bool changed = ports.size() != m_ports.size();
-    for (int i = 0; !changed && i < ports.size(); ++i)
-        changed = ports.at(i).kind != m_ports.at(i).kind || ports.at(i).values != m_ports.at(i).values;
+    // 已经建立的桥接只由用户再点按钮关闭。这里只刷新能否新建：
+    // 端口断开、异常、改参数、设备暂时不可用都不把桥接停掉。
     m_ports = ports;
     m_ready = ready && ports.size() == 2;
-    if (m_active && (changed || !m_ready)) {
-        m_active = false;
-        emit bridgeChanged(link());
-    }
     updateBridgeState();
 }
 

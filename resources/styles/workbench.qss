@@ -18,6 +18,15 @@ QLabel#payloadPreview {
 QLabel#payloadPreview[invalid="true"] { color: #c44343; background: #fdf4f3; }
 QMainWindow, QWidget#centralwidget { background: #e9edf4; }
 QLabel#Muted, QLabel#udpPeerHint, QLabel#StatusNote { color: #5c6880; font-size: 11px; }
+/* 打开失败和运行时错误。字号必须写上：只写字重时 Qt 会把字号清回默认。 */
+QLabel#StatusNote[tone="error"] { color: #c0392b; font-size: 11px; font-weight: 600; }
+QLabel#openFailure {
+    color: #c0392b;
+    font-size: 12px;
+    font-weight: 600;
+    background: transparent;
+    padding-left: 25px;
+}
 /* 回车提示是操作说明，不是字节预览。单独铺一层浅琥珀，和左边的灰底数据块分开。 */
 QLabel#enterToSendHint {
     color: #7a3f00;
@@ -41,7 +50,11 @@ QWidget#Surface { background: #ffffff; border: 1px solid #c8d1e0; border-radius:
 QFrame#EndpointBar { background: #ffffff; border: 1px solid #c8d1e0; border-radius: 8px; }
 QFrame#EndpointDivider { color: #d9e0ea; max-height: 1px; }
 QFrame#BridgeDivider { color: #c8d1e0; max-width: 1px; }
+/* 端口身份色，与数据区纯数据正文一致：A 琥珀 #B45309，B 青 #0E7490。白字。
+   顶栏用来过滤的 A/B 仍走勾选黄，不在这里改。 */
 QLabel#EndpointBadge { background: #1d4ed8; color: #ffffff; border: 1px solid #1a45c0; border-radius: 10px; font-size: 12px; font-weight: 700; }
+QLabel#EndpointBadge[port="A"] { background: #B45309; border: 1px solid #92400e; }
+QLabel#EndpointBadge[port="B"] { background: #0E7490; border: 1px solid #155e75; }
 /* 端点行自己**不再铺白底**：它铺满端口条整宽，自绘背景会把父级的 8px 圆角盖成直角
    ——圆角只有背景层能画，子控件不透明就等于把它擦掉了。白底统一由 EndpointBar 提供。 */
 PortSelectorWidget { background: transparent; }

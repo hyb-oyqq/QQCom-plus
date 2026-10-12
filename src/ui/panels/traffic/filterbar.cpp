@@ -112,7 +112,7 @@ FilterBar::FilterBar(QWidget *parent) : QWidget(parent)
     m_rebuild = new QPushButton(tr("应用过滤"), this);
     m_rebuild->setObjectName("filterRebuild");
     m_rebuild->setIcon(mutedIcon(QStringLiteral(":/icons/filter-check-outline.svg"), BarIconSize));
-    m_rebuild->setToolTip(tr("把当前过滤条件应用到已经收到的全部记录（缓冲内全量重放，不设条数上限）"));
+    m_rebuild->setToolTip(tr("把当前过滤条件应用到缓冲内已经收到的记录，不设条数上限。纯数据时仍只显示其中的接收数据。"));
     m_rebuild->setEnabled(false); // 还没收到任何记录时没什么可应用的
     connect(m_rebuild, &QPushButton::clicked, this, [this] {
         m_suspended = false; // 点「应用过滤」= 明确要用当前条件，停用状态结束
@@ -124,7 +124,7 @@ FilterBar::FilterBar(QWidget *parent) : QWidget(parent)
     m_reset = new QPushButton(tr("清除过滤"), this);
     m_reset->setObjectName("filterReset");
     m_reset->setIcon(mutedIcon(QStringLiteral(":/icons/filter-off.svg"), BarIconSize));
-    m_reset->setToolTip(tr("停止过滤、显示全部记录（输入的关键词与排除词会保留，方便再次应用）"));
+    m_reset->setToolTip(tr("停用关键词过滤，方向和事件开关全部勾回。已输入的词保留。纯数据时仍只显示接收。"));
     connect(m_reset, &QPushButton::clicked, this, [this] {
         // **只停用过滤，不丢用户输入的条件**：清掉输入框等于让用户重敲一遍
         //（用户反馈"当我清除过滤时，又得重新输入，很麻烦"）。条件留在框里，随时点
@@ -247,8 +247,8 @@ void FilterBar::setApplyPending(bool pending)
     // 而"有件事还没做"这件事一眼就能看见。文字长度变化由关键词输入的弹性吸收。
     m_rebuild->setText(pending ? tr("应用过滤 •") : tr("应用过滤"));
     m_rebuild->setToolTip(pending
-            ? tr("过滤条件已改，还没作用于已收到的记录。点这里把条件应用到全部已到达的数据")
-            : tr("把当前过滤条件应用到已经收到的全部记录（缓冲内全量重放，不设条数上限）"));
+            ? tr("过滤条件已改，还没作用于已收到的记录。点这里应用到缓冲内的记录。纯数据时仍只显示其中的接收数据。")
+            : tr("把当前过滤条件应用到缓冲内已经收到的记录，不设条数上限。纯数据时仍只显示其中的接收数据。"));
 }
 
 FilterBarState FilterBar::state() const

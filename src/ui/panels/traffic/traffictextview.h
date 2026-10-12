@@ -6,9 +6,10 @@
 #include "domain/trafficmessage.h"
 #include "ui/common/payloadcodec.h"
 
-// 监视区的文本显示层：JCom 式"文本框刷新"——每条消息按行号起头，时间/方向/长度
-// 按显示开关拼接，载荷按文本本来的样子显示：\r\n / \n / \r 还原成真实换行，
-// 续行不带行号紧随其后，跟随模式下始终钉在底部。
+// 监视区的文本显示层：JCom 式"文本框刷新"。
+// 显示前缀打开时，每条消息另起一行，行号/时间/方向/长度按开关拼接。
+// 关掉前缀是纯数据：只画接收字节，新数据接在上一包后面，换行只来自载荷自己的
+// \r\n / \n / \r；发送、状态、警告、错误和 HEX 对照都不出现，端口靠正文颜色区分。
 //
 // 选 QPlainTextEdit 而不是自绘列表：用户要的是"任意选中、随段复制"，
 // 这是文本框的语义。QPlainTextEdit 按块（行）存储、只排版可见块，
@@ -33,14 +34,15 @@ class TrafficTextView : public QPlainTextEdit
 public:
     // 行前缀的开关组合。视图是**投影**：同一批记录可以按不同开关组合反复重画，
     // 所以这些开关不再"只在到达时生效"，而是每行长什么样。
-    // prefix 为假时行号、时间、端口方向、长度都被忽略。HEX 对照不在其中，仍按 alwaysShowHex 单独决定。
+    // prefix 为假时进入纯数据：行号、时间、端口方向、长度、HEX 对照全部不画，
+    // 并且只输出接收字节。alwaysShowHex 在这时被忽略。
     struct DisplayOptions
     {
         bool prefix = true;            // 前缀总开关：端口、方向、箭头和对端随它一起出现
         bool prefixLineNumber = true;  // 行号（会话内绝对计数）
         bool prefixTimestamp = true;   // 行首 HH:mm:ss.zzz
         bool prefixLength = true;      // 方向后面的 [NB]；端口方向关掉时改放在时间后面
-        bool alwaysShowHex = false;    // 数据后另起一行显示 HEX 对照（HEX 格式下无意义，自动省略）
+        bool alwaysShowHex = false;    // 有前缀时，数据后另起一行显示 HEX 对照（HEX 格式下自动省略）
 
         // 面板用它判断"外观是否变了、要不要重投影"。写成显式比较而不是依赖
         // 默认的 operator==：C++17 下没有默认比较，且逐字段列出更不容易漏改。

@@ -13,6 +13,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
 #include <QNetworkInterface>
 #include <QPushButton>
 #include <QRegularExpressionValidator>
@@ -35,6 +36,55 @@ constexpr int AdvancedIconSize = 16;
 
 // Action buttons keep their text; the status glyph rides beside it at the usual icon size.
 constexpr int ActionIconSize = 14;
+
+// 短标签在定宽列里分散对齐：「串口」两个字拉开，右缘和「监听网卡」对齐。
+// 字距不能写进 QFont：全局 QSS 的 font-family 会在抛光时把 setFont 盖掉。
+class DistributedLabel final : public QLabel
+{
+public:
+    using QLabel::QLabel;
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        const QString t = text();
+        const QRect box = contentsRect();
+        if (t.size() < 2 || box.width() <= 0) {
+            QLabel::paintEvent(event);
+            return;
+        }
+        const QFontMetrics fm(font());
+        QVector<int> advances;
+        advances.reserve(t.size());
+        int used = 0;
+        for (const QChar ch : t) {
+            const int advance = fm.horizontalAdvance(ch);
+            advances.append(advance);
+            used += advance;
+        }
+        const int extra = box.width() - used;
+        if (extra <= 1) {
+            QLabel::paintEvent(event);
+            return;
+        }
+        QPainter painter(this);
+        painter.setFont(font());
+        painter.setPen(palette().color(foregroundRole()));
+        const int gaps = t.size() - 1;
+        const int base = extra / gaps;
+        int leftover = extra % gaps;
+        int x = box.left();
+        const int y = box.top() + (box.height() - fm.height()) / 2 + fm.ascent();
+        for (int i = 0; i < t.size(); ++i) {
+            painter.drawText(x, y, QString(t.at(i)));
+            x += advances.at(i);
+            if (i >= gaps) continue;
+            const int add = base + (leftover > 0 ? 1 : 0);
+            if (leftover > 0) --leftover;
+            x += add;
+        }
+    }
+};
 
 class BaudRateValidator final : public QValidator
 {
@@ -154,13 +204,14 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     // 每行的参数落进四列：前导标签列（左对齐、定宽）→ 主字段（拉伸）→ 尾部标签列
     // （右对齐、定宽）→ 尾部字段（定宽）。两列标签与尾部字段都按全局最宽者定宽，
     // A/B 两行、四种端点类型的"波特率 / 监听端口 / 远端端口"因此落在同一条竖线上。
+    // 短标签在这一列宽里分散对齐，例如「串口」拉开后和「监听网卡」左右缘对齐。
     enum Column { Lead, Trail, Plain };
     QList<QLabel *> leadLabels;
     QList<QLabel *> trailLabels;
     QList<QWidget *> trailFields;
     const auto addInlineLabel = [&](QHBoxLayout *target, const QString &text,
                                     QWidget *field, Column column = Trail) {
-        auto *label = new QLabel(text);
+        QLabel *label = column == Plain ? new QLabel(text) : new DistributedLabel(text);
         label->setObjectName(field->objectName() + "Label");
         label->setBuddy(field);
         if (column == Lead) {
@@ -295,6 +346,13 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     row->addWidget(m_action);
     layout->addLayout(row);
 
+    // 打开失败时按钮仍是「监听 / 连接 / 绑定」，看起来像没点上。原因单独占一行。
+    m_openFailure = new QLabel;
+    m_openFailure->setObjectName(QStringLiteral("openFailure"));
+    m_openFailure->setWordWrap(true);
+    m_openFailure->hide();
+    layout->addWidget(m_openFailure);
+
     // Advanced row: opens in place under this endpoint, never moves the data area.
     m_advancedPanel = new QWidget;
     m_advancedPanel->setObjectName("advancedPanel");
@@ -385,6 +443,10 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
 void PortSelectorWidget::setEndpointLabel(const QString &label)
 {
     m_badge->setText(label);
+    // 与数据区端口色同一套：A 琥珀、B 青。属性交给样式表，不在这里写死颜色。
+    m_badge->setProperty("port", label);
+    m_badge->style()->unpolish(m_badge);
+    m_badge->style()->polish(m_badge);
     m_badge->setToolTip(tr("端点 %1").arg(label));
 }
 
@@ -419,10 +481,24 @@ void PortSelectorWidget::setRecovering(bool recovering)
     applyBusyState();
 }
 
+void PortSelectorWidget::setOpenFailure(const QString &text)
+{
+    if (!m_openFailure) return;
+    const QString reason = text.trimmed();
+    m_openFailure->setText(reason);
+    m_openFailure->setToolTip(reason);
+    m_openFailure->setVisible(!reason.isEmpty());
+    if (!m_open && !m_connecting && !m_recovering && m_validationError.isEmpty())
+        m_action->setToolTip(reason);
+}
+
 void PortSelectorWidget::setConnectionOpen(bool open, bool connecting)
 {
     connecting = connecting && !open;
-    if (open) m_recovering = false; // 连上才结束等待；拨号中仍保持「等待中」
+    if (open) {
+        m_recovering = false; // 连上才结束等待；拨号中仍保持「等待中」
+        setOpenFailure({});
+    }
     if (m_open == open && m_connecting == connecting && !open) return;
     m_open = open;
     m_connecting = connecting;
@@ -648,7 +724,7 @@ void PortSelectorWidget::setSerialPorts(const QList<SerialPortDescriptor> &ports
     selectSerialPort(selected);
     updateActionLabels();
     updateValidation();
-    // A scan can invalidate the draft (device removed); owners gate the bridge on this.
+    // 扫描可能让草稿失效（设备拔出）。桥接用这次通知更新能否新建，已建立的不关。
     emit configurationChanged();
 }
 
@@ -961,6 +1037,8 @@ PortDraft PortSelectorWidget::draft() const
 void PortSelectorWidget::notifyChange()
 {
     if (!m_loading) {
+        // 参数已经改过，上一回打不开的原因对不上现在这一行。
+        setOpenFailure({});
         updateActionLabels();
         updateValidation();
         emit configurationChanged();
@@ -1039,10 +1117,14 @@ void PortSelectorWidget::updateValidation()
     m_validationError = messages.join('\n');
     // 动作按钮：配置有效才可打开；已打开或正在连接时保持可点（用于关闭/取消）。
     m_action->setEnabled(m_open || m_connecting || m_recovering || m_validationError.isEmpty());
-    m_action->setToolTip(m_recovering
-                             ? tr("正在等待串口空闲后自动打开，点击取消")
-                             : (m_open || m_connecting || m_validationError.isEmpty()
-                                    ? QString() : m_validationError));
+    QString actionTip;
+    if (m_recovering)
+        actionTip = tr("正在等待串口空闲后自动打开，点击取消");
+    else if (!m_open && !m_connecting && !m_validationError.isEmpty())
+        actionTip = m_validationError;
+    else if (!m_open && !m_connecting && m_openFailure)
+        actionTip = m_openFailure->text();
+    m_action->setToolTip(actionTip);
     // No inline marker: invalid fields carry a red border, the reason sits on each field.
     // An invalid field hidden behind the collapsed row would leave the message unreachable.
     // 自动展开只响应"新出现"的错误：程序化载入（setDraft / 串口扫描）会让上次会话

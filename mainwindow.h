@@ -49,12 +49,12 @@ public:
     quint64 sessionRecordCount() const;
     qint64 sessionRxBytes() const;
     // 状态栏里的临时提示：单独占一格，到时清空。不覆盖 A/B 连接状态，也不动统计。
-    // 空文本会把这一格藏起来。
+    // 空文本会把这一格藏起来。alert 为真时这条用错误色，避免和旁边的灰色状态混在一起。
     //
     // 不要改用 QStatusBar::showMessage()：它会把所有 addWidget() 挂上的普通部件一并隐藏
     // （permanent widget 才不受影响）。整条状态栏都是 addWidget，一条临时消息就会让
     // RX/TX/条数/桥接整行消失，反复出错时计时器一直被重置，看起来像统计数据丢了。
-    void showStatusNote(const QString &text, int ms);
+    void showStatusNote(const QString &text, int ms, bool alert = false);
 
 signals:
     void updateCheckRequested();

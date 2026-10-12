@@ -797,8 +797,15 @@ void MainWindow::handleMessage(const Traffic::Message &message)
     // 错误播报走状态栏右端的临时提示格（showStatusNote），**不是** showMessage：
     // 后者会隐藏所有 addWidget 挂的普通部件，把 RX/TX/条数统计整行顶掉——而打开失败
     // 常常连续发生，用户看到的正是"统计数据消失、很久才回来"（见 showStatusNote 说明）。
-    if (message.direction == Traffic::Direction::Error && !message.statusText.isEmpty())
-        showStatusNote(message.statusText, 5000);
+    if (message.direction == Traffic::Direction::Error && !message.statusText.isEmpty()) {
+        showStatusNote(message.statusText, 5000, true);
+        const int index = message.source.endpointIndex;
+        // 监听/连接失败时状态仍是关闭，按钮文字不变。纯数据也不画错误行。
+        // 已经处于打开中的运行时错误（例如客户端断开）不写到端口行上，避免把正在听的那一行盖住。
+        if (index >= 0 && index < m_selectors.size()
+            && m_endpointStates[index] != Transport::State::Open)
+            m_selectors.at(index)->setOpenFailure(message.statusText);
+    }
     m_traffic->appendMessage(message);
 }
 
@@ -944,10 +951,11 @@ void MainWindow::updateEndpointStatus()
     if (!m_statusNote) return;
     m_statusNote->clear();
     m_statusNote->setToolTip({});
+    restyleProperty(m_statusNote, "tone", QString());
     m_statusNote->hide();
 }
 
-void MainWindow::showStatusNote(const QString &text, int ms)
+void MainWindow::showStatusNote(const QString &text, int ms, bool alert)
 {
     if (!m_statusNote) return;
     if (!m_statusNoteTimer) {
@@ -958,6 +966,7 @@ void MainWindow::showStatusNote(const QString &text, int ms)
     }
     m_statusNote->setText(text);
     m_statusNote->setToolTip(text);
+    restyleProperty(m_statusNote, "tone", alert ? QStringLiteral("error") : QString());
     m_statusNote->setVisible(!text.isEmpty());
     m_statusNoteTimer->start(qMax(1, ms));
 }

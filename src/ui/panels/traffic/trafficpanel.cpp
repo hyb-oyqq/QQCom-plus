@@ -124,7 +124,9 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         button->setObjectName(name);
         button->setCheckable(true);
         button->setChecked(true);
-        button->setToolTip(tr("显示端点 %1。点一下就作用到已经收到的行").arg(letter));
+        const QString colorName = letter == QStringLiteral("A") ? tr("琥珀色") : tr("青色");
+        button->setToolTip(tr("显示端点 %1。纯数据时，%1 的接收字节为%2。点一下就作用到已经收到的行。")
+                               .arg(letter, colorName));
         connect(button, &QPushButton::toggled, this, &TrafficPanel::updatePortVisibility);
         return button;
     };
@@ -148,7 +150,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     auto *settings = new QPushButton(tr("设置"));
     settings->setObjectName("displaySettings");
     settings->setIcon(mutedIcon(QStringLiteral(":/icons/cog.svg"), BarIconSize));
-    settings->setToolTip(tr("日志显示选项：行前缀、换行、记录"));
+    settings->setToolTip(tr("显示前缀、HEX、换行、状态、警告、错误，以及记录到文件"));
     auto *displayMenu = new StayOpenMenu(settings);
     // 行内容开关：控制台语义，全部在消息到达时生效，已固化的行不重排。
     const auto rowToggle = [this, &displayMenu](const char *name, const QString &text, bool checked) {
@@ -161,7 +163,12 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     };
     // 菜单用完整名。顶栏三个按钮仍是短名，写在 ViewToggles::bind，避免把顶栏撑开。
     m_prefixAction = rowToggle("prefix", tr("显示前缀"), true);
-    m_prefixAction->setToolTip(tr("总开关。勾上后显示端口、收发方向和下面三项；关掉后日志里只留数据。端口写成 [A]/[B]，接收是 <<--，发送是 -->>，转发写成 TX+FWD"));
+    m_prefixAction->setToolTip(tr(
+        "勾上后每条另起一行，并显示端口、收发方向，以及下面的行号、时间和长度。"
+        "端口写成 [A]/[B]，接收是 <<--，发送是 -->>，转发写成 TX+FWD。\n"
+        "关掉后是纯数据：接收字节连续接在上一包后面，换行只来自数据自身。"
+        "发送、状态、警告、错误和 HEX 都不显示。打开失败会写在端口行上。A 为琥珀色，B 为青色。\n"
+        "再次勾上后，纯数据期间没显示的行会重新出现。"));
     displayMenu->addSeparator();
     m_prefixLineNumberAction = rowToggle("prefixLineNumber", tr("前缀行号"), true);
     m_prefixLineNumberAction->setToolTip(tr("每条记录开头显示序号，例如「1」「2」"));
@@ -169,14 +176,17 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_prefixTimestampAction->setToolTip(tr("每条记录显示到达时间，精确到毫秒"));
     m_prefixLengthAction = rowToggle("prefixLength", tr("前缀数据长度"), true);
     m_prefixLengthAction->setToolTip(tr("在方向后面显示本条字节数，写成 [12B]"));
-    // 关掉「显示前缀」时，下面三项置灰且点不了。HEX 对照和换行不跟前缀走。
-    connect(m_prefixAction, &QAction::toggled, this, [this](bool prefixes) {
-        for (auto *action : {m_prefixLineNumberAction, m_prefixTimestampAction, m_prefixLengthAction})
-            action->setEnabled(prefixes);
-    });
     displayMenu->addSeparator();
     m_alwaysShowHexAction = rowToggle("alwaysShowHex", tr("始终显示HEX"), false);
-    m_alwaysShowHexAction->setToolTip(tr("数据行之后另起一行显示 HEX 对照；显示格式已经是 HEX 时自动省略"));
+    m_alwaysShowHexAction->setToolTip(tr(
+        "在数据行下面另起一行显示 HEX 对照。显示格式已经是 HEX 时不再重复。"
+        "纯数据时不可用；勾上「显示前缀」后按当前勾选恢复。"));
+    // 关掉「显示前缀」时，行号/时间/长度和 HEX 对照都置灰。换行不跟前缀走。
+    connect(m_prefixAction, &QAction::toggled, this, [this](bool prefixes) {
+        for (auto *action : {m_prefixLineNumberAction, m_prefixTimestampAction, m_prefixLengthAction,
+                             m_alwaysShowHexAction})
+            action->setEnabled(prefixes);
+    });
     m_autoWrapAction = rowToggle("autoWrap", tr("自动换行"), true);
     m_autoWrapAction->setToolTip(tr("按窗口宽度折行显示；关闭时长报文水平滚动"));
     connect(m_autoWrapAction, &QAction::toggled, this, [this](bool wrap) {
@@ -186,11 +196,17 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     displayMenu->addSeparator();
     // 事件类型开关。点了必须立刻作用到已经收到的行，不能等「应用过滤」。
     m_showStateAction = rowToggle("showState", tr("显示状态"), true);
-    m_showStateAction->setToolTip(tr("显示端口打开、关闭、连接和断开，以及对端连上、断开"));
+    m_showStateAction->setToolTip(tr(
+        "显示端口打开、关闭、连接和断开，以及对端连上、断开。"
+        "纯数据时不出现在数据区。勾上「显示前缀」后按本项显示。"));
     m_showWarningAction = rowToggle("showWarning", tr("显示警告"), true);
-    m_showWarningAction->setToolTip(tr("显示警告，例如串口消失后等待它重新出现再自动打开"));
+    m_showWarningAction->setToolTip(tr(
+        "显示警告，例如串口消失后等待它重新出现再自动打开。"
+        "纯数据时不出现在数据区。勾上「显示前缀」后按本项显示。"));
     m_showErrorAction = rowToggle("showError", tr("显示错误"), true);
-    m_showErrorAction->setToolTip(tr("显示错误，例如打开失败、设备错误、连接断开"));
+    m_showErrorAction->setToolTip(tr(
+        "显示打开失败、设备错误、连接断开。"
+        "纯数据时不出现在数据区。打开失败写在该端口行上，直到打开成功或改了参数；底部状态栏也会短时用红色提示。勾上「显示前缀」后按本项显示。"));
 
     // 显示开关（前缀 / HEX / 换行）常驻顶栏，紧跟方向开关之后：
     // 三者都是"随手切一下"的外观项目，频次高到不该藏在菜单里两步。顶上的是同一批
@@ -204,8 +220,8 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     displayMenu->setToolTipsVisible(true);
 
     displayMenu->addSeparator();
-    // 记录到文件：与"导出"互补。导出是"把当前所见存一份"，记录是"边看边记"——
-    // 记录行跟随当前显示格式（HEX 模式记 HEX、文本模式记文本），所见即所记。
+    // 记录到文件与导出都保留缓冲里的全部记录，含纯数据时屏幕上不显示的发送和事件。
+    // 记录行跟随当前显示格式（HEX 模式记 HEX、文本模式记文本）。
     m_recordAction = displayMenu->addAction(tr("记录到文件"));
     m_recordAction->setObjectName("recordTraffic");
     m_recordAction->setCheckable(true);
@@ -238,6 +254,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     auto *exportButton = new QPushButton(tr("导出"));
     exportButton->setObjectName("exportTraffic");
     exportButton->setIcon(mutedIcon(QStringLiteral(":/icons/export.svg"), BarIconSize));
+    exportButton->setToolTip(tr("导出当前缓冲里的全部记录，含数据区没显示的发送、状态、警告和错误"));
     top->addWidget(exportButton);
 
     m_follow = new QPushButton(tr("滚动"));
@@ -333,7 +350,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 各自记账，但都要让用户看得见。
     connect(m_text, &TrafficTextView::blocksReleased, this,
         [this](int count) { m_releasedLines += static_cast<quint64>(count); });
-    auto *empty = new QLabel(tr("等待接收数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。"));
+    auto *empty = new QLabel(waitingPlaceholder());
     empty->setAlignment(Qt::AlignCenter);
     empty->setObjectName("EmptyState");
     empty->setWordWrap(true);
@@ -527,12 +544,21 @@ void TrafficPanel::flushPending()
     const auto format = currentDisplayFormat();
     QList<Traffic::Message> accepted;
     accepted.reserve(batch.size());
-    for (const auto &message : batch)
-        if (m_matcher.accepts(message)) accepted.append(message);
+    int filtered = 0;
+    for (const auto &message : batch) {
+        if (!m_matcher.accepts(message)) {
+            ++filtered;
+            continue;
+        }
+        // 纯数据只上屏接收字节。发送和事件仍进模型，不算被过滤条件挡住。
+        if (!m_displayOptions.prefix && message.direction != Traffic::Direction::Receive)
+            continue;
+        accepted.append(message);
+    }
     m_totalAccepted += accepted.size();
     // 挡住多少条必须单独计数：屏幕上"什么都没有"和"被条件挡掉了"是两个完全
     // 不同的事实，只有这个数字能把它们分开。
-    m_filteredOut += static_cast<quint64>(batch.size() - accepted.size());
+    m_filteredOut += static_cast<quint64>(filtered);
     m_text->appendMessages(accepted, format, m_displayOptions);
     if (m_follow->isChecked()) m_text->scrollToBottom();
     m_lastBatchWorkMs = qMax(m_lastBatchWorkMs, work.elapsed());
@@ -637,9 +663,9 @@ void TrafficPanel::refreshRecordTooltip()
     if (!m_recordAction) return;
     const QString dir = QDir::toNativeSeparators(logDirectory());
     m_recordAction->setToolTip(m_logFile
-            ? tr("记录到文件 · 目录 %1 · 正在写 %2")
+            ? tr("写入全部到达的消息，与数据区是否显示无关。目录 %1 · 正在写 %2")
                   .arg(dir, QFileInfo(m_logFilePath).fileName())
-            : tr("把新到达的消息按当前显示格式持续写入日志文件。目录：%1。可在「日志位置」中修改")
+            : tr("把新到的接收、发送、状态、警告和错误按当前显示格式写入日志，与数据区是否显示无关。目录：%1。可在「日志位置」中修改")
                   .arg(dir));
 }
 
@@ -830,7 +856,8 @@ void TrafficPanel::loadPreferences()
         : !m_preferences->value("traffic/pure", false).toBool();
     m_prefixAction->setChecked(prefixOn);
     // toggled 在值没变时不发。启动时前缀已是关掉的，要在这里把下面三项置灰。
-    for (auto *action : {m_prefixLineNumberAction, m_prefixTimestampAction, m_prefixLengthAction})
+    for (auto *action : {m_prefixLineNumberAction, m_prefixTimestampAction, m_prefixLengthAction,
+                         m_alwaysShowHexAction})
         action->setEnabled(prefixOn);
     // 初次启动自动换行打开。键不存在时用这个缺省。
     m_autoWrapAction->setChecked(m_preferences->value("traffic/autoWrap",
@@ -969,7 +996,7 @@ void TrafficPanel::updateFilter()
     m_displayOptions.prefixLineNumber = m_prefixLineNumberAction->isChecked();
     m_displayOptions.prefixTimestamp = m_prefixTimestampAction->isChecked();
     m_displayOptions.prefixLength = m_prefixLengthAction->isChecked();
-    m_displayOptions.alwaysShowHex = m_alwaysShowHexAction->isChecked();
+    m_displayOptions.alwaysShowHex = m_prefixAction->isChecked() && m_alwaysShowHexAction->isChecked();
     // 外观、端点、方向、转发和事件开关一点就作用到已有行。
     // 关键词和排除词只作用于新行，等「应用过滤」再补到已有记录上。
     scheduleReproject();
@@ -1052,9 +1079,16 @@ void TrafficPanel::reprojectView(bool announce, bool applyCurrentConditions)
 
     QList<Traffic::Message> accepted;
     accepted.reserve(rows);
+    int filtered = 0;
     for (int row = 0; row < rows; ++row) {
         const auto &message = m_model->record(row);
-        if (matcher->accepts(message)) accepted.append(message);
+        if (!matcher->accepts(message)) {
+            ++filtered;
+            continue;
+        }
+        if (!m_displayOptions.prefix && message.direction != Traffic::Direction::Receive)
+            continue;
+        accepted.append(message);
     }
     // 行号按投影结果从 1 重新排：清空与重放是同一个动作的两半，中间不能让旧行号
     // 留在文档里，否则"第 3 行"会指向两条不同的记录。
@@ -1066,7 +1100,7 @@ void TrafficPanel::reprojectView(bool announce, bool applyCurrentConditions)
     // 投影之后屏幕上的条数就是摘要该说的条数：会话累计口径在这里失效了，
     // 因为更早的行已经被这一次投影丢掉（缓冲之外的历史无法追溯）。
     m_totalAccepted = static_cast<quint64>(accepted.size());
-    m_filteredOut = static_cast<quint64>(rows - accepted.size());
+    m_filteredOut = static_cast<quint64>(filtered);
     // conditionsApplied：这次到底有没有"让视图跟上当前条件"。外观路径走已应用条件 → false，
     // 未应用的条件必须仍被判为待应用；回退用当前条件的那次（还没投影过）算真，因为确实用上了。
     markReprojected(applyCurrentConditions || !useAppliedConditions);
@@ -1130,6 +1164,13 @@ void TrafficPanel::refreshApplyHint()
     m_filterBar->setApplyPending(pending);
 }
 
+QString TrafficPanel::waitingPlaceholder() const
+{
+    if (m_prefixAction && !m_prefixAction->isChecked())
+        return tr("等待接收数据\n\n只连续显示接收字节。A 为琥珀色，B 为青色。");
+    return tr("等待数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。");
+}
+
 void TrafficPanel::updateSummary()
 {
     // 模型是导出用的结构化存储（有上限），屏幕上的历史在文本视图里（上限高得多），
@@ -1146,7 +1187,7 @@ void TrafficPanel::updateSummary()
         m_empty->setText(filtering && m_filteredOut > 0
                 ? tr("当前过滤条件下没有匹配记录\n\n已挡住 %1 条，调整上方的过滤条件即可看到它们。")
                       .arg(m_filteredOut)
-                : tr("等待接收数据\n\n在上方配置 A、B 端点，收发记录将在这里显示。"));
+                : waitingPlaceholder());
     }
     m_stack->setCurrentWidget(m_totalAccepted == 0 ? static_cast<QWidget *>(m_empty)
                                                    : static_cast<QWidget *>(m_text));
@@ -1154,9 +1195,11 @@ void TrafficPanel::updateSummary()
         // 摘要 = 会话累计 + 挡住多少 + 安全阀释放了多少。三段都是事实，缺一段就会让人
         // 误判："看到的少"到底是没收到、被条件挡了，还是最早的被裁掉了。
         // 释放量只在真的发生过时出现（正常情况下永远是 0，摘要保持干净）。
+        const bool pureData = m_prefixAction && !m_prefixAction->isChecked();
         QString summary = m_filteredOut > 0
-            ? tr("共 %1 条 · 过滤掉 %2 条").arg(m_totalAccepted).arg(m_filteredOut)
-            : tr("共 %1 条").arg(m_totalAccepted);
+            ? (pureData ? tr("接收 %1 条 · 过滤掉 %2 条") : tr("共 %1 条 · 过滤掉 %2 条"))
+                  .arg(m_totalAccepted).arg(m_filteredOut)
+            : (pureData ? tr("接收 %1 条") : tr("共 %1 条")).arg(m_totalAccepted);
         // 缓冲已满是一个事实，不是一个计数：无论触顶发生在模型侧（释放最旧记录）
         // 还是文本侧（裁掉最早的行），对用户的含义都是"最早的那段已经不在屏幕上了"。
         // 只报这一句，不再摊开两串对不上号的条数/行数——用户要的是判断，不是算术。
@@ -1247,5 +1290,5 @@ void TrafficPanel::exportVisible()
     }
     QSaveFile file(path);
     const bool ok = file.open(QIODevice::WriteOnly) && file.write(output) == output.size() && file.commit();
-    reportSummary(ok ? tr("记录已导出") : tr("导出失败：%1").arg(file.errorString()));
+    reportSummary(ok ? tr("全部记录已导出") : tr("导出失败：%1").arg(file.errorString()));
 }

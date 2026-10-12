@@ -27,8 +27,8 @@ const QColor HexCompanionColor(0x6B, 0x76, 0x86);
 // （RX 与警告比初版各深了一档，初版在加粗后仍显轻）。改色先看这张表。
 const QColor TxColor(0x1D, 0x4E, 0xD8);     // 发送：工作台主蓝
 const QColor RxColor(0x04, 0x6C, 0x4E);     // 接收：饱和绿（深一档，加粗后更实）
-// 端口字母用独立色，不跟方向色走。A 琥珀、B 青：和顶栏 A/B 按钮、RX 绿、TX 蓝都错开，
-// 扫一行时先看见是哪个口，再看见收还是发。桥接等不属于某一端的行不画字母。
+// 端口字母用独立色，不跟方向色走。A 琥珀、B 青，与端口配置行前的徽章同色；
+// 和顶栏过滤按钮的使能黄、RX 绿、TX 蓝错开。桥接等不属于某一端的行不画字母。
 const QColor PortAColor(0xB4, 0x53, 0x09);
 const QColor PortBColor(0x0E, 0x74, 0x90);
 const QColor StateColor(0x6D, 0x28, 0xD9);  // 状态迁移：紫
@@ -208,15 +208,19 @@ void TrafficTextView::appendMessages(
     QTextCharFormat hexFormat;
     hexFormat.setForeground(HexCompanionColor);
 
-    // 空文档只有一个空块：首行直接写进它；之后每行先补一个块分隔符。
+    // 有前缀时，空文档的首行直接写进已有空块，之后每条消息先补一个块分隔符。
+    // 纯数据不在消息边界换行：文档里已有内容时，新字节接着上一包写。
     // QChar::ParagraphSeparator 是 QTextDocument 的块分隔符（appendPlainText 内部同款），
     // 用 '\n' 也成块但会在文本里留下歧义字符，显式用分隔符更干净。
-    bool needSeparator = !document()->isEmpty();
+    bool needSeparator = options.prefix && !document()->isEmpty();
     // 释放记账的两个起点：写入前的块数，以及本次插入的块分隔符个数。
     const int blocksBefore = document()->blockCount();
     int separators = 0;
 
     for (const auto &r : messages) {
+        // 纯数据只留接收字节。发送、状态、警告、错误仍在模型里，打开前缀后重投影能看见。
+        if (!options.prefix && r.direction != Traffic::Direction::Receive)
+            continue;
         // 载荷里的换行还原成真实换行：文本框就该按文本本来的样子显示。
         // renderMultiline 让 UTF-8/GBK/ASCII 解码里的 \r \n 保持真实字符，
         // 这里统一成 \n；行号与时间只标首行，续行紧跟其后，
@@ -236,9 +240,11 @@ void TrafficTextView::appendMessages(
         payload.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
         payload.replace(QLatin1Char('\r'), QLatin1Char('\n'));
 
-        // 正文底色随方向：错误/警告整行着色，数据行保持近黑。
+        // 有前缀时正文近黑（错误/警告整行着色），端口色只画在 [A]/[B] 上。
+        // 纯数据没有这些标记，整段接收字节用端口色，A、B 混在一段里也能分开。
         QTextCharFormat bodyFormat;
-        bodyFormat.setForeground(bodyColorFor(r.direction));
+        bodyFormat.setForeground(options.prefix ? bodyColorFor(r.direction)
+                                                : portColor(r.source.endpointIndex));
         const auto runs = toRuns(payload, bodyFormat);
 
         bool atMessageStart = true;
@@ -330,7 +336,9 @@ void TrafficTextView::appendMessages(
         // 长报文下根本看不到对照；独占一行才便于上下比对字节。
         // 完整展开全部字节——对照的意义就在于看全，内存由文档总预算兜底。
         // 不受前缀开关控制：关掉行号/时间/方向后，对照行仍然单独跟在数据后面。
-        if (options.alwaysShowHex && format != PayloadCodec::Format::Hex && !r.raw.isEmpty()) {
+        // 纯数据不允许 HEX 对照：对照行自己就要占一行，和“接着输出”冲突。
+        if (options.prefix && options.alwaysShowHex && format != PayloadCodec::Format::Hex
+            && !r.raw.isEmpty()) {
             const auto hex = QString::fromLatin1(r.raw.toHex(' ')).toUpper();
             if (needSeparator) needSeparator = false; // 载荷以换行收尾：续块此时是空的
             else {
@@ -342,8 +350,9 @@ void TrafficTextView::appendMessages(
         }
         // 行号按消息计，一条多行报文共用一个行号；空载荷也保留前缀行。
         ++m_nextNumber;
-        // 消息之间必然换行：下一条消息从新块开始（旧行为同款）。
-        needSeparator = true;
+        // 有前缀时每条另起一行。纯数据时新字节接在上一包后面，
+        // 换行只来自载荷里的 0A / 0D 0A。
+        needSeparator = options.prefix;
     }
     // 结算这一批的全部文档变更（也是上面那笔固定开销唯一被付掉的地方）。
     cursor.endEditBlock();

@@ -65,9 +65,10 @@ private:
     void updatePreview();
     void updateTargets();
     void updateSendAvailability();
-    // 目标 A、B 同宽。格式、末尾、间隔、A、B、发送共用一个高度；
-    // 发送按钮只在宽度上伸展，不再单独加高。
+    // 目标 A、B 同宽。格式与末尾同宽。间隔按当前文字收紧，位数变了再加宽。
+    // 这些控件和发送按钮共用一个高度；发送按钮只在宽度上伸展。
     void unifyActionWidths();
+    void fitIntervalWidth();
     // 手动发送页的正文跟着文件页的 sizeHint 长高或缩短，三页一样高。
     void syncManualToFilePages();
     void issueSend(bool scheduled = false);
@@ -90,7 +91,9 @@ protected:
     QLabel *m_preview;
     bool m_previewError = false;
     QPushButton *m_sendButton;
-    QCheckBox *m_enterToSend = nullptr;
+    // 与 A/B 同一类可切换按钮。关掉回车发送时「回车清空」置灰，按下状态仍保留。
+    QPushButton *m_enterToSend = nullptr;
+    QPushButton *m_clearOnEnter = nullptr;
     QCheckBox *m_repeat;
     QSpinBox *m_interval;
     QTimer *m_repeatTimer;

@@ -109,6 +109,8 @@ private:
     FilterFlagsState filterFlagsState() const;
     void updatePortVisibility();
     void updateSummary();
+    // 空数据区的两句说明。打开前缀时是收发记录；纯数据时只说接收，并写明 A、B 的颜色。
+    QString waitingPlaceholder() const;
     // 性能心跳：量"这一拍比预期晚了多少"（界面迟滞）与"上一批处理花了多久"，
     // 取最近 2 秒的窗口最大值上报。迟滞是用户感知卡顿的直接代理量：
     // 界面线程被长任务占住时，连 250 ms 的心跳都会迟到。
@@ -172,8 +174,8 @@ private:
     // A/B 端点开关紧挨过滤按钮，使能时为黄；其余显示选项在「设置」菜单。
     QPushButton *m_portAButton;
     QPushButton *m_portBButton;
-    // 行内容开关。关掉「显示前缀」后，行号、时间戳、数据长度和端口方向一起隐藏；
-    // 「始终显示 HEX」不跟前缀走。端口方向没有单独开关，跟着前缀总开关。
+    // 行内容开关。关掉「显示前缀」后进入纯数据：行号、时间、长度、端口方向和 HEX 对照
+    // 一起不可用，屏幕只连续显示接收字节。端口方向没有单独开关，跟着前缀总开关。
     QAction *m_prefixAction;            // 显示前缀
     QAction *m_prefixLineNumberAction;  // 前缀行号
     QAction *m_prefixTimestampAction;   // 前缀时间戳

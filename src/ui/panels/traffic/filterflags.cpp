@@ -22,10 +22,10 @@ FilterFlags::FilterFlags(QWidget *parent) : QWidget(parent)
     m_rx = makeFlag(QStringLiteral("filterRx"), QStringLiteral(":/icons/arrow-down-bold.svg"),
         tr("RX"), tr("显示接收。点一下就作用到已经收到的行"));
     m_tx = makeFlag(QStringLiteral("filterTx"), QStringLiteral(":/icons/arrow-up-bold.svg"),
-        tr("TX"), tr("显示发送。点一下就作用到已经收到的行"));
+        tr("TX"), tr("显示发送。点一下就作用到已经收到的行。纯数据时不出现在数据区。勾上「显示前缀」后按本项显示。"));
     // 紧挨 TX：桥接转发在数据区就是一条 TX+FWD。关掉它只藏这一类行，收发本身不受影响。
     m_forward = makeFlag(QStringLiteral("filterForward"), QStringLiteral(":/icons/swap-horizontal.svg"),
-        tr("转发"), tr("显示桥接转发的数据。点一下就作用到已经收到的行。关闭后仍继续转发"));
+        tr("转发"), tr("显示桥接转发的发送。点一下就作用到已经收到的行。关掉后仍继续转发。纯数据时不出现在数据区。勾上「显示前缀」后按本项显示。"));
 
     for (auto *button : {m_rx, m_tx, m_forward}) row->addWidget(button);
     // 开关都按自己的 sizeHint 占位：顶栏那一行的下限因此不需要外部求和
