@@ -32,8 +32,15 @@ signals:
 private:
     void handleManifest(QNetworkReply *reply);
     void startDownload(const UpdateOffer &offer);
+    void beginDownloadAttempt();
+    void scheduleDownloadRetry(const QString &reason);
+    void closeDownloadProgress();
+    void updateDownloadProgress(qint64 received, qint64 total);
     void finishDownload(QNetworkReply *reply);
     void discardDownload();
+    void noteDownloadBytes(qint64 received, qint64 total);
+    void logDownloadWatch();
+    void stopDownloadWatch();
     void armStallTimer(int milliseconds);
     void stopStallTimer();
     void abortStalledTransfer();
@@ -45,6 +52,9 @@ private:
     QNetworkAccessManager *m_network;
     QNetworkReply *m_reply = nullptr;
     QTimer *m_stallTimer = nullptr;
+    QTimer *m_watchTimer = nullptr;
+    QTimer *m_retryTimer = nullptr;
+    UpdateOffer m_offer;
     QString m_currentVersion;
     CheckMode m_mode = CheckMode::Automatic;
     QProgressDialog *m_progress = nullptr;
@@ -52,9 +62,15 @@ private:
     QString m_downloadPath;
     qint64 m_expectedSize = 0;
     QByteArray m_expectedSha256;
+    qint64 m_bytesReceived = 0;
+    qint64 m_bytesTotal = 0;
+    qint64 m_nextProgressLog = 0;
+    qint64 m_lastByteMs = 0;
+    int m_downloadAttempt = 0;
     bool m_busy = false;
     bool m_downloadWriteFailed = false;
     bool m_stallAborted = false;
+    bool m_userCanceledDownload = false;
     bool m_acceptWithoutPrompt = false;
 };
 
