@@ -6,6 +6,7 @@
 #include <QStringList>
 #include <QWidget>
 
+class QAbstractItemDelegate;
 class QTableWidget;
 class QPushButton;
 class QTimer;
@@ -32,6 +33,11 @@ public:
     // 当前行数。只读查询，和 commandSet() 一样属于表格的自然对外接口——
     // 保持私有会逼测试去数 child 数量来推断行数，那是错的判据。
     int rowCount() const;
+
+    // 发送框折行。关：单行，放不下就末尾省略（全文在提示里）。
+    // 开：按这一列的当前宽度折行，行高跟着长高。没有空格的 AT 指令也折。
+    void setContentWordWrap(bool wrap);
+    bool contentWordWrap() const { return m_contentWordWrap; }
 
     // ---- 批量发送进度（用户钦定：要能看出"发到哪一条了"）----
     // 三个入口由**唯一持有发送时序的那一方**（CommandPanel，它按累加延时排 QTimer）
@@ -97,6 +103,9 @@ private:
     // 列宽管理
     void updateSendColumnWidth();
     void updateTailColumnWidth();
+    // 折行开着时，列宽一变行高就得重算，否则后半段还停在旧的行高里被裁掉。
+    void scheduleContentRowRefit();
+    void refitContentRowHeights();
     // 结尾符列的所需宽度：与行内容无关，用一次性探针量（见实现里的说明）。
     int measureTailColumnWidth() const;
 
@@ -124,6 +133,14 @@ private:
     void applySendVisual(int row);
 
     QTableWidget *m_table = nullptr;
+    // 只代理「发送框」这一列。具体类型留在 cpp 里：表头不需要知道它怎么画。
+    QAbstractItemDelegate *m_contentDelegate = nullptr;
+    QTimer *m_rowRefitTimer = nullptr;
+    bool m_contentWordWrap = false;
+    bool m_refittingRows = false;
+    // 重算行高本身会改列宽（竖向滚动条出现/消失），这次重算用的是旧宽度。
+    // 记一笔，算完再补一次，避免最后一行仍按旧列宽折行。
+    bool m_refitAgain = false;
     QPushButton *m_addButton = nullptr;
     QPushButton *m_removeButton = nullptr;
     QCheckBox *m_loopSend = nullptr;

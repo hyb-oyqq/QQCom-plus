@@ -77,12 +77,12 @@ powershell.exe -File qqcom-updater.ps1 \
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 `
   -BinaryDir build/release/release `
-  -Version 1.0.1 `
-  -BaseUrl https://gitee.com/qinjmin/qqcom/releases/download/v1.0.1
+  -Version <version> `
+  -BaseUrl https://gitee.com/qinjmin/qqcom/releases/download/v<version>
 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate_ota_manifest.ps1 `
   -ManifestPath build/ota/manifest.json `
-  -PackagePath build/ota/QQCom-1.0.1-win64.zip
+  -PackagePath build/ota/QQCom-<version>-win64.zip
 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_ota.ps1
 

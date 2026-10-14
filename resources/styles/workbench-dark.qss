@@ -77,9 +77,12 @@ QPushButton#clearTraffic { background: #3a2424; border-color: #8a4038; color: #f
 QPushButton#clearTraffic:hover { background: #4a2c2c; border-color: #c0392b; color: #f8d6d1; }
 QPushButton#clearTraffic:pressed { background: #5a3330; border-color: #a7301f; color: #f8d6d1; }
 QPushButton#clearTraffic:disabled { background: #2d3548; border-color: #434d64; color: #7a8599; }
-/* 与浅色表一致：发送按钮和同排控件同高，只靠颜色和字重区分。 */
+/* 与浅色表一致：发送按钮和同排控件同高，只靠颜色和字重区分。
+   按下比常态更深，并且写在悬停后面（两者特异性相同，写反了按住时仍是悬停色）。 */
 QPushButton#PrimaryButton { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; min-height: 16px; padding: 2px 14px; }
 QPushButton#PrimaryButton:hover { background: #2860e8; border-color: #2860e8; }
+QPushButton#PrimaryButton:pressed,
+QPushButton#PrimaryButton:hover:pressed { background: #102a6b; border-color: #0b1d4d; }
 QPushButton#PrimaryButton:disabled { background: #3d4a6b; border-color: #2d3952; color: #5a6885; }
 QPushButton#fileTransferStart, QPushButton#fileReceiveStart { background: #1d4ed8; border-color: #1a45c0; color: #ffffff; font-size: 12px; font-weight: 600; }
 QPushButton#fileTransferStart:hover, QPushButton#fileReceiveStart:hover { background: #2860e8; border-color: #2860e8; }
@@ -111,8 +114,8 @@ QToolButton#advancedToggle:hover { color: #5b9eff; background: transparent; }
 QToolButton#advancedToggle:checked { color: #5b9eff; background: transparent; }
 QWidget#advancedPanel { background: #1e2433; border-top: 1px solid #2f3749; }
 QLineEdit, QComboBox, QSpinBox { background: #1e2433; border: 1px solid #434d64; border-radius: 4px; padding: 2px 6px; min-height: 16px; selection-background-color: #1d4ed8; selection-color: #ffffff; color: #e8ecf1; }
-/* 内嵌编辑框使用外层 QComboBox 的编辑区，不能再叠加通用输入框的边框和内边距。 */
-QComboBox QLineEdit { background: transparent; border: none; border-radius: 0; padding: 0; min-height: 0; }
+/* 内嵌编辑框使用外层编辑区。再叠加通用输入框的边框和内边距，数字框会比下拉框更高。 */
+QComboBox QLineEdit, QSpinBox QLineEdit { background: transparent; border: none; border-radius: 0; padding: 0; min-height: 0; }
 QLineEdit:hover, QComboBox:hover, QSpinBox:hover { border-color: #5a6885; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus { border-color: #5b9eff; }
 QLineEdit[invalid="true"], QComboBox[invalid="true"], QSpinBox[invalid="true"] { border-color: #c0392b; background: #2d1e1e; }

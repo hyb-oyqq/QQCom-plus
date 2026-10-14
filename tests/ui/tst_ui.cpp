@@ -41,6 +41,8 @@
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QSet>
+#include <QStyle>
+#include <QStyleOption>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -48,6 +50,7 @@
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QStyleOptionSpinBox>
+#include <QTableWidget>
 #include <QTabWidget>
 #include <QTcpServer>
 #include <QUdpSocket>
@@ -96,12 +99,22 @@ QStringList controlsThatClipContent(QWidget *area)
         if (!spin->isVisible()) continue;
         QStyleOptionSpinBox option;
         option.initFrom(spin);
+        // 没有上下按钮的数字框，编辑区会占满内容区。不抄按钮样式的话会把空位算成按钮。
+        option.buttonSymbols = spin->buttonSymbols();
+        option.rect = spin->rect();
         const QRect field = spin->style()->subControlRect(
             QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxEditField, spin);
         // Every value the range allows has to be readable, not just the one showing right now.
         auto *number = qobject_cast<QSpinBox *>(spin);
         QStringList samples;
-        if (number) {
+        // 波特率与端口框只保证当前文字放得下，数字变长时框再变宽。
+        const bool hugsCurrentText = spin->objectName() == QLatin1String("client.port")
+            || spin->objectName() == QLatin1String("server.port")
+            || spin->objectName() == QLatin1String("udp.port")
+            || spin->objectName() == QLatin1String("udp.targetPort");
+        if (number && hugsCurrentText) {
+            samples << number->text();
+        } else if (number) {
             for (const int value : {number->minimum(), number->maximum()})
                 samples << number->prefix() + QString::number(value) + number->suffix();
         } else {
@@ -110,8 +123,10 @@ QStringList controlsThatClipContent(QWidget *area)
         for (const auto &sample : samples) {
             const int needed = spin->fontMetrics().horizontalAdvance(sample);
             if (field.width() < needed)
-                problems << QString("%1: field %2px cannot show \"%3\" (%4px)")
-                                .arg(spin->objectName()).arg(field.width()).arg(sample).arg(needed);
+                problems << QString("%1: field %2px cannot show \"%3\" (%4px), widget %5 min %6 max %7 text \"%8\"")
+                                .arg(spin->objectName()).arg(field.width()).arg(sample).arg(needed)
+                                .arg(spin->width()).arg(spin->minimumWidth()).arg(spin->maximumWidth())
+                                .arg(spin->text());
         }
     }
     return problems;
@@ -1149,6 +1164,91 @@ private slots:
         loop->setChecked(false);
     }
 
+    // 快捷面板顶栏的「换行」：关着时发送框单行（长指令不把行撑高），
+    // 开着时按列宽折行，长指令那一行明显高于短指令。选择要记住。
+    void commandContentWrapToggle()
+    {
+        CommandPanel panel;
+        panel.setAttribute(Qt::WA_DontShowOnScreen);
+        panel.setExpanded(true);
+        panel.resize(760, 520);
+        panel.show();
+        QTest::qWait(30);
+
+        auto *wrap = panel.findChild<QPushButton *>(QStringLiteral("commandContentWrap"));
+        auto *table = panel.findChild<CommandTableWidget *>();
+        QVERIFY(wrap && table);
+        QVERIFY(wrap->isCheckable());
+        QVERIFY(!wrap->isChecked());
+        QCOMPARE(wrap->text(), QStringLiteral("换行"));
+        QVERIFY(!wrap->icon().isNull());
+        QVERIFY(!table->contentWordWrap());
+        QVERIFY2(wrap->mapTo(&panel, QPoint()).y() < table->mapTo(&panel, QPoint()).y(),
+            "换行按钮应在指令表上方");
+
+        CommandSet set;
+        set.name = QStringLiteral("折行");
+        CommandItem shortCmd;
+        shortCmd.content = QStringLiteral("AT");
+        shortCmd.description = QStringLiteral("短");
+        CommandItem longCmd;
+        longCmd.content = QString(200, QLatin1Char('W'));
+        longCmd.description = QStringLiteral("长");
+        set.commands = {shortCmd, longCmd};
+        table->setCommandSet(set);
+        QTest::qWait(30);
+
+        auto *grid = table->findChild<QTableWidget *>();
+        QVERIFY(grid);
+        const int shortOff = grid->rowHeight(0);
+        const int longOff = grid->rowHeight(1);
+        QVERIFY2(qAbs(shortOff - longOff) <= 6,
+            qPrintable(QStringLiteral("不换行时两行应同高：短 %1 长 %2").arg(shortOff).arg(longOff)));
+        QCOMPARE(grid->item(1, 2)->toolTip(), longCmd.content);
+
+        wrap->click();
+        QVERIFY(wrap->isChecked());
+        QVERIFY(table->contentWordWrap());
+        QTest::qWait(30);
+        QVERIFY2(grid->rowHeight(1) > grid->rowHeight(0) + 8,
+            qPrintable(QStringLiteral("换行后长指令应更高：短 %1 长 %2")
+                           .arg(grid->rowHeight(0)).arg(grid->rowHeight(1))));
+        // 折行只用在绘制上，单元格里存的仍是原文，不能混进零宽字符。
+        QCOMPARE(table->commandSet().commands.at(1).content, longCmd.content);
+
+        wrap->click();
+        QVERIFY(!table->contentWordWrap());
+        QTest::qWait(30);
+        QVERIFY2(qAbs(grid->rowHeight(0) - grid->rowHeight(1)) <= 6,
+            qPrintable(QStringLiteral("关掉换行后两行应回到同高：短 %1 长 %2")
+                           .arg(grid->rowHeight(0)).arg(grid->rowHeight(1))));
+
+        // 选择落盘。用单独的 ini，别碰测试进程共用的那份；指令集单例先备份再还回去。
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        PreferencesStore backup(nullptr, dir.filePath(QStringLiteral("backup.ini")));
+        CommandManager::instance()->save(&backup);
+        {
+            PreferencesStore store(nullptr, dir.filePath(QStringLiteral("wrap.ini")));
+            CommandPanel remembered;
+            remembered.setPreferencesStore(&store);
+            auto *againWrap = remembered.findChild<QPushButton *>(QStringLiteral("commandContentWrap"));
+            QVERIFY(againWrap);
+            QVERIFY(!againWrap->isChecked());
+            againWrap->click();
+            QCOMPARE(store.value(QStringLiteral("commandPanel/contentWrap")).toBool(), true);
+
+            CommandPanel restored;
+            restored.setPreferencesStore(&store);
+            auto *restoredWrap = restored.findChild<QPushButton *>(QStringLiteral("commandContentWrap"));
+            auto *restoredTable = restored.findChild<CommandTableWidget *>();
+            QVERIFY(restoredWrap && restoredTable);
+            QVERIFY(restoredWrap->isChecked());
+            QVERIFY(restoredTable->contentWordWrap());
+        }
+        CommandManager::instance()->load(&backup);
+    }
+
     // ★ 展开/收起指令面板时，**数据区宽度原地不动、窗口宽度跟着变**（用户钦定）。
     //
     // 早先的行为是"收起就把空出来的宽度全给数据区"，于是收起那一下监视区突然变宽、
@@ -1263,6 +1363,43 @@ private slots:
         QTest::qWait(50);
         QCOMPARE(splitter->widget(0)->width(), expandedData);
         QCOMPARE(window.width(), onceExpandedWindow);
+    }
+
+    // 左右拖动条要能往主界面一侧推：左列内容再宽，也不能把快捷面板的宽度封住。
+    void splitterMovesIntoTheMainColumn()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1400, 800);
+        window.show();
+        QTest::qWait(50);
+
+        auto *splitter = window.findChild<QSplitter *>(QStringLiteral("horizontalSplitter"));
+        auto *toggle = window.findChild<QPushButton *>(QStringLiteral("commandPanelToggle"));
+        QVERIFY(splitter && toggle);
+        if (!toggle->isChecked()) toggle->setChecked(true);
+        QTest::qWait(50);
+        QCOMPARE(splitter->count(), 2);
+
+        const int panelBefore = splitter->sizes().value(1);
+        int lower = -1;
+        int upper = -1;
+        splitter->getRange(1, &lower, &upper);
+        QVERIFY2(lower < 80,
+            qPrintable(QStringLiteral("往主界面拖动被内容宽度挡住：手柄最近只能到 %1（最远 %2）")
+                           .arg(lower).arg(upper)));
+
+        const int handle = qMax(0, splitter->width() - splitter->sizes().value(0)
+            - splitter->sizes().value(1));
+        splitter->setSizes({80, qMax(1, splitter->width() - handle - 80)});
+        QTest::qWait(30);
+        QVERIFY2(splitter->sizes().value(0) < 160,
+            qPrintable(QStringLiteral("主界面没有让出宽度：左列 %1")
+                           .arg(splitter->sizes().value(0))));
+        QVERIFY2(splitter->sizes().value(1) > panelBefore,
+            qPrintable(QStringLiteral("快捷面板没有变宽：%1 → %2")
+                           .arg(panelBefore).arg(splitter->sizes().value(1))));
     }
 
     void messagesCarryStructuredFacts()
@@ -1416,7 +1553,7 @@ private slots:
                  // 收起 / 把窗口拖小之后不还原，下一个用例就在"面板已收起"的前提下断言。
                  // （commandPanel/expanded 由 CommandPanel::savePreferences 写入，属既有遗漏。）
                  "window/geometry", "window/width", "window/height", "window/stayOnTop",
-                 "commandPanel/expanded"})
+                 "commandPanel/expanded", "commandPanel/contentWrap"})
             sweep.remove(QString::fromLatin1(key));
     }
 
@@ -2784,19 +2921,163 @@ private slots:
         const auto rightInWindow = [&window](QWidget *w) {
             return w->mapTo(&window, QPoint(w->width(), 0)).x();
         };
-        // 主字段（串口选择 / 本地地址）与尾部组（波特率 / 监听端口）逐列比对。
+        // 主字段左缘仍对齐。尾部框按当前文字收紧，所以 115200 比 9000 宽，右缘仍对齐。
         auto *aMain = a->findChild<QComboBox *>("serial.port");
         auto *bMain = b->findChild<QComboBox *>("server.address");
-        auto *aTrailLabel = a->findChild<QLabel *>("serial.baudLabel");
-        auto *bTrailLabel = b->findChild<QLabel *>("server.portLabel");
         auto *aTrail = a->findChild<QComboBox *>("serial.baud");
         auto *bTrail = b->findChild<QSpinBox *>("server.port");
-        QVERIFY(aMain && bMain && aTrailLabel && bTrailLabel && aTrail && bTrail);
+        QVERIFY(aMain && bMain && aTrail && bTrail);
+        QCOMPARE(aTrail->currentText(), QStringLiteral("115200"));
+        QCOMPARE(bTrail->text(), QStringLiteral("9000"));
+        // 主字段左缘仍对齐。尾部框按各自文字收紧，所以两行不必同宽。
+        // B 是 TCP 服务端，不显示「自动恢复」，参数区更宽，右缘也不强求重合。
         QCOMPARE(leftInWindow(aMain), leftInWindow(bMain));
-        QCOMPARE(rightInWindow(aMain), rightInWindow(bMain));
-        QCOMPARE(rightInWindow(aTrailLabel), rightInWindow(bTrailLabel));
-        QCOMPARE(leftInWindow(aTrail), leftInWindow(bTrail));
-        QCOMPARE(aTrail->width(), bTrail->width());
+        QVERIFY2(aTrail->width() > bTrail->width(),
+            qPrintable(QStringLiteral("115200 的框应宽于 9000：波特率 %1，监听端口 %2")
+                           .arg(aTrail->width()).arg(bTrail->width())));
+    }
+
+    // 串口行只有下拉框，网络行还有数字框。数字框不能因为内嵌编辑框再垫一层
+    // 上边距而把整行撑高，四种类型的端口条和控件顶缘必须一样。
+    void portRowsShareHeightAcrossKinds()
+    {
+        PortSelectorWidget selector;
+        selector.setAttribute(Qt::WA_DontShowOnScreen);
+        selector.resize(1100, 80);
+        selector.show();
+        QTest::qWait(30);
+        auto *type = selector.findChild<QComboBox *>(QStringLiteral("portType"));
+        QVERIFY(type);
+
+        const auto band = [&selector, type] {
+            int top = -1;
+            int height = -1;
+            const auto take = [&](QWidget *field) {
+                if (!field || field == type || !field->isVisible()) return;
+                const int y = field->mapTo(&selector, QPoint(0, 0)).y();
+                top = top < 0 ? y : qMin(top, y);
+                height = qMax(height, field->height());
+            };
+            for (auto *combo : selector.findChildren<QComboBox *>()) take(combo);
+            for (auto *spin : selector.findChildren<QSpinBox *>()) take(spin);
+            return qMakePair(top, height);
+        };
+
+        type->setCurrentIndex(0);
+        QApplication::processEvents();
+        const int barHeight = selector.height();
+        const auto serial = band();
+        QVERIFY(serial.first >= 0);
+        QVERIFY(serial.second > 0);
+        for (int kind = 1; kind < type->count(); ++kind) {
+            type->setCurrentIndex(kind);
+            QApplication::processEvents();
+            const auto current = band();
+            QVERIFY2(selector.height() == barHeight,
+                qPrintable(QStringLiteral("类型 %1 行高 %2，串口 %3")
+                               .arg(kind).arg(selector.height()).arg(barHeight)));
+            QVERIFY2(current.first == serial.first,
+                qPrintable(QStringLiteral("类型 %1 控件顶缘 %2，串口 %3")
+                               .arg(kind).arg(current.first).arg(serial.first)));
+            QVERIFY2(current.second == serial.second,
+                qPrintable(QStringLiteral("类型 %1 控件高 %2，串口 %3")
+                               .arg(kind).arg(current.second).arg(serial.second)));
+        }
+    }
+
+    void baudAndPortFieldsHugTheirText()
+    {
+        PortSelectorWidget selector;
+        selector.setAttribute(Qt::WA_DontShowOnScreen);
+        selector.resize(900, 80);
+        selector.show();
+        QTest::qWait(20);
+
+        const auto editSlack = [](QWidget *field, const QString &text, bool combo) {
+            const int textWidth = field->fontMetrics().horizontalAdvance(text);
+            int editWidth = 0;
+            if (combo) {
+                auto *box = static_cast<QComboBox *>(field);
+                QStyleOptionComboBox option;
+                option.initFrom(box);
+                option.editable = true;
+                option.currentText = text;
+                option.rect = box->rect();
+                editWidth = box->style()->subControlRect(
+                    QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxEditField, box).width();
+            } else {
+                auto *box = static_cast<QAbstractSpinBox *>(field);
+                QStyleOptionSpinBox option;
+                option.initFrom(box);
+                option.buttonSymbols = box->buttonSymbols();
+                option.rect = box->rect();
+                editWidth = box->style()->subControlRect(
+                    QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxEditField, box).width();
+            }
+            return qMakePair(editWidth - textWidth, field->width());
+        };
+        const auto hugs = [&](QWidget *field, const QString &text, bool combo) {
+            const auto slack = editSlack(field, text, combo);
+            // 编辑区盖住文字，两侧余量只留几个像素，不再按量程或 10 位上限留白。
+            if (slack.first < 0 || slack.first > 8)
+                return QStringLiteral("「%1」编辑区余量 %2（框宽 %3），应在 0～8")
+                    .arg(text).arg(slack.first).arg(slack.second);
+            return QString();
+        };
+
+        auto *baud = selector.findChild<QComboBox *>(QStringLiteral("serial.baud"));
+        auto *listen = selector.findChild<QSpinBox *>(QStringLiteral("server.port"));
+        auto *remote = selector.findChild<QSpinBox *>(QStringLiteral("client.port"));
+        auto *udpPort = selector.findChild<QSpinBox *>(QStringLiteral("udp.port"));
+        auto *targetPort = selector.findChild<QSpinBox *>(QStringLiteral("udp.targetPort"));
+        QVERIFY(baud && listen && remote && udpPort && targetPort);
+
+        QCOMPARE(baud->currentText(), QStringLiteral("115200"));
+        const QString baudFit = hugs(baud, baud->currentText(), true);
+        QVERIFY2(baudFit.isEmpty(), qPrintable(baudFit));
+        QCOMPARE(listen->text(), QStringLiteral("9000"));
+        QCOMPARE(remote->text(), QStringLiteral("9000"));
+        const QString listenFit = hugs(listen, listen->text(), false);
+        QVERIFY2(listenFit.isEmpty(), qPrintable(listenFit));
+        const QString remoteFit = hugs(remote, remote->text(), false);
+        QVERIFY2(remoteFit.isEmpty(), qPrintable(remoteFit));
+        QCOMPARE(udpPort->text(), QStringLiteral("0"));
+        QCOMPARE(targetPort->text(), QStringLiteral("9002"));
+        const QString udpFit = hugs(udpPort, udpPort->text(), false);
+        QVERIFY2(udpFit.isEmpty(), qPrintable(udpFit));
+        const QString targetFit = hugs(targetPort, targetPort->text(), false);
+        QVERIFY2(targetFit.isEmpty(), qPrintable(targetFit));
+        QVERIFY(udpPort->width() < targetPort->width());
+
+        const int shortBaud = baud->minimumWidth();
+        baud->setEditText(QStringLiteral("2147483647"));
+        QVERIFY2(baud->minimumWidth() > shortBaud,
+            qPrintable(QStringLiteral("10 位波特率应把框撑开：%1 -> %2，当前宽 %3")
+                           .arg(shortBaud).arg(baud->minimumWidth()).arg(baud->width())));
+        const QString longBaudFit = hugs(baud, QStringLiteral("2147483647"), true);
+        QVERIFY2(longBaudFit.isEmpty(), qPrintable(longBaudFit));
+
+        baud->setEditText(QStringLiteral("96"));
+        QVERIFY2(baud->minimumWidth() < shortBaud,
+            qPrintable(QStringLiteral("短波特率应把框收回：%1 -> %2")
+                           .arg(shortBaud).arg(baud->minimumWidth())));
+        const QString tinyBaudFit = hugs(baud, QStringLiteral("96"), true);
+        QVERIFY2(tinyBaudFit.isEmpty(), qPrintable(tinyBaudFit));
+
+        const int port9000 = listen->minimumWidth();
+        listen->setValue(65535);
+        QVERIFY2(listen->minimumWidth() > port9000,
+            qPrintable(QStringLiteral("65535 应比 9000 更宽：%1 -> %2，文字「%3」宽 %4")
+                           .arg(port9000).arg(listen->minimumWidth()).arg(listen->text())
+                           .arg(listen->fontMetrics().horizontalAdvance(listen->text()))));
+        const QString maxPortFit = hugs(listen, listen->text(), false);
+        QVERIFY2(maxPortFit.isEmpty(), qPrintable(maxPortFit));
+        listen->setValue(1);
+        QVERIFY2(listen->minimumWidth() < port9000,
+            qPrintable(QStringLiteral("1 应比 9000 更窄：%1 -> %2，文字「%3」")
+                           .arg(port9000).arg(listen->minimumWidth()).arg(listen->text())));
+        const QString minPortFit = hugs(listen, listen->text(), false);
+        QVERIFY2(minPortFit.isEmpty(), qPrintable(minPortFit));
     }
 
     void serialLabelsDistributeInColumn()
@@ -3347,6 +3628,69 @@ private slots:
         const int lineSpacing = editor->fontMetrics().lineSpacing();
         QVERIFY2(editor->height() >= lineSpacing * 2,
             qPrintable(QStringLiteral("正文只有 %1 行").arg(editor->height() / qMax(1, lineSpacing))));
+    }
+
+    // 发送按钮带了对象名，通用的 QPushButton:pressed 盖不住它。
+    // 按住（含悬停）时底色必须明显更深，否则看不出点没点上。尺寸不能跟着变。
+    void sendButtonDarkensWhilePressed()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        auto *send = window.findChild<QPushButton *>(QStringLiteral("PrimaryButton"));
+        QVERIFY(send && send->isVisibleTo(&window));
+        send->setEnabled(true);
+        QVERIFY(send->isEnabled());
+
+        // 文字和图标只占中间一小块。按出现次数取主色，避开抗锯齿边缘上更亮的蓝。
+        const auto fill = [](QWidget *widget) {
+            const QImage image = widget->grab().toImage();
+            QHash<QRgb, int> counts;
+            const int margin = 3;
+            for (int y = margin; y < image.height() - margin; ++y) {
+                for (int x = margin; x < image.width() - margin; ++x) {
+                    const QColor color = image.pixelColor(x, y);
+                    if (color.alpha() < 200) continue;
+                    const QRgb key = qRgb(color.red() & ~7, color.green() & ~7, color.blue() & ~7);
+                    counts[key] += 1;
+                }
+            }
+            QRgb best = 0;
+            int bestCount = -1;
+            for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
+                if (it.value() > bestCount) {
+                    bestCount = it.value();
+                    best = it.key();
+                }
+            }
+            return QColor::fromRgb(best);
+        };
+
+        const QSize size = send->size();
+        const QColor idle = fill(send);
+        // 真正点击时按钮同时处于悬停和按下。两条规则特异性相同，
+        // 按下写在悬停前面的话，这里采到的仍是悬停色。
+        send->setAttribute(Qt::WA_UnderMouse, true);
+        send->setDown(true);
+        const QColor pressed = fill(send);
+        QCOMPARE(send->size(), size);
+        send->setDown(false);
+
+        QVERIFY2(idle.isValid() && pressed.isValid(),
+            qPrintable(QStringLiteral("未采到按钮底色：常态 rgb(%1,%2,%3)，按下 rgb(%4,%5,%6)")
+                           .arg(idle.red()).arg(idle.green()).arg(idle.blue())
+                           .arg(pressed.red()).arg(pressed.green()).arg(pressed.blue())));
+        QVERIFY2(idle.blue() > pressed.blue() + 40
+                     && idle.lightness() > pressed.lightness() + 30
+                     && pressed.blue() > pressed.red() + 40
+                     && pressed.blue() > pressed.green(),
+            qPrintable(QStringLiteral("按下应明显更深的蓝：常态 rgb(%1,%2,%3)，按下 rgb(%4,%5,%6)")
+                           .arg(idle.red()).arg(idle.green()).arg(idle.blue())
+                           .arg(pressed.red()).arg(pressed.green()).arg(pressed.blue())));
     }
 
     // 展开右侧指令面板**不能**把数据区的头两行压变形（用户反馈：展开后过滤栏按钮
@@ -4247,10 +4591,44 @@ private slots:
         QTRY_VERIFY2(status->text().contains(QStringLiteral("缓冲区已满")),
             qPrintable(QStringLiteral("摘要应播报缓冲区已满：") + status->text()));
 
-        // 向上翻阅自动解除跟随；滚回顶部，第 1 条仍然在第一行。
-        text->verticalScrollBar()->triggerAction(QAbstractSlider::SliderPageStepSub);
+        // 向上翻阅自动解除跟随。滚回底部再自动打开。
+        auto *bar = text->verticalScrollBar();
+        bar->triggerAction(QAbstractSlider::SliderPageStepSub);
         QVERIFY(!follow->isChecked());
-        text->verticalScrollBar()->setValue(0);
+        bar->triggerAction(QAbstractSlider::SliderToMaximum);
+        QVERIFY(follow->isChecked());
+        QCOMPARE(bar->value(), bar->maximum());
+
+        // 拖动滑块到底部同样恢复跟随。
+        bar->triggerAction(QAbstractSlider::SliderPageStepSub);
+        QVERIFY(!follow->isChecked());
+        QStyleOptionSlider opt;
+        opt.initFrom(bar);
+        opt.orientation = bar->orientation();
+        opt.minimum = bar->minimum();
+        opt.maximum = bar->maximum();
+        opt.sliderPosition = bar->sliderPosition();
+        opt.sliderValue = bar->value();
+        opt.singleStep = bar->singleStep();
+        opt.pageStep = bar->pageStep();
+        opt.upsideDown = bar->invertedAppearance();
+        const QRect grip = bar->style()->subControlRect(
+            QStyle::CC_ScrollBar, &opt, QStyle::SC_ScrollBarSlider, bar);
+        QVERIFY2(grip.isValid() && grip.height() > 0,
+            qPrintable(QStringLiteral("滚动条滑块应可拖：%1x%2").arg(grip.width()).arg(grip.height())));
+        const QPoint from = grip.center();
+        const QPoint to(from.x(), bar->height() - 3);
+        QTest::mousePress(bar, Qt::LeftButton, Qt::NoModifier, from);
+        QTest::mouseMove(bar, to);
+        QTest::mouseRelease(bar, Qt::LeftButton, Qt::NoModifier, to);
+        QVERIFY2(follow->isChecked(),
+            qPrintable(QStringLiteral("拖到底部应恢复滚动：位置 %1 / %2")
+                           .arg(bar->value()).arg(bar->maximum())));
+
+        // 再往上翻，才能停在顶部看第 1 条。
+        bar->triggerAction(QAbstractSlider::SliderPageStepSub);
+        QVERIFY(!follow->isChecked());
+        bar->setValue(0);
         QCOMPARE(text->verticalScrollBar()->value(), 0);
         const QString firstLine = text->document()->firstBlock().text();
         QVERIFY2(firstLine.contains(QStringLiteral("01 02 03 04 05 06 07 08")),

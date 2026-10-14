@@ -3,21 +3,27 @@
 #include "ui/common/stylehelpers.h"
 #include "ui/common/styledialogs.h"
 
+#include <QAbstractItemView>
 #include <QAbstractSpinBox>
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScopedValueRollback>
 #include <QSpinBox>
+#include <QStyle>
+#include <QStyledItemDelegate>
 #include <QTableWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -98,6 +104,134 @@ QStringList tailLabels()
     return {QObject::tr("无"), QObject::tr("+\\r\\n"), QObject::tr("+\\r"), QObject::tr("+\\n")};
 }
 
+// Qt 表格的 WordWrap 只在空白处折。AT 指令几乎没有空格，开了折行也还是一行，
+// 超长的就在格里被裁掉。每个非空白字符后插一个零宽断点，样式仍按 WordWrap 画
+// （颜色、选中、省略都走样式表），断点只存在于绘制和量高，不写进单元格文本。
+QString withWrapOpportunities(const QString &text)
+{
+    QString out;
+    out.reserve(text.size() * 2);
+    for (const QChar ch : text) {
+        out += ch;
+        if (!ch.isSpace()) out += QChar(0x200B);
+    }
+    return out;
+}
+
+// 只代理发送框这一列。关：单行 + 末尾省略。开：按列宽折行，编辑时也是折行的文本框，
+// 回车仍是提交（跟原来的单行编辑一样），Shift+回车才插入真正的换行。
+class ContentColumnDelegate : public QStyledItemDelegate
+{
+public:
+    explicit ContentColumnDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
+
+    void setWrap(bool wrap) { m_wrap = wrap; }
+    bool wrap() const { return m_wrap; }
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option,
+               const QModelIndex &index) const override
+    {
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        if (m_wrap) {
+            opt.features |= QStyleOptionViewItem::WrapText;
+            opt.text = withWrapOpportunities(opt.text);
+        } else {
+            opt.features &= ~QStyleOptionViewItem::WrapText;
+        }
+        const QWidget *widget = opt.widget;
+        QStyle *style = widget ? widget->style() : QApplication::style();
+        style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, widget);
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        if (!m_wrap)
+            return QStyledItemDelegate::sizeHint(option, index);
+
+        // resizeRowsToContents 传进来的 option.rect 经常是空的。空宽度会让折行
+        // 被当成「放得下」，行高就停在单行。列宽才是这段文字实际能用的宽度。
+        int width = option.rect.width();
+        if (const auto *view = qobject_cast<const QTableView *>(option.widget))
+            width = qMax(width, view->columnWidth(index.column()));
+        if (width < 32)
+            return QStyledItemDelegate::sizeHint(option, index);
+
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        opt.features |= QStyleOptionViewItem::WrapText;
+        opt.rect.setWidth(width);
+        opt.text = withWrapOpportunities(index.data(Qt::DisplayRole).toString());
+        const QWidget *widget = opt.widget;
+        QStyle *style = widget ? widget->style() : QApplication::style();
+        QSize styled = style->sizeFromContents(QStyle::CT_ItemViewItem, &opt, QSize(), widget);
+
+        // 样式有时按「不限宽」把折行文本量成一行。再用字体自己量一遍，取更高的那个。
+        const int margin = style->pixelMetric(QStyle::PM_FocusFrameHMargin, nullptr, widget) + 1;
+        const int textWidth = qMax(1, width - margin * 2);
+        const QRect bound = opt.fontMetrics.boundingRect(
+            QRect(0, 0, textWidth, 100000),
+            int(Qt::AlignLeft | Qt::AlignTop | Qt::TextWrapAnywhere),
+            index.data(Qt::DisplayRole).toString());
+        styled.setHeight(qMax(styled.height(), bound.height() + 6));
+        return styled;
+    }
+
+    QWidget *createEditor(QWidget *parent, const QStyleOptionViewItem &option,
+                          const QModelIndex &index) const override
+    {
+        if (!m_wrap) return QStyledItemDelegate::createEditor(parent, option, index);
+
+        auto *edit = new QPlainTextEdit(parent);
+        edit->setObjectName(QStringLiteral("commandContentEditor"));
+        edit->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+        edit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        edit->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        edit->setTabChangesFocus(true);
+        edit->setFrameShape(QFrame::NoFrame);
+        edit->document()->setDocumentMargin(2);
+        return edit;
+    }
+
+    void setEditorData(QWidget *editor, const QModelIndex &index) const override
+    {
+        if (auto *plain = qobject_cast<QPlainTextEdit *>(editor)) {
+            plain->setPlainText(index.data(Qt::EditRole).toString());
+            return;
+        }
+        QStyledItemDelegate::setEditorData(editor, index);
+    }
+
+    void setModelData(QWidget *editor, QAbstractItemModel *model,
+                      const QModelIndex &index) const override
+    {
+        if (auto *plain = qobject_cast<QPlainTextEdit *>(editor)) {
+            model->setData(index, plain->toPlainText(), Qt::EditRole);
+            return;
+        }
+        QStyledItemDelegate::setModelData(editor, model, index);
+    }
+
+    bool eventFilter(QObject *object, QEvent *event) override
+    {
+        if (event->type() == QEvent::KeyPress) {
+            const auto *key = static_cast<const QKeyEvent *>(event);
+            if (qobject_cast<QPlainTextEdit *>(object)
+                && (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
+                && !(key->modifiers() & Qt::ShiftModifier)) {
+                auto *editor = static_cast<QWidget *>(object);
+                emit commitData(editor);
+                emit closeEditor(editor, QAbstractItemDelegate::SubmitModelCache);
+                return true;
+            }
+        }
+        return QStyledItemDelegate::eventFilter(object, event);
+    }
+
+private:
+    bool m_wrap = false;
+};
+
 } // namespace
 
 CommandTableWidget::CommandTableWidget(QWidget *parent) : QWidget(parent)
@@ -136,6 +270,12 @@ void CommandTableWidget::setupUi()
 
     m_table->horizontalHeader()->setStretchLastSection(false);
     m_table->horizontalHeader()->setSectionResizeMode(ContentColumn, QHeaderView::Stretch);
+    // 发送框默认单行。折行由顶栏开关打开，并且不能用表格自带的 WordWrap：
+    // 那只在空格处折，AT 指令折不动。绘制交给这一列自己的代理。
+    m_table->setWordWrap(false);
+    m_table->setTextElideMode(Qt::ElideRight);
+    m_contentDelegate = new ContentColumnDelegate(m_table);
+    m_table->setItemDelegateForColumn(ContentColumn, m_contentDelegate);
     m_table->verticalHeader()->setVisible(false);
     // 行高自适应：行内放的是真控件（勾选框 / SpinBox / ComboBox / 带 padding 的发送按钮），
     // 它们的 sizeHint 比默认行高（30px）高，QSS 又给控件加了 padding + border，于是控件会
@@ -163,7 +303,13 @@ void CommandTableWidget::setupUi()
     connect(m_table->verticalHeader(), &QHeaderView::sectionResized, this,
             [this](int first, int last, int) { syncCellWidgetGeometry(first, last); });
     connect(m_table->horizontalHeader(), &QHeaderView::sectionResized, this,
-            [this](int, int, int) { syncCellWidgetGeometry(); });
+            [this](int logical, int oldSize, int newSize) {
+                syncCellWidgetGeometry();
+                // 只有发送框的宽度变化才影响折行。重算过程中滚动条会再改一次列宽，
+                // 那一次不能在这里同步重入（见 scheduleContentRowRefit）。
+                if (m_contentWordWrap && logical == ContentColumn && oldSize != newSize)
+                    scheduleContentRowRefit();
+            });
 
     connect(m_table, &QTableWidget::cellChanged, this, &CommandTableWidget::onCellChanged);
     connect(m_table, &QTableWidget::customContextMenuRequested,
@@ -278,11 +424,13 @@ void CommandTableWidget::refreshTable()
     const UpdateGuard guard(m_updating);
     // 逐行建 cellWidget 会连续改动行高 → 触发多轮重排/重绘。整段填充期间关掉更新，
     // 只在最后一次性刷新；否则每次 refreshTable 都要走 N 轮布局（大表格下就是卡顿来源）。
-    const QSignalBlocker headerBlocker(m_table->horizontalHeader());
     m_table->setUpdatesEnabled(false);
     // 逐行填充期间挂起几何同步：否则每行 setCellWidget → 行高变化 → sectionResized →
     // 全表遍历一遍，整体退化成 O(n²)（见 syncCellWidgetGeometry 的说明）。
-    // 填充结束后下面自己调一次完整同步，结果一样。
+    // 这对守卫必须在最后一次同步之前结束。挂着的时候 sync / 行高重算会直接返回，
+    // 填充结束后那一次就变成空操作，单元格控件还停在旧位置上。
+    {
+    const QSignalBlocker headerBlocker(m_table->horizontalHeader());
     const QScopedValueRollback<bool> geometryGuard(m_geometrySyncSuspended, true);
 
     // 先清空旧内容再重建，而不是直接在原表上覆写。
@@ -340,10 +488,56 @@ void CommandTableWidget::refreshTable()
     updateSendColumnWidth();
     // 结尾符列同样按内容量——否则 "+\\r\\n" 会被裁成 "+\\"（用户实测）
     updateTailColumnWidth();
+    }
     // 行数/行高/列宽都定下来了，此时才拿到最终 visualRect，统一重排一次 cellWidget。
     // 必须在这里做——上面几步每改一步 Qt 都会重算行高，早跑等于按旧的行高摆控件。
-    syncCellWidgetGeometry();
+    // 折行开着时行高还要按最终列宽再量一次，refit 里会顺手把控件几何刷掉。
+    if (m_contentWordWrap) refitContentRowHeights();
+    else syncCellWidgetGeometry();
     m_table->viewport()->update();
+}
+
+void CommandTableWidget::setContentWordWrap(bool wrap)
+{
+    if (m_contentWordWrap == wrap) return;
+    m_contentWordWrap = wrap;
+    if (auto *delegate = static_cast<ContentColumnDelegate *>(m_contentDelegate))
+        delegate->setWrap(wrap);
+    // 关掉时也要重算：把刚才撑高的行收回去，否则单行模式还留着多行的空白。
+    refitContentRowHeights();
+    if (m_table) m_table->viewport()->update();
+}
+
+void CommandTableWidget::scheduleContentRowRefit()
+{
+    if (!m_contentWordWrap || !m_table || m_geometrySyncSuspended) return;
+    if (m_refittingRows) {
+        m_refitAgain = true;
+        return;
+    }
+    if (!m_rowRefitTimer) {
+        m_rowRefitTimer = new QTimer(this);
+        m_rowRefitTimer->setSingleShot(true);
+        connect(m_rowRefitTimer, &QTimer::timeout, this, &CommandTableWidget::refitContentRowHeights);
+    }
+    m_rowRefitTimer->start(0);
+}
+
+void CommandTableWidget::refitContentRowHeights()
+{
+    if (!m_table || m_geometrySyncSuspended || m_refittingRows) return;
+    {
+        const QScopedValueRollback<bool> guard(m_refittingRows, true);
+        m_refitAgain = false;
+        // ResizeToContents 不接受程序写进去的行高，折行量出来的高度贴不上去。
+        // 折行时改成 Interactive，按内容写好再留在这个模式；关掉折行再交回
+        // ResizeToContents，行高重新跟着行内控件走。
+        m_table->verticalHeader()->setSectionResizeMode(
+            m_contentWordWrap ? QHeaderView::Interactive : QHeaderView::ResizeToContents);
+        m_table->resizeRowsToContents();
+        syncCellWidgetGeometry();
+    }
+    if (m_refitAgain && m_contentWordWrap) scheduleContentRowRefit();
 }
 
 int CommandTableWidget::minimumContentWidth() const
@@ -591,8 +785,10 @@ void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
     noItem->setTextAlignment(Qt::AlignCenter);
     m_table->setItem(row, NumberColumn, noItem);
 
-    // 列2: 发送框（可编辑）
+    // 列2: 发送框（可编辑）。单行放不下时省略号后面还有全文，提示里始终是完整内容。
     auto *contentItem = new QTableWidgetItem(cmd.content);
+    contentItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    contentItem->setToolTip(cmd.content);
     m_table->setItem(row, ContentColumn, contentItem);
 
     // 列3: Hex（复选框控件）
@@ -972,11 +1168,17 @@ void CommandTableWidget::onCellChanged(int row, int column)
 {
     if (m_updating) return;
 
-    Q_UNUSED(row);
-
     // 勾选列已控件化（QCheckBox::toggled 直接接命令），cellChanged 不会再为它触发；
     // 这里只剩内容列。
     if (column == ContentColumn) {
+        if (auto *item = m_table->item(row, column)) {
+            // setToolTip 会再发一次 cellChanged。守卫住，避免提示和正文互相触发。
+            if (item->toolTip() != item->text()) {
+                const UpdateGuard guard(m_updating);
+                item->setToolTip(item->text());
+            }
+        }
+        if (m_contentWordWrap) refitContentRowHeights();
         emit commandsChanged();
     }
 }

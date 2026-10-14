@@ -262,7 +262,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_follow->setCheckable(true);
     m_follow->setChecked(true);
     bindToggleIcon(m_follow, QStringLiteral(":/icons/arrow-down.svg"), BarIconSize);
-    m_follow->setToolTip(tr("始终滚动到最新记录；向上翻阅时自动取消"));
+    m_follow->setToolTip(tr("始终滚动到最新记录；向上翻阅时自动取消，拖回底部自动恢复"));
     top->addWidget(m_follow);
 
     auto *clear = new QPushButton(tr("清空"));
@@ -443,14 +443,14 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         if (follow) m_text->scrollToBottom();
         savePreferences();
     });
-    // 用户拖动和滚动动作取消跟随；程序追加导致的 valueChanged 不影响跟随。
+    // 离开底部就取消跟随，拖回或滚回底部再打开。只听拖动和滚动动作：
+    // 程序追加走 valueChanged，不该把跟随状态改掉。
     connect(m_text->verticalScrollBar(), &QScrollBar::sliderMoved, this, [this](int position) {
-        if (position < m_text->verticalScrollBar()->maximum())
-            m_follow->setChecked(false);
+        m_follow->setChecked(position >= m_text->verticalScrollBar()->maximum());
     });
     connect(m_text->verticalScrollBar(), &QScrollBar::actionTriggered, this, [this](int) {
         const auto *scroll = m_text->verticalScrollBar();
-        if (scroll->sliderPosition() < scroll->maximum()) m_follow->setChecked(false);
+        m_follow->setChecked(scroll->sliderPosition() >= scroll->maximum());
     });
     updateSummary();
     // 文本视图按到达时的过滤条件收流，条件在这里做第一次汇聚；

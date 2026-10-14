@@ -9,9 +9,11 @@
 
 class QCheckBox;
 class QComboBox;
+class QEvent;
 class QLineEdit;
 class QLabel;
 class QPushButton;
+class QShowEvent;
 class QSpinBox;
 class QStackedWidget;
 class QToolButton;
@@ -52,6 +54,10 @@ signals:
     // 运行状态决定——控件自己不持有通信状态机。
     void actionRequested();
 
+protected:
+    void showEvent(QShowEvent *event) override;
+    void changeEvent(QEvent *event) override;
+
 private:
     void applyBusyState();
     void syncAutoRecover(); // TCP 服务器不提供自动恢复，其余类型显示勾选
@@ -59,6 +65,8 @@ private:
     void updateValidation();
     void updateActionLabels();
     void updateAdvancedToggle();
+    void fitHuggingFields(); // 波特率、端口按当前文字收宽度
+    void unifyParameterHeights(); // 下拉框和数字框同高，切换类型时行高和顶缘不变
     void selectSerialPort(const QString &portName);
     void selectBindAddress(const QString &key, const QString &address);
     void rememberAddress(const QString &key);

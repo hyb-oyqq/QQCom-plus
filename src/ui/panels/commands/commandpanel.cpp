@@ -6,6 +6,7 @@
 #include "persistence/preferencesstore.h"
 #include "domain/commanditem.h"
 #include "ui/common/styledialogs.h"
+#include "ui/common/tintedicon.h"
 #include <QComboBox>
 #include <QDialog>
 #include <QHBoxLayout>
@@ -14,6 +15,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QShowEvent>
+#include <QSize>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -58,12 +60,21 @@ void CommandPanel::setupUi()
     m_renameSetButton->setObjectName(QStringLiteral("renameCommandSet"));
     m_importButton = new QPushButton(tr("导入"), m_topBarWidget);
     m_exportButton = new QPushButton(tr("导出"), m_topBarWidget);
+    // 跟监视区顶栏的「换行」同一套：勾选是琥珀，图标随勾选从灰换成深琥珀。
+    // 默认不勾。指令列表以密行为主，长指令要折行时再打开。
+    m_wrapButton = new QPushButton(tr("换行"), m_topBarWidget);
+    m_wrapButton->setObjectName(QStringLiteral("commandContentWrap"));
+    m_wrapButton->setCheckable(true);
+    m_wrapButton->setIconSize(QSize(14, 14));
+    m_wrapButton->setToolTip(tr("发送框单行显示，过长内容末尾省略。点击后按列宽自动换行"));
+    bindToggleIcon(m_wrapButton, QStringLiteral(":/icons/wrap.svg"), 14);
 
     connect(m_addSetButton, &QPushButton::clicked, this, &CommandPanel::onAddSetClicked);
     connect(m_removeSetButton, &QPushButton::clicked, this, &CommandPanel::onRemoveSetClicked);
     connect(m_renameSetButton, &QPushButton::clicked, this, &CommandPanel::onRenameSetClicked);
     connect(m_importButton, &QPushButton::clicked, this, &CommandPanel::onImportClicked);
     connect(m_exportButton, &QPushButton::clicked, this, &CommandPanel::onExportClicked);
+    connect(m_wrapButton, &QPushButton::toggled, this, &CommandPanel::onContentWrapToggled);
 
     topBar->addWidget(new QLabel(tr("分组:"), m_topBarWidget));
     topBar->addWidget(m_setComboBox);
@@ -71,6 +82,7 @@ void CommandPanel::setupUi()
     topBar->addWidget(m_removeSetButton);
     topBar->addWidget(m_renameSetButton);
     topBar->addStretch();
+    topBar->addWidget(m_wrapButton);
     topBar->addWidget(m_importButton);
     topBar->addWidget(m_exportButton);
 
@@ -315,6 +327,17 @@ void CommandPanel::onExportClicked()
     }
 }
 
+void CommandPanel::onContentWrapToggled(bool wrap)
+{
+    if (m_commandTable) m_commandTable->setContentWordWrap(wrap);
+    if (m_wrapButton) {
+        m_wrapButton->setToolTip(wrap
+            ? tr("发送框按列宽自动换行。点击后改回单行，过长内容末尾省略")
+            : tr("发送框单行显示，过长内容末尾省略。点击后按列宽自动换行"));
+    }
+    savePreferences();
+}
+
 void CommandPanel::onCommandsChanged()
 {
     saveCurrentSet();
@@ -474,9 +497,17 @@ void CommandPanel::loadPreferences()
 
     CommandManager::instance()->load(m_preferences);
 
+    // 先把折行读出来。下面 setExpanded 会顺手 savePreferences，那时按钮还是默认的
+    // 「不折行」，会把已经存过的「折行」盖掉。读在保存之前才盖不掉。
+    const bool wrap = m_preferences->value(QStringLiteral("commandPanel/contentWrap"), false).toBool();
+
     // 没有这个键时收起。已经保存过的展开/收起原样恢复。
     bool expanded = m_preferences->value("commandPanel/expanded", false).toBool();
     setExpanded(expanded);
+
+    // 没有记过时保持单行。记过的按上次的选择恢复。
+    if (m_wrapButton && m_wrapButton->isChecked() != wrap)
+        m_wrapButton->setChecked(wrap);
 
     // 恢复当前选中的指令集
     QString lastSetId = m_preferences->value("commandPanel/currentSet").toString();
@@ -502,4 +533,6 @@ void CommandPanel::savePreferences()
     // 保存当前选中的指令集
     m_preferences->setValue("commandPanel/currentSet",
                             m_setComboBox->currentData().toString());
+    if (m_wrapButton)
+        m_preferences->setValue(QStringLiteral("commandPanel/contentWrap"), m_wrapButton->isChecked());
 }

@@ -10,6 +10,7 @@
 #include <QComboBox>
 #include <QAbstractItemView>
 #include <QColor>
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -17,6 +18,7 @@
 #include <QNetworkInterface>
 #include <QPushButton>
 #include <QRegularExpressionValidator>
+#include <QShowEvent>
 #include <QSpinBox>
 #include <QSignalBlocker>
 #include <QStackedWidget>
@@ -154,6 +156,95 @@ public:
     }
 };
 
+// 波特率和端口只给当前文字留位置。边框、内边距和箭头从样式里量，不写死像素。
+// 空串按一位数字留宽，清空时框不会缩没。
+bool fieldHugsText(const QString &name)
+{
+    return name == QLatin1String("serial.baud")
+        || name == QLatin1String("client.port")
+        || name == QLatin1String("server.port")
+        || name == QLatin1String("udp.port")
+        || name == QLatin1String("udp.targetPort");
+}
+
+// 与 tests/ui 的裁切检查同一条路径：initFrom 用控件自己的矩形，
+// 样式表在窄框上会多占一截，不能拿一个很宽的探测矩形去减。
+int editFieldWidth(const QWidget *field)
+{
+    if (const auto *combo = qobject_cast<const QComboBox *>(field)) {
+        QStyleOptionComboBox option;
+        option.initFrom(combo);
+        option.editable = combo->isEditable();
+        option.currentText = combo->currentText();
+        return combo->style()->subControlRect(
+            QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxEditField, combo).width();
+    }
+    if (const auto *spin = qobject_cast<const QAbstractSpinBox *>(field)) {
+        QStyleOptionSpinBox option;
+        option.initFrom(spin);
+        option.buttonSymbols = spin->buttonSymbols();
+        return spin->style()->subControlRect(
+            QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxEditField, spin).width();
+    }
+    return field->width();
+}
+
+void hugText(QWidget *field)
+{
+    if (!field || !fieldHugsText(field->objectName())) return;
+    static bool hugging = false;
+    if (hugging) return;
+    hugging = true;
+    struct Reset { ~Reset() { hugging = false; } } reset;
+    QString text;
+    if (const auto *combo = qobject_cast<const QComboBox *>(field))
+        text = combo->lineEdit() ? combo->lineEdit()->text() : combo->currentText();
+    else if (const auto *spin = qobject_cast<const QAbstractSpinBox *>(field)) {
+        if (const auto *edit = spin->findChild<QLineEdit *>())
+            text = edit->text();
+        else
+            text = spin->text();
+    } else {
+        return;
+    }
+    const QString sample = text.isEmpty() ? QStringLiteral("0") : text;
+    const int textWidth = field->fontMetrics().horizontalAdvance(sample);
+    const int height = qMax(22, qMax(field->height(), field->fontMetrics().height() + 8));
+    // 先把框拉到候选宽度，再按真实编辑区补差，直到文字放得下并留 2px。
+    int width = textWidth + 8;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        field->setMinimumWidth(0);
+        field->setMaximumWidth(QWIDGETSIZE_MAX);
+        field->resize(width, height);
+        const int edit = editFieldWidth(field);
+        if (edit >= textWidth + 2) break;
+        width += qMax(1, textWidth + 2 - edit);
+    }
+    if (field->minimumWidth() == width && field->maximumWidth() == width) return;
+    field->setFixedWidth(width);
+}
+
+void followTextWidth(QWidget *field)
+{
+    QLineEdit *edit = nullptr;
+    if (auto *combo = qobject_cast<QComboBox *>(field))
+        edit = combo->lineEdit();
+    else if (auto *spin = qobject_cast<QAbstractSpinBox *>(field))
+        edit = spin->findChild<QLineEdit *>();
+    if (edit) {
+        QObject::connect(edit, &QLineEdit::textChanged, field, [field](const QString &) {
+            hugText(field);
+        });
+    }
+    // setValue 会改显示文字，但这一版 Qt 不一定因此发出行内 textChanged。
+    if (auto *spin = qobject_cast<QSpinBox *>(field)) {
+        QObject::connect(spin, &QSpinBox::valueChanged, field, [field](int) {
+            hugText(field);
+        });
+    }
+    hugText(field);
+}
+
 // Material Design Icons are recoloured through src/ui/common/tintedicon.h; the advanced toggle
 // keeps its own two colours because it sits on the row background rather than a filled button.
 QIcon tintedIcon(const QString &path, const QColor &color)
@@ -202,13 +293,12 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     row->addWidget(m_pages, 1);
 
     // 每行的参数落进四列：前导标签列（左对齐、定宽）→ 主字段（拉伸）→ 尾部标签列
-    // （右对齐、定宽）→ 尾部字段（定宽）。两列标签与尾部字段都按全局最宽者定宽，
-    // A/B 两行、四种端点类型的"波特率 / 监听端口 / 远端端口"因此落在同一条竖线上。
-    // 短标签在这一列宽里分散对齐，例如「串口」拉开后和「监听网卡」左右缘对齐。
+    // （右对齐、定宽）→ 尾部字段。两列标签按全局最宽者定宽，短标签在列宽里分散对齐，
+    // 例如「串口」拉开后和「监听网卡」左右缘对齐。波特率与端口框不参加这一定宽：
+    // 它们按当前文字收紧，右缘跟着这一行的右端，数字变长再把框撑开。
     enum Column { Lead, Trail, Plain };
     QList<QLabel *> leadLabels;
     QList<QLabel *> trailLabels;
-    QList<QWidget *> trailFields;
     const auto addInlineLabel = [&](QHBoxLayout *target, const QString &text,
                                     QWidget *field, Column column = Trail) {
         QLabel *label = column == Plain ? new QLabel(text) : new DistributedLabel(text);
@@ -218,10 +308,9 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
             label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
             leadLabels.append(label);
         } else if (column == Trail) {
-            // 右对齐让字段左缘对齐：label 宽窄不同也不影响参数列的起点。
+            // 右对齐：标签文字贴着输入框，列宽仍取最宽的那一个。
             label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
             trailLabels.append(label);
-            trailFields.append(field);
         }
         target->addWidget(label);
         target->addWidget(field, column == Lead ? 1 : 0);
@@ -248,13 +337,10 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     baud->setValidator(new BaudRateValidator(baud));
     baud->lineEdit()->setMaxLength(10);
     baud->lineEdit()->setInputMethodHints(Qt::ImhDigitsOnly);
-    // The validator accepts the full signed-32-bit positive range, so reserve the width of
-    // its longest legal value as well as the current preset items.  AdjustToContents alone
-    // only sees the five presets and leaves the embedded editor too narrow for a typed value.
-    baud->setMinimumContentsLength(10);
-    // Editable, so it sizes itself from the presets and the minimum legal content length.
+    // 宽度跟当前数字走（followTextWidth）。10 位上限只限制能输入多长，不再把框撑开。
     baud->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     addInlineLabel(serial, tr("波特率"), baud, Trail);
+    followTextWidth(baud);
 
     auto *client = makePage(m_pages);
     auto *host = addAddress("client.host", true);
@@ -300,13 +386,6 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     const int trailLabelWidth = widestLabel(trailLabels);
     for (auto *label : trailLabels)
         label->setFixedWidth(trailLabelWidth);
-    // 尾部字段同样统一宽度：波特率是可编辑下拉框、端口是数字框，天然宽度不同，
-    // 不统一的话两行的参数列只能是"起点对齐、右缘参差"。
-    int trailFieldWidth = 0;
-    for (auto *field : trailFields)
-        trailFieldWidth = qMax(trailFieldWidth, field->sizeHint().width());
-    for (auto *field : trailFields)
-        field->setFixedWidth(trailFieldWidth);
 
     m_advanced = new QToolButton;
     m_advanced->setObjectName("advancedToggle");
@@ -438,6 +517,52 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     setAddressHistory({}, {});
     setDraft(PortDraft{});
     m_initialised = true;
+}
+
+void PortSelectorWidget::fitHuggingFields()
+{
+    if (!m_initialised) return;
+    const auto fields = findChildren<QWidget *>();
+    for (auto *field : fields)
+        hugText(field);
+}
+
+void PortSelectorWidget::unifyParameterHeights()
+{
+    if (!m_initialised) return;
+    // 串口行只有下拉框，网络行还有数字框。样式把两者算成不同高度时，
+    // 矮的那个在行里垂直居中，看起来就像离顶部更远，整行也会变矮。
+    QList<QWidget *> fields;
+    if (m_type) fields.append(m_type);
+    for (auto *field : m_fields) {
+        if (qobject_cast<QComboBox *>(field) || qobject_cast<QSpinBox *>(field))
+            fields.append(field);
+    }
+    int height = 0;
+    for (auto *field : fields)
+        height = qMax(height, field->sizeHint().height());
+    if (height <= 0) return;
+    for (auto *field : fields) {
+        if (field->minimumHeight() == height && field->maximumHeight() == height) continue;
+        field->setFixedHeight(height);
+    }
+}
+
+void PortSelectorWidget::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    // 样式抛光之后字宽才是最终值，再按当前文字收一次。
+    fitHuggingFields();
+    unifyParameterHeights();
+}
+
+void PortSelectorWidget::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::StyleChange || event->type() == QEvent::FontChange) {
+        fitHuggingFields();
+        unifyParameterHeights();
+    }
 }
 
 void PortSelectorWidget::setEndpointLabel(const QString &label)
@@ -734,9 +859,9 @@ QSpinBox *PortSelectorWidget::addNumber(const QString &key, int minimum, int max
     field->setObjectName(key);
     field->setButtonSymbols(QAbstractSpinBox::NoButtons);
     field->setRange(minimum, maximum);
-    // PortSpinBox::sizeHint() covers the range text plus the stylesheet box, so Fixed can ask
-    // the layout for exactly that and the two endpoint rows stay aligned without a pixel width.
+    // 端口按当前数字收紧。其余数字框仍靠 PortSpinBox::sizeHint() 覆盖量程两端。
     field->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    if (fieldHugsText(key)) followTextWidth(field);
     auto numericLocale = QLocale::c();
     numericLocale.setNumberOptions(QLocale::RejectGroupSeparator);
     field->setLocale(numericLocale);

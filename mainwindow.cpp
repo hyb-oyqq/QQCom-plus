@@ -41,6 +41,22 @@ constexpr int RateTickMs = 1000;
 // 状态栏右侧动作（检查更新、置顶）与端点状态块共用这一高度，中线才对齐。
 constexpr int StatusControlHeight = 20;
 
+// 左列（端口条 + 数据区）。内容有多宽只留给「展开面板」当起步宽度，
+// 不能再当成左右拖动条的停靠点：QSplitter 用子控件的 minimumSizeHint 卡住手柄，
+// 端口条和监视顶栏都很宽，手柄就拖不进主界面，快捷面板的宽度被封死。
+class LeftColumn : public QWidget
+{
+public:
+    using QWidget::QWidget;
+
+    QSize minimumSizeHint() const override
+    {
+        QSize hint = QWidget::minimumSizeHint();
+        hint.setWidth(0);
+        return hint;
+    }
+};
+
 // 动态属性变了必须重新套样式，否则 QSS 的 [state="open"] 这类选择器不会刷新。
 void restyleProperty(QWidget *widget, const char *name, const QVariant &value)
 {
@@ -250,7 +266,7 @@ MainWindow::MainWindow(QWidget *parent)
     // （两者本来就都铺到这个位置）。内容左边缘另有一层等式：这里 6 + 各自的内边距 6 = 12，
     // 端口条内容与卡片内容的缩进因此也一样——两层都要成立，界面才真正对齐
     // （用户反馈"端口选择区与数据显示区没有对齐"）。改任一项都要回头量这两个边界。
-    auto *leftColumn = new QWidget;
+    auto *leftColumn = new LeftColumn;
     m_leftColumn = leftColumn;
     auto *leftLayout = new QVBoxLayout(leftColumn);
     leftLayout->setContentsMargins(6, 0, 6, 0);
@@ -558,8 +574,11 @@ MainWindow::MainWindow(QWidget *parent)
 
     // 内容铺开要多宽，只留给「展开指令面板」当没有快照时的起步宽度。
     // 不挂到控件上，也不写进窗口：挂上之后 Qt 会把这个数当成边框拖动的硬下限。
+    // 左列自己的 minimumSizeHint 宽度已经是 0（见 LeftColumn），这里改问布局。
     m_trafficMinimumWidth = dataArea->minimumSizeHint().width();
-    m_leftColumnMinimumWidth = leftColumn->minimumSizeHint().width();
+    m_leftColumnMinimumWidth = leftColumn->layout()
+        ? leftColumn->layout()->totalMinimumSize().width()
+        : 0;
     releaseWindowSizeFloor();
 }
 

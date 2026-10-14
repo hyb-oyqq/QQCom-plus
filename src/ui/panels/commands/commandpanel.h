@@ -45,6 +45,7 @@ private slots:
     void onRenameSetClicked();
     void onImportClicked();
     void onExportClicked();
+    void onContentWrapToggled(bool wrap);
     void onCommandsChanged();
     void onSendCommand(const CommandItem &cmd);
     // rows 与 commands 一一对应且同序：时序与进度都在这一个函数里排，两边不会错开。
@@ -76,6 +77,7 @@ private:
     QPushButton *m_renameSetButton = nullptr;
     QPushButton *m_importButton = nullptr;
     QPushButton *m_exportButton = nullptr;
+    QPushButton *m_wrapButton = nullptr;
 
     CommandTableWidget *m_commandTable = nullptr;
 
