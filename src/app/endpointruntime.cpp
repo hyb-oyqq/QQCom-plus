@@ -109,12 +109,9 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
     if (!transport) return;
     m_transports[index] = transport;
     const quint64 generation = m_generations[index];
-    // 打开成功后再丢一次还没读走的输入。关闭路径不丢，意外断开留下的内容按原会话处理。
-    connect(transport, &AbstractTransport::stateChanged, this,
-        [this, index, generation](quint64 gen, int state, const QString &) {
-            if (gen != m_generations[index] || state != int(Transport::State::Open)) return;
-            if (auto *opened = m_transports[index]) opened->discardPendingInput();
-        });
+    // 不要在 Open 之后再 discardPendingInput()。此时 readyRead 已经接上，
+    // 这次清空会吃掉刚到达的第一包；串口上还会对空缓冲 readAll()，打断 WaitCommEvent。
+    // 打开前的残留由各传输在订阅之前处理。关闭路径不丢，意外断开留下的内容按原会话处理。
 
     // 连接按代次闭包：实例被替换后，旧实例晚到的信号一律丢弃。
     connect(transport, &AbstractTransport::stateChanged, this,
@@ -181,11 +178,10 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
                     Traffic::Origin::Automatic, payload, Traffic::Framing(framing));
                 message.source = source; // 传输层带 peer/代次的完整来源
                 publish(std::move(message));
-                if (!payload.isEmpty())
-                    forwardReceived(index, payload);
-                return;
+            } else {
+                feedFramer(index, source, payload);
             }
-            feedFramer(index, source, payload);
+            // 空载荷不转发：零长 UDP 仍是一条接收，但没有字节可写到另一端。
             if (!payload.isEmpty())
                 forwardReceived(index, payload);
         });
@@ -210,7 +206,7 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             publish(std::move(notice));
         });
     connect(transport, &AbstractTransport::errorOccurred, this,
-        [this, index, generation](quint64 gen, const QString &text) {
+        [this, index, generation](quint64 gen, const QString &text, qint64 droppedBytes) {
             if (gen != m_generations[index]) return;
             // 自动恢复已经记过一次等待说明后，后续每拍失败不再写日志。
             if (m_drafts[index].autoRecover && m_recoverNoticeSent[index]) return;
@@ -220,6 +216,8 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             m_pendingFailureGeneration[index] = generation;
             auto message = makeMessage(index, Traffic::Direction::Error, Traffic::Origin::Automatic,
                 {}, Traffic::Framing::Message);
+            // 读出失败的字节数留在这条错误上。写出失败另有丢弃行，这里保持 0。
+            message.rawLength = qMax<qint64>(0, droppedBytes);
             message.statusText = QStringLiteral("%1 · %2")
                 .arg(endpointIdentity(index, m_drafts[index]), text);
             publish(std::move(message));
@@ -275,16 +273,10 @@ void EndpointRuntime::sendPayload(int index, const QByteArray &payload, int orig
     const qint64 accepted = transport ? transport->write(payload, QUuid()) : -1;
     if (transport)
         message.source.peerAddress = transport->writeAddress(QUuid());
-    if (accepted < 0) {
-        message.state = Traffic::State::Failed;
-        message.statusText = transport ? tr("写入被拒绝：端口未就绪或无可用目标") : tr("端口未打开");
-    } else if (accepted >= payload.size()) {
-        message.state = Traffic::State::LocalCompleted;
-    } else {
-        message.state = Traffic::State::Partial;
-        message.statusText = tr("本地接受 %1/%2 字节").arg(accepted).arg(payload.size());
-    }
+    const auto loss = noteTransmitResult(message, accepted,
+        transport ? tr("写入被拒绝：端口未就绪或无可用目标") : tr("端口未打开"));
     publish(std::move(message));
+    publishDrop(index, loss.bytes, loss.reason, loss.brief);
 }
 
 void EndpointRuntime::setBridge(const BridgeLink &link, const PortDraft &endpointA, const PortDraft &endpointB)
@@ -320,10 +312,31 @@ void EndpointRuntime::setBridge(const BridgeLink &link, const PortDraft &endpoin
     publish(std::move(message));
 }
 
+void EndpointRuntime::publishDrop(int index, qint64 bytes, const QString &reason,
+    const QString &brief)
+{
+    if (bytes <= 0) return;
+    auto message = makeMessage(index, Traffic::Direction::Error, Traffic::Origin::Automatic,
+        {}, Traffic::Framing::Message);
+    message.rawLength = bytes;
+    message.statusText = reason;
+    message.statusBrief = brief;
+    publish(std::move(message));
+}
+
 void EndpointRuntime::discardPendingInput()
 {
-    for (auto *transport : m_transports)
-        if (transport) transport->discardPendingInput();
+    for (int index = 0; index < EndpointCount; ++index) {
+        auto *transport = m_transports[index];
+        if (!transport) continue;
+        const qint64 dropped = transport->discardPendingInput();
+        const QString identity = endpointIdentity(index, m_drafts[index]);
+        const QString letter = identity.isEmpty() ? QString() : identity.left(1);
+        publishDrop(index, dropped,
+            tr("%1 · 建立桥接前丢弃未读数据 %2 字节").arg(identity).arg(dropped),
+            letter.isEmpty() ? tr("建桥丢弃 %1 字节").arg(dropped)
+                             : tr("%1 建桥丢弃 %2 字节").arg(letter).arg(dropped));
+    }
 }
 
 void EndpointRuntime::forwardReceived(int index, const QByteArray &payload)
@@ -333,18 +346,51 @@ void EndpointRuntime::forwardReceived(int index, const QByteArray &payload)
     auto *transport = m_transports[target];
     if (!transport) return;
     // 原样交给另一端。转发写出不再回到这里，所以 A↔B 不会自己绕回来。
+    // 写失败也要留下 TX 记录。以前直接 return，对端没收到时数据区完全没有痕迹。
     const qint64 accepted = transport->write(payload, QUuid());
-    if (accepted < 0) return;
     auto message = makeMessage(target, Traffic::Direction::Transmit, Traffic::Origin::Forward,
         payload, Traffic::Framing::Message);
     message.source.peerAddress = transport->writeAddress(QUuid());
-    if (accepted >= payload.size()) {
-        message.state = Traffic::State::LocalCompleted;
-    } else {
-        message.state = Traffic::State::Partial;
-        message.statusText = tr("本地接受 %1/%2 字节").arg(accepted).arg(payload.size());
-    }
+    const auto loss = noteTransmitResult(message, accepted, tr("转发写入被拒绝：端口未就绪或无可用目标"));
     publish(std::move(message));
+    publishDrop(target, loss.bytes, loss.reason, loss.brief);
+}
+
+EndpointRuntime::TransmitLoss EndpointRuntime::noteTransmitResult(Traffic::Message &message,
+    qint64 accepted, const QString &rejectedText)
+{
+    const int index = message.source.endpointIndex;
+    const QString identity = index >= 0 && index < EndpointCount
+        ? endpointIdentity(index, m_drafts[index]) : QString();
+    // 状态栏只放端点字母。地址留在全文里，悬停和数据区仍能看到。
+    const QString letter = identity.isEmpty() ? QString() : identity.left(1);
+    const bool forwarded = message.origin == Traffic::Origin::Forward;
+    const qint64 total = message.raw.size();
+    TransmitLoss loss;
+    if (accepted < 0) {
+        message.state = Traffic::State::Failed;
+        message.statusText = rejectedText;
+        loss.bytes = total;
+        loss.reason = tr("%1 · 丢弃未写出数据 %2 字节：%3")
+            .arg(identity, QString::number(total), rejectedText);
+        loss.brief = letter.isEmpty()
+            ? (forwarded ? tr("转发丢弃 %1 字节").arg(total) : tr("未写出 %1 字节").arg(total))
+            : (forwarded ? tr("%1 转发丢弃 %2 字节").arg(letter).arg(total)
+                         : tr("%1 未写出 %2 字节").arg(letter).arg(total));
+        return loss;
+    }
+    if (accepted >= total) {
+        message.state = Traffic::State::LocalCompleted;
+        return loss;
+    }
+    loss.bytes = total - qMax<qint64>(0, accepted);
+    message.state = Traffic::State::Partial;
+    message.statusText = tr("本地接受 %1/%2 字节，丢弃 %3 字节").arg(accepted).arg(total).arg(loss.bytes);
+    loss.reason = tr("%1 · 丢弃未写出数据 %2 字节").arg(identity, QString::number(loss.bytes));
+    loss.brief = letter.isEmpty()
+        ? tr("未写完 %1 字节").arg(loss.bytes)
+        : tr("%1 未写完 %2 字节").arg(letter).arg(loss.bytes);
+    return loss;
 }
 
 void EndpointRuntime::retireTransport(int index)

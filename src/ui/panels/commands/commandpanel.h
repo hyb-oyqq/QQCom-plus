@@ -86,6 +86,9 @@ private:
     // 没有保存过展开状态时收起。构造时先落到几何上，偏好读到后再改。
     bool m_expanded = false;
     bool m_updatingSets = false;
+    // 恢复偏好期间挡住 savePreferences。setExpanded / 换行 / 切分组都会顺手保存，
+    // 中间状态若写出去，会把已经存过的分组盖成第一组。
+    bool m_loading = false;
     QUuid m_currentSetId;
     // 展开时的最小宽度与两项宽度来源（顶栏 / 表格内容）：
     // 窗口不够宽时，这些值会被主窗口并入"窗口最小宽度"的计算，宁可把窗口撑开，

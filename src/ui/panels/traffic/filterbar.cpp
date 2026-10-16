@@ -111,7 +111,7 @@ FilterBar::FilterBar(QWidget *parent) : QWidget(parent)
     // 加上「应用」这两个字就是用户对它的描述：为当前所有已到达的数据应用一次。
     m_rebuild = new QPushButton(tr("应用过滤"), this);
     m_rebuild->setObjectName("filterRebuild");
-    m_rebuild->setIcon(mutedIcon(QStringLiteral(":/icons/filter-check-outline.svg"), BarIconSize));
+    setMutedIcon(m_rebuild, QStringLiteral(":/icons/filter-check-outline.svg"), BarIconSize);
     m_rebuild->setToolTip(tr("把当前过滤条件应用到缓冲内已经收到的记录，不设条数上限。纯数据时仍只显示其中的接收数据。"));
     m_rebuild->setEnabled(false); // 还没收到任何记录时没什么可应用的
     connect(m_rebuild, &QPushButton::clicked, this, [this] {
@@ -123,7 +123,7 @@ FilterBar::FilterBar(QWidget *parent) : QWidget(parent)
     // 与「应用过滤」一样带文案（用户要求）：一对动作按钮，一个只有图标会让人猜。
     m_reset = new QPushButton(tr("清除过滤"), this);
     m_reset->setObjectName("filterReset");
-    m_reset->setIcon(mutedIcon(QStringLiteral(":/icons/filter-off.svg"), BarIconSize));
+    setMutedIcon(m_reset, QStringLiteral(":/icons/filter-off.svg"), BarIconSize);
     m_reset->setToolTip(tr("停用关键词过滤，方向和事件开关全部勾回。已输入的词保留。纯数据时仍只显示接收。"));
     connect(m_reset, &QPushButton::clicked, this, [this] {
         // **只停用过滤，不丢用户输入的条件**：清掉输入框等于让用户重敲一遍
@@ -174,7 +174,11 @@ QLineEdit *FilterBar::makeInput(const QString &iconPath, const QString &placehol
     // 前导字形当"字段名"用：比一个文字标签省三四十像素，恒单行就是靠这些省出来的。
     // 用「上移」版图标：Qt 落 action 图标的位置比文字视觉中线低约 2 逻辑像素，
     // mutedIcon 无法表达这个修正（见 tintedicon.h::liftedMutedIcon 的说明）。
-    input->addAction(liftedMutedIcon(iconPath, FilterInputIconSize), QLineEdit::LeadingPosition);
+    auto *leading = input->addAction(liftedMutedIcon(iconPath, FilterInputIconSize),
+                                     QLineEdit::LeadingPosition);
+    QObject::connect(AppTheme::instance(), &AppTheme::schemeChanged, input, [leading, iconPath] {
+        leading->setIcon(liftedMutedIcon(iconPath, FilterInputIconSize));
+    });
     // **垂直方向钉成 Fixed**（水平仍由调用方的 stretch 决定）：QLineEdit 的高度一旦被
     // 布局拉伸，多出来的空间会全部堆在底面——QSS 的 padding 是固定值，Qt 不会把文本与
     // 前导图标重新居中，于是两者都贴向顶部（实测框高 46px 而自然高只有 ~35px，图标与

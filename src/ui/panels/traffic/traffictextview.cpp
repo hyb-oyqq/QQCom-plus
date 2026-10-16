@@ -1,4 +1,5 @@
 #include "traffictextview.h"
+#include "ui/common/apptheme.h"
 
 #include <QChar>
 #include <QColor>
@@ -18,28 +19,47 @@ constexpr int CharTrimReservePercent = 10; // 一次淘汰到预算的 90%，避
 // 前缀元信息（行号/时间/长度）与正文同色（#1C2430）——用户钦定：前缀加粗后与正文
 // 同色，靠字重区分，不再靠颜色深浅分主次；对比度即正文对比度，比原先的灰前缀更高。
 // HEX 对照行保持浅色不动：它是数据行的附注，不是前缀的一部分。
-const QColor MetaColor(0x1C, 0x24, 0x30);
-const QColor BodyColor(0x1C, 0x24, 0x30);
-// HEX 对照行的颜色：它是数据行的**附注**而不是数据本身。用比正文和前缀都浅的
-// 次要中性色，上下两行一眼就能分出"哪行是主体、哪行是对照"，不必读内容。
-const QColor HexCompanionColor(0x6B, 0x76, 0x86);
-// 方向令牌：前缀里的语义色，同样按"高对比"选——这几个值在浅底上的对比度都 ≥ 6:1
-// （RX 与警告比初版各深了一档，初版在加粗后仍显轻）。改色先看这张表。
-const QColor TxColor(0x1D, 0x4E, 0xD8);     // 发送：工作台主蓝
-const QColor RxColor(0x04, 0x6C, 0x4E);     // 接收：饱和绿（深一档，加粗后更实）
-// 端口字母用独立色，不跟方向色走。A 琥珀、B 青，与端口配置行前的徽章同色；
-// 和顶栏过滤按钮的使能黄、RX 绿、TX 蓝错开。桥接等不属于某一端的行不画字母。
-const QColor PortAColor(0xB4, 0x53, 0x09);
-const QColor PortBColor(0x0E, 0x74, 0x90);
-const QColor StateColor(0x6D, 0x28, 0xD9);  // 状态迁移：紫
-const QColor WarningColor(0x92, 0x40, 0x0E); // 警告：深琥珀（同上，深一档）
-const QColor ErrorColor(0xC6, 0x28, 0x28);  // 错误：饱和红
+//
+// 这些颜色画进 QTextCharFormat，样式表改不了它们。浅色值是界面测试钉死的，不能漂。
+// 深色表面（监视区底 #1e2433）上同一套深字会看不见，所以深色主题另取一档亮色。
+// 端口身份色不跟着变：A 琥珀、B 青与徽章同一套，深色表也这么定。
+QColor MetaColor()
+{
+    return AppTheme::isDark() ? QColor(0xE8, 0xEC, 0xF1) : QColor(0x1C, 0x24, 0x30);
+}
+QColor BodyColor() { return MetaColor(); }
+QColor HexCompanionColor()
+{
+    return AppTheme::isDark() ? QColor(0x8B, 0x95, 0xA8) : QColor(0x6B, 0x76, 0x86);
+}
+QColor TxColor()
+{
+    return AppTheme::isDark() ? QColor(0x8E, 0xB6, 0xFF) : QColor(0x1D, 0x4E, 0xD8);
+}
+QColor RxColor()
+{
+    return AppTheme::isDark() ? QColor(0x34, 0xD3, 0x99) : QColor(0x04, 0x6C, 0x4E);
+}
+QColor PortAColor() { return QColor(0xB4, 0x53, 0x09); }
+QColor PortBColor() { return QColor(0x0E, 0x74, 0x90); }
+QColor StateColor()
+{
+    return AppTheme::isDark() ? QColor(0xC4, 0xB5, 0xFD) : QColor(0x6D, 0x28, 0xD9);
+}
+QColor WarningColor()
+{
+    return AppTheme::isDark() ? QColor(0xF6, 0xD7, 0xA8) : QColor(0x92, 0x40, 0x0E);
+}
+QColor ErrorColor()
+{
+    return AppTheme::isDark() ? QColor(0xF0, 0xA8, 0xA8) : QColor(0xC6, 0x28, 0x28);
+}
 
 QColor portColor(int endpointIndex)
 {
-    if (endpointIndex == 0) return PortAColor;
-    if (endpointIndex == 1) return PortBColor;
-    return MetaColor;
+    if (endpointIndex == 0) return PortAColor();
+    if (endpointIndex == 1) return PortBColor();
+    return MetaColor();
 }
 
 QString portLetter(int endpointIndex)
@@ -60,22 +80,22 @@ QString directionArrow(Traffic::Direction direction)
 QColor directionColor(Traffic::Direction direction)
 {
     switch (direction) {
-    case Traffic::Direction::Transmit: return TxColor;
-    case Traffic::Direction::Receive: return RxColor;
-    case Traffic::Direction::State: return StateColor;
-    case Traffic::Direction::Warning: return WarningColor;
-    case Traffic::Direction::Error: return ErrorColor;
+    case Traffic::Direction::Transmit: return TxColor();
+    case Traffic::Direction::Receive: return RxColor();
+    case Traffic::Direction::State: return StateColor();
+    case Traffic::Direction::Warning: return WarningColor();
+    case Traffic::Direction::Error: return ErrorColor();
     }
-    return MetaColor;
+    return MetaColor();
 }
 
 // 正文底色：数据行保持近黑（数据是主体），错误/警告行整行着色——
 // 这两类是排障时的第一目标，颜色比文字更快被眼睛抓住。
 QColor bodyColorFor(Traffic::Direction direction)
 {
-    if (direction == Traffic::Direction::Error) return ErrorColor;
-    if (direction == Traffic::Direction::Warning) return WarningColor;
-    return BodyColor;
+    if (direction == Traffic::Direction::Error) return ErrorColor();
+    if (direction == Traffic::Direction::Warning) return WarningColor();
+    return BodyColor();
 }
 
 // 行号顶格左对齐：右对齐补的空格在自动换行下看起来像首行缩进，
@@ -84,14 +104,29 @@ QColor bodyColorFor(Traffic::Direction direction)
 
 // ANSI SGR 前景色调色板：浅色背景下可直接阅读的标准 8 色 + 亮色 8 色。
 // "白/亮白"映射为浅灰——纯白在浅底上不可见，控制台惯例按可读性处理。
-const QColor AnsiPalette[8] = {
-    QColor(0x3F, 0x4A, 0x5A), QColor(0xC6, 0x28, 0x28), QColor(0x1A, 0x7F, 0x37),
-    QColor(0x9A, 0x67, 0x00), QColor(0x1D, 0x4E, 0xD8), QColor(0xA0, 0x20, 0x9E),
-    QColor(0x00, 0x85, 0x77), QColor(0x5C, 0x6B, 0x7A)};
-const QColor AnsiBrightPalette[8] = {
-    QColor(0x6B, 0x76, 0x86), QColor(0xE0, 0x52, 0x52), QColor(0x2D, 0xA4, 0x4E),
-    QColor(0xB0, 0x88, 0x00), QColor(0x4D, 0x7F, 0xE3), QColor(0xC0, 0x4A, 0xD4),
-    QColor(0x00, 0xA0, 0xBB), QColor(0x8A, 0x94, 0xA6)};
+// 深色底上反过来：黑和深灰看不见，白才是正文色。
+QColor ansiColor(int index, bool bright)
+{
+    static const QColor light[8] = {
+        QColor(0x3F, 0x4A, 0x5A), QColor(0xC6, 0x28, 0x28), QColor(0x1A, 0x7F, 0x37),
+        QColor(0x9A, 0x67, 0x00), QColor(0x1D, 0x4E, 0xD8), QColor(0xA0, 0x20, 0x9E),
+        QColor(0x00, 0x85, 0x77), QColor(0x5C, 0x6B, 0x7A)};
+    static const QColor lightBright[8] = {
+        QColor(0x6B, 0x76, 0x86), QColor(0xE0, 0x52, 0x52), QColor(0x2D, 0xA4, 0x4E),
+        QColor(0xB0, 0x88, 0x00), QColor(0x4D, 0x7F, 0xE3), QColor(0xC0, 0x4A, 0xD4),
+        QColor(0x00, 0xA0, 0xBB), QColor(0x8A, 0x94, 0xA6)};
+    static const QColor dark[8] = {
+        QColor(0xD5, 0xDB, 0xE3), QColor(0xF0, 0xA8, 0xA8), QColor(0x6E, 0xE7, 0xB7),
+        QColor(0xFB, 0xBF, 0x24), QColor(0x93, 0xC5, 0xFD), QColor(0xE8, 0x79, 0xF9),
+        QColor(0x67, 0xE8, 0xF9), QColor(0xE8, 0xEC, 0xF1)};
+    static const QColor darkBright[8] = {
+        QColor(0x9A, 0xA3, 0xB2), QColor(0xFC, 0xA5, 0xA5), QColor(0x86, 0xEF, 0xAC),
+        QColor(0xFD, 0xE6, 0x8A), QColor(0xBF, 0xDB, 0xFE), QColor(0xF0, 0xAB, 0xFC),
+        QColor(0xA5, 0xF3, 0xFC), QColor(0xF8, 0xFA, 0xFC)};
+    const QColor *table = AppTheme::isDark() ? (bright ? darkBright : dark)
+                                             : (bright ? lightBright : light);
+    return table[index];
+}
 
 // 文本分片：一段文本 + 它的字符格式。ANSI 解析按颜色边界切分载荷，
 // 同格式连续文本合并成一片；无 ANSI 的载荷整体是一片（快速路径）。
@@ -151,8 +186,8 @@ QList<TextRun> toRuns(const QString &payload, const QTextCharFormat &base)
             else if (value == 1) fmt.setFontWeight(QFont::Bold);
             else if (value == 22 || value == 39) {
                 fmt = base;
-            } else if (value >= 30 && value <= 37) fmt.setForeground(AnsiPalette[value - 30]);
-            else if (value >= 90 && value <= 97) fmt.setForeground(AnsiBrightPalette[value - 90]);
+            } else if (value >= 30 && value <= 37) fmt.setForeground(ansiColor(value - 30, false));
+            else if (value >= 90 && value <= 97) fmt.setForeground(ansiColor(value - 90, true));
         }
         i = end + 1;
     }
@@ -200,13 +235,13 @@ void TrafficTextView::appendMessages(
     cursor.beginEditBlock();
 
     QTextCharFormat metaFormat;
-    metaFormat.setForeground(MetaColor);
+    metaFormat.setForeground(MetaColor());
     // 前缀整段 DemiBold（用户钦定）：行号/时间/长度是扫读锚点，加粗后与正文的
     // 分界靠字重而不是颜色深浅（颜色已与正文同色），浅色主题下也一眼可辨。
     metaFormat.setFontWeight(QFont::DemiBold);
     // HEX 对照行：更浅的次要色，与数据行分层。
     QTextCharFormat hexFormat;
-    hexFormat.setForeground(HexCompanionColor);
+    hexFormat.setForeground(HexCompanionColor());
 
     // 有前缀时，空文档的首行直接写进已有空块，之后每条消息先补一个块分隔符。
     // 纯数据不在消息边界换行：文档里已有内容时，新字节接着上一包写。

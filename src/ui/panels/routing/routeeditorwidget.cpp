@@ -42,12 +42,16 @@ RouteEditorWidget::RouteEditorWidget(QWidget *parent) : QWidget(parent)
     m_direction = new QComboBox;
     m_direction->setObjectName("routeDirection");
     m_direction->setIconSize(QSize(DirectionIconSize, DirectionIconSize));
-    m_direction->addItem(mutedIcon(QStringLiteral(":/icons/arrow-right.svg"), DirectionIconSize),
-                         tr("A → B"));
-    m_direction->addItem(mutedIcon(QStringLiteral(":/icons/arrow-left.svg"), DirectionIconSize),
-                         tr("B → A"));
-    m_direction->addItem(mutedIcon(QStringLiteral(":/icons/swap-horizontal.svg"), DirectionIconSize),
-                         tr("A ↔ B"));
+    const auto refreshDirectionIcons = [this] {
+        m_direction->setItemIcon(0, mutedIcon(QStringLiteral(":/icons/arrow-right.svg"), DirectionIconSize));
+        m_direction->setItemIcon(1, mutedIcon(QStringLiteral(":/icons/arrow-left.svg"), DirectionIconSize));
+        m_direction->setItemIcon(2, mutedIcon(QStringLiteral(":/icons/swap-horizontal.svg"), DirectionIconSize));
+    };
+    m_direction->addItem(QIcon(), tr("A → B"));
+    m_direction->addItem(QIcon(), tr("B → A"));
+    m_direction->addItem(QIcon(), tr("A ↔ B"));
+    refreshDirectionIcons();
+    connect(AppTheme::instance(), &AppTheme::schemeChanged, m_direction, refreshDirectionIcons);
     m_direction->setCurrentIndex(2);
     fitComboToItems(m_direction);
     m_direction->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);

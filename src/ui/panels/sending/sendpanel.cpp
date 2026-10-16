@@ -4,6 +4,7 @@
 #include "ui/common/buttonmetrics.h"
 #include "ui/common/combometrics.h"
 #include "ui/common/payloadcodec.h"
+#include "ui/common/apptheme.h"
 #include "ui/common/tintedicon.h"
 #include "persistence/preferencesstore.h"
 
@@ -271,6 +272,9 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     m_tabs = new ModeTabs(this);
     m_tabs->setObjectName(QStringLiteral("sendModeTabs"));
     m_tabs->setDocumentMode(true);
+    // Fusion 在页签上沿另画一条基线，颜色取调色板的浅色，样式表改不掉。
+    // 暗色下它就是页签右侧那条白边。基线关掉后，页签自己的边框仍然在。
+    m_tabs->tabBar()->setDrawBase(false);
     m_tabs->addTab(manualPage, tr("手动发送"));
     m_tabs->addTab(m_fileTransfer->sendPage(), tr("发送文件"));
     m_tabs->addTab(m_fileTransfer->receivePage(), tr("接收文件"));
@@ -278,8 +282,8 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
     // 选中页用和页签文字同一档蓝，其余保持静音灰。QSS 改不了 QIcon 的颜色。
     const auto refreshTabIcons = [this] {
         if (!m_tabs) return;
-        const QColor idle(0x64, 0x75, 0x90);
-        const QColor active(0x1d, 0x4e, 0xd8);
+        const QColor idle = mutedInk();
+        const QColor active = accentInk();
         const QStringList paths{QStringLiteral(":/icons/send.svg"),
             QStringLiteral(":/icons/file-upload.svg"),
             QStringLiteral(":/icons/file-download.svg")};
@@ -288,6 +292,7 @@ SendPanel::SendPanel(QWidget *parent) : QWidget(parent)
                 i == m_tabs->currentIndex() ? active : idle, GlyphSize));
     };
     refreshTabIcons();
+    connect(AppTheme::instance(), &AppTheme::schemeChanged, this, refreshTabIcons);
     root->addWidget(m_tabs, 0);
     connect(m_tabs, &QTabWidget::currentChanged, this, [this, refreshTabIcons](int) {
         refreshTabIcons();

@@ -79,9 +79,20 @@ private:
     void flushSession(int index, ReceiveSession &session, ReceiveFramer::Trigger trigger);
     void flushFramers(int index, ReceiveFramer::Trigger trigger);
     void removeDisconnectedPeers(int index, const QList<Transport::PeerInfo> &peers);
-    // 打开端点或建立桥接时丢掉还没读走的输入，避免旧字节进入本次会话或被转发。
+    // 建立桥接时丢掉还没读走的输入，避免旧字节被转发。打开端点不在这里丢。
+    // 丢掉的字节记成错误行，界面据此累计丢弃量。
     void discardPendingInput();
+    void publishDrop(int index, qint64 bytes, const QString &reason, const QString &brief = {});
     void forwardReceived(int index, const QByteArray &payload);
+    // 手动发送和桥接转发共用：write() 的返回值分成失败、本地完成、部分接受。
+    // 没写上的字节数和原因交给调用方，先发出发送记录，再记一条丢弃错误。
+    struct TransmitLoss
+    {
+        qint64 bytes = 0;
+        QString reason; // 数据区和日志用的全文
+        QString brief;  // 状态栏短句，避免右对齐把地址裁掉
+    };
+    TransmitLoss noteTransmitResult(Traffic::Message &message, qint64 accepted, const QString &rejectedText);
 
     // 打开失败的自动恢复只记一条警告。成功或用户停止后清掉，下次失败再记。
     bool m_recoverNoticeSent[EndpointCount] = {};

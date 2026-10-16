@@ -1,6 +1,7 @@
 #include "commandtablewidget.h"
 #include "ui/common/combometrics.h"
 #include "ui/common/stylehelpers.h"
+#include "ui/common/apptheme.h"
 #include "ui/common/styledialogs.h"
 
 #include <QAbstractItemView>
@@ -581,6 +582,20 @@ QWidget *CommandTableWidget::wrapCentered(QWidget *content)
     return host;
 }
 
+QWidget *CommandTableWidget::wrapFilled(QWidget *content)
+{
+    // 发送按钮按列宽铺开。居中会让按钮停在文字宽度上，列更宽时两边露出格子底，
+    // 点文字两侧等于点空。横向撑满，上下仍留一点空隙，避免贴住网格线。
+    auto *host = new QWidget;
+    auto *layout = new QHBoxLayout(host);
+    layout->setContentsMargins(2, 1, 2, 1);
+    layout->setSpacing(0);
+    content->setParent(host);
+    content->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    layout->addWidget(content, 1);
+    return host;
+}
+
 void CommandTableWidget::syncCellWidgetGeometry(int fromRow, int toRow)
 {
     if (!m_table || m_syncingGeometry) return;
@@ -719,14 +734,15 @@ void CommandTableWidget::updateSendColumnWidth()
 {
     if (!m_table) return;
 
+    // 按钮已经铺满列宽，列宽不用再跟着最长名称长。短名称保持下限，
+    // 长名称在上限内加宽，超出的部分仍由按钮省略，全文在提示里。
     int widest = 0;
     for (int row = 0; row < m_table->rowCount(); ++row) {
         if (auto *button = sendButtonAt(row)) {
             widest = qMax(widest, button->sizeHint().width());
         }
     }
-    // 空表时回落到下限，别把列压没
-    const int wanted = widest > 0 ? widest + 12 : SendColumnMinWidth;
+    const int wanted = widest > 0 ? widest + 6 : SendColumnMinWidth;
     const int width = qBound(SendColumnMinWidth, wanted, SendColumnMaxWidth);
     if (m_table->columnWidth(SendColumn) != width) {
         m_table->setColumnWidth(SendColumn, width);
@@ -845,19 +861,19 @@ void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
     // 描述另存一份到属性：空名称时按钮显示占位"发送"，直接读按钮文本会把占位当成名字
     sendButton->setProperty("description", cmd.description);
     sendButton->setProperty("row", row);
-    // 发送列只有 92px，长名称必然被截断：完整名字进 tooltip，不为它加宽列
+    // 列宽按最长名称封顶。放不下的名字进 tooltip，按钮本身铺满这一列。
     sendButton->setToolTip(cmd.description.isEmpty()
                                ? tr("左键发送，右键重命名")
                                : cmd.description + QLatin1Char('\n') + tr("左键发送，右键重命名"));
     connect(sendButton, &QPushButton::clicked, this, &CommandTableWidget::onSendClicked);
-    m_table->setCellWidget(row, SendColumn, wrapCentered(sendButton));
+    m_table->setCellWidget(row, SendColumn, wrapFilled(sendButton));
 
     // 列7: 拖动手柄。做成撑满行高的把手（与行内按钮等高、带浅底），让人一眼看出这里
     // 可以按着拖——之前只是 22px 里一个纯文本 "≡"，用户反馈"太小、不像能拖"。
     auto *handle = new QLabel(tr("≡"), this);
+    handle->setObjectName(QStringLiteral("commandDragHandle"));
     handle->setAlignment(Qt::AlignCenter);
     handle->setToolTip(tr("按住上下拖动可调整顺序"));
-    handle->setStyleSheet(QStringLiteral("QLabel { color: #8a94a6; background: #f1f5f9; }"));
     // 让鼠标事件直接穿透到视口：拖拽是在 viewport 的 eventFilter 里统一拦的，
     // 手柄控件自己吃掉事件的话就再也拖不动了。
     handle->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -1156,7 +1172,8 @@ void CommandTableWidget::setDragRowDimmed(int row, bool dimmed)
     if (!m_table || row < 0 || row >= m_table->rowCount()) return;
 
     // 空 QBrush = 恢复默认绘制，取消灰显时不需要知道原色是什么
-    const QBrush brush = dimmed ? QBrush(QColor(0xE8, 0xEE, 0xF7)) : QBrush();
+    const QColor dim = AppTheme::isDark() ? QColor(0x2C, 0x35, 0x48) : QColor(0xE8, 0xEE, 0xF7);
+    const QBrush brush = dimmed ? QBrush(dim) : QBrush();
     for (int column = 0; column < ColumnCount; ++column) {
         if (auto *item = m_table->item(row, column)) {
             item->setBackground(brush);

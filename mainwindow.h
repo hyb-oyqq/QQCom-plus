@@ -15,6 +15,7 @@ class QResizeEvent;
 class QShowEvent;
 class QTimer;
 class QSplitter;
+class QAction;
 class QToolButton;
 class QThread;
 class EndpointRuntime;
@@ -54,7 +55,8 @@ public:
     // 不要改用 QStatusBar::showMessage()：它会把所有 addWidget() 挂上的普通部件一并隐藏
     // （permanent widget 才不受影响）。整条状态栏都是 addWidget，一条临时消息就会让
     // RX/TX/条数/桥接整行消失，反复出错时计时器一直被重置，看起来像统计数据丢了。
-    void showStatusNote(const QString &text, int ms, bool alert = false);
+    // detail 非空时作为悬停全文。底部只显示 text，避免长句被裁。
+    void showStatusNote(const QString &text, int ms, bool alert = false, const QString &detail = {});
 
 signals:
     void updateCheckRequested();
@@ -91,6 +93,8 @@ private:
     void releaseWindowSizeFloor();
     // 状态栏「置顶」：切换 WindowStaysOnTopHint，并记入 preferences。
     void setStayOnTop(bool on);
+    // 状态栏「外观」：亮色、暗色或跟随系统。persist 为真时记入 preferences。
+    void setColorScheme(const QString &key, bool persist);
     // 把"展开态下两块内容的宽度"记进快照。收起指令面板时唯一的依据——信号到达时
     // 面板已被压成 0 宽、分栏也已重分配，那时再读几何拿到的是错误值。
     // 由 showEvent / resizeEvent / splitterMoved / 切换前一刻共同维护。
@@ -162,6 +166,7 @@ private:
     QStringList m_endpointPeers[2];
     qint64 m_rxBytes = 0;
     qint64 m_txBytes = 0;
+    qint64 m_droppedBytes = 0;
     qint64 m_rxBytesAtTick = 0;
     qint64 m_txBytesAtTick = 0;
     QTimer *m_rateTimer = nullptr;
@@ -169,6 +174,8 @@ private:
     QTimer *m_statusNoteTimer = nullptr;
     QLabel *m_rxStatus = nullptr;
     QLabel *m_txStatus = nullptr;
+    QLabel *m_dropStatus = nullptr;
+    QWidget *m_dropGroup = nullptr;
     QLabel *m_rxRate = nullptr;
     QLabel *m_txRate = nullptr;
     QLabel *m_trafficStatus = nullptr; // 监视区会话累计条数（面板经 summaryChanged 上报）
@@ -177,5 +184,7 @@ private:
     QLabel *m_endpointState[2] = {nullptr, nullptr};
     QFrame *m_endpointDot[2] = {nullptr, nullptr};
     QToolButton *m_stayOnTop = nullptr;
+    QToolButton *m_colorScheme = nullptr;
+    QAction *m_schemeActions[3] = {};
 };
 #endif // MAINWINDOW_H

@@ -3,6 +3,7 @@
 #include "ui/common/combometrics.h"
 #include "ui/common/endpointformat.h"
 #include "ui/common/payloadcodec.h"
+#include "ui/common/apptheme.h"
 #include "ui/common/tintedicon.h"
 
 #include <QCheckBox>
@@ -397,8 +398,11 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     m_advanced->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
     // A tool button paints its arrow instead of its icon, so the open/closed state is
     // carried by the icon colour and the panel itself, not by a second glyph.
-    m_advancedIconIdle = tintedIcon(QStringLiteral(":/icons/tune.svg"), QColor("#647590"));
-    m_advancedIconActive = tintedIcon(QStringLiteral(":/icons/tune.svg"), QColor("#3465d5"));
+    refreshThemeIcons();
+    connect(AppTheme::instance(), &AppTheme::schemeChanged, this, [this] {
+        refreshThemeIcons();
+        updateAdvancedToggle();
+    });
     updateAdvancedToggle();
 
     // 自动恢复是连接行为，常驻主行，不跟组帧参数藏在高级区。
@@ -644,6 +648,15 @@ void PortSelectorWidget::updateActionLabels()
     const auto current = draft();
     m_badge->setToolTip(tr("端点 %1\n%2")
                             .arg(m_badge->text(), portDraftDetails(current)));
+}
+
+void PortSelectorWidget::refreshThemeIcons()
+{
+    const QColor idle = mutedInk();
+    const QColor active = AppTheme::isDark() ? QColor(QStringLiteral("#5b9eff"))
+                                             : QColor(QStringLiteral("#3465d5"));
+    m_advancedIconIdle = tintedIcon(QStringLiteral(":/icons/tune.svg"), idle);
+    m_advancedIconActive = tintedIcon(QStringLiteral(":/icons/tune.svg"), active);
 }
 
 void PortSelectorWidget::updateAdvancedToggle()

@@ -114,6 +114,8 @@ private:
     // 批量填充期间由 m_geometrySyncSuspended 挂起，结束后统一做一次。
     void syncCellWidgetGeometry(int fromRow = 0, int toRow = -1);
     QWidget *wrapCentered(QWidget *widget);
+    // 发送按钮要撑满列宽。勾选框、延时、结尾符仍按自身宽度居中。
+    QWidget *wrapFilled(QWidget *widget);
 
     // 拖拽指示器
     void showDropIndicator(int insertAt);

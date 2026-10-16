@@ -27,7 +27,6 @@ public:
 
 private:
     void setupUi();
-    void applyDialogStyle();
     void onSelectAllToggled(bool checked);
 
     QList<CommandSet> m_allSets;

@@ -10,7 +10,7 @@ Traffic::Source AbstractTransport::makeSource(quint64 generation, const QUuid &p
     return source;
 }
 
-void AbstractTransport::discardPendingInput() {}
+qint64 AbstractTransport::discardPendingInput() { return 0; }
 
 QString AbstractTransport::writeAddress(const QUuid &peerId) const
 {

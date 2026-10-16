@@ -82,14 +82,10 @@ void SerialTransport::start(const PortDraft &draft, quint64 generation)
     const bool opened = m_port->open(QIODevice::ReadWrite);
     m_opening = false;
     if (opened) {
-        // 先丢掉打开前已在驱动缓冲里的字节，再开始接收。反过来会把旧字节当成新会话。
+        // 只丢掉 Qt 缓冲里已经读上来的字节。空 readAll() 会走进 startAsyncRead()，
+        // 和 open() 挂着的 WaitCommEvent 抢同一把端口，Windows 上偶发之后再也等不到 RXCHAR。
         discardPendingInput();
-        connect(m_port, &QSerialPort::readyRead, this, [this] {
-            const auto payload = m_port->readAll();
-            if (!payload.isEmpty())
-                emit dataReceived(m_generation, makeSource(m_generation), payload,
-                    int(Traffic::Framing::Stream));
-        });
+        connect(m_port, &QSerialPort::readyRead, this, &SerialTransport::drainPort);
         emit stateChanged(m_generation, int(Transport::State::Open),
             tr("%1 @%2").arg(portName).arg(baud));
         return;
@@ -112,10 +108,27 @@ qint64 SerialTransport::write(const QByteArray &payload, const QUuid &peerId)
     return m_port->write(payload);
 }
 
-void SerialTransport::discardPendingInput()
+void SerialTransport::drainPort()
 {
-    if (m_port && m_port->isOpen())
-        m_port->readAll();
+    if (!m_port || !m_port->isOpen() || m_port->bytesAvailable() <= 0)
+        return;
+    const auto payload = m_port->readAll();
+    if (payload.isEmpty())
+        return;
+    emit dataReceived(m_generation, makeSource(m_generation), payload,
+        int(Traffic::Framing::Stream));
+    // readyRead 不会嵌套发出。槽里又进来的字节留在缓冲里，等下一拍再读，避免同步桥接把栈打穿。
+    if (m_port && m_port->isOpen() && m_port->bytesAvailable() > 0)
+        QMetaObject::invokeMethod(this, [this] { drainPort(); }, Qt::QueuedConnection);
+}
+
+qint64 SerialTransport::discardPendingInput()
+{
+    // 缓冲为空时 readAll() 仍会调用 readData() → startAsyncRead()。打开后和桥接建立时
+    // 都会走到这里；空读正是串口偶发收不到的原因，所以没有字节就直接返回。
+    if (!m_port || !m_port->isOpen() || m_port->bytesAvailable() <= 0)
+        return 0;
+    return m_port->readAll().size();
 }
 
 void SerialTransport::handlePortError(QSerialPort::SerialPortError error)

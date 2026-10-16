@@ -1,5 +1,6 @@
 #include "transport/tcpservertransport.h"
 
+#include <QPointer>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <utility>
@@ -72,7 +73,6 @@ qint64 TcpServerTransport::write(const QByteArray &payload, const QUuid &peerId)
 {
     if (!m_server || !m_server->isListening() || m_peers.isEmpty())
         return -1;
-    qint64 accepted = 0;
     if (!peerId.isNull()) {
         // 直接遍历匹配 peer：客户端数量有上限（≤64），代价可忽略。
         QTcpSocket *target = nullptr;
@@ -80,18 +80,27 @@ qint64 TcpServerTransport::write(const QByteArray &payload, const QUuid &peerId)
             if (it.value().id == peerId) { target = it.key(); break; }
         if (!target)
             return -1;
-        accepted = target->write(payload);
-    } else {
-        for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it)
-            accepted += qMax<qint64>(0, it.key()->write(payload));
+        return target->write(payload);
     }
-    return accepted;
+    // 广播按最差的一个客户端记账。把各端接受数加起来会把「一个写满、一个没写上」
+    // 伪装成整包完成，少掉的那段再也补不回来。
+    qint64 least = payload.size();
+    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+        const qint64 accepted = it.key()->write(payload);
+        least = qMin(least, accepted < 0 ? qint64(0) : accepted);
+    }
+    return least;
 }
 
-void TcpServerTransport::discardPendingInput()
+qint64 TcpServerTransport::discardPendingInput()
 {
-    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it)
-        it.key()->readAll();
+    qint64 dropped = 0;
+    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+        if (it.key()->bytesAvailable() <= 0)
+            continue;
+        dropped += it.key()->readAll().size();
+    }
+    return dropped;
 }
 
 QString TcpServerTransport::writeAddress(const QUuid &peerId) const
@@ -123,15 +132,7 @@ void TcpServerTransport::acceptPending()
         peer.address = QStringLiteral("%1:%2").arg(
             socket->peerAddress().toString()).arg(socket->peerPort());
         socket->setReadBufferSize(PeerReadBufferBytes);
-        socket->readAll(); // 接入瞬间已到达的字节属于打开前，不进入本次会话
-        connect(socket, &QTcpSocket::readyRead, this, [this, socket] {
-            const auto it = m_peers.constFind(socket);
-            if (it == m_peers.cend()) return;
-            const auto payload = socket->readAll();
-            if (!payload.isEmpty())
-                emit dataReceived(m_generation, makeSource(m_generation, it.value().id, it.value().address),
-                    payload, int(Traffic::Framing::Stream));
-        });
+        connect(socket, &QTcpSocket::readyRead, this, [this, socket] { drainPeer(socket); });
         connect(socket, &QTcpSocket::disconnected, this, [this, socket] { detachPeer(socket); });
         // socket 断开后的 errorOccurred 只属于这个已detach 的对象，无需单独处理；
         // 销毁交给 disconnected 里的 deleteLater。
@@ -139,7 +140,29 @@ void TcpServerTransport::acceptPending()
         // 接入必须进数据区：断开已经有错误行，连上只改状态栏人数会让人看不到谁来了。
         emit peerConnected(m_generation, peer.id, peer.address);
         publishPeers();
+        // 客户端可能在 accept 之前就把第一包写进了套接字。丢掉它的话，请求-应答看起来像收不到。
+        drainPeer(socket);
     }
+}
+
+void TcpServerTransport::drainPeer(QTcpSocket *socket)
+{
+    const auto it = m_peers.constFind(socket);
+    if (it == m_peers.cend() || !socket || socket->bytesAvailable() <= 0)
+        return;
+    const auto id = it.value().id;
+    const auto address = it.value().address;
+    const auto payload = socket->readAll();
+    if (payload.isEmpty())
+        return;
+    emit dataReceived(m_generation, makeSource(m_generation, id, address),
+        payload, int(Traffic::Framing::Stream));
+    if (!m_peers.contains(socket) || socket->bytesAvailable() <= 0)
+        return;
+    QPointer<QTcpSocket> alive(socket);
+    QMetaObject::invokeMethod(this, [this, alive] {
+        if (alive) drainPeer(alive);
+    }, Qt::QueuedConnection);
 }
 
 void TcpServerTransport::detachPeer(QTcpSocket *socket)

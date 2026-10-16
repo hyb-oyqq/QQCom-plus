@@ -287,7 +287,7 @@ void FileTransferWidget::buildPage(Page *page)
     page->path->setObjectName(scopedName(prefix, QStringLiteral("Path")));
     page->browse = new QPushButton;
     page->browse->setObjectName(scopedName(prefix, QStringLiteral("Browse")));
-    page->browse->setIcon(mutedIcon(QStringLiteral(":/icons/folder.svg"), GlyphSize));
+    setMutedIcon(page->browse, QStringLiteral(":/icons/folder.svg"), GlyphSize);
     page->browse->setIconSize(QSize(GlyphSize, GlyphSize));
     pinFixed(page->browse);
     topRow->addWidget(page->path, 1);

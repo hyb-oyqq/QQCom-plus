@@ -9,6 +9,7 @@
 #include "ui/common/rowmetrics.h"
 #include "ui/common/stayopenmenu.h"
 #include "ui/common/tintedicon.h"
+#include "ui/common/apptheme.h"
 #include "ui/common/styledialogs.h"
 #include "persistence/preferencesstore.h"
 
@@ -149,7 +150,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 事件（状态/警告/错误）与上面那批"显示哪些行类型"的项一起留在这个菜单里。
     auto *settings = new QPushButton(tr("设置"));
     settings->setObjectName("displaySettings");
-    settings->setIcon(mutedIcon(QStringLiteral(":/icons/cog.svg"), BarIconSize));
+    setMutedIcon(settings, QStringLiteral(":/icons/cog.svg"), BarIconSize);
     settings->setToolTip(tr("显示前缀、HEX、换行、状态、警告、错误，以及记录到文件"));
     auto *displayMenu = new StayOpenMenu(settings);
     // 行内容开关：控制台语义，全部在消息到达时生效，已固化的行不重排。
@@ -253,7 +254,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
 
     auto *exportButton = new QPushButton(tr("导出"));
     exportButton->setObjectName("exportTraffic");
-    exportButton->setIcon(mutedIcon(QStringLiteral(":/icons/export.svg"), BarIconSize));
+    setMutedIcon(exportButton, QStringLiteral(":/icons/export.svg"), BarIconSize);
     exportButton->setToolTip(tr("导出当前缓冲里的全部记录，含数据区没显示的发送、状态、警告和错误"));
     top->addWidget(exportButton);
 
@@ -268,8 +269,12 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     auto *clear = new QPushButton(tr("清空"));
     clear->setObjectName("clearTraffic");
     // 垃圾桶用和按钮文字同一档红。灰图标放在红字旁边会看成没画完。
-    clear->setIcon(tintedIcon(QStringLiteral(":/icons/delete-outline.svg"),
-                              QColor(0xa7, 0x30, 0x1f), BarIconSize));
+    const auto refreshClearIcon = [clear] {
+        const QColor ink = AppTheme::isDark() ? QColor(0xf0, 0xb4, 0xac) : QColor(0xa7, 0x30, 0x1f);
+        clear->setIcon(tintedIcon(QStringLiteral(":/icons/delete-outline.svg"), ink, BarIconSize));
+    };
+    refreshClearIcon();
+    connect(AppTheme::instance(), &AppTheme::schemeChanged, clear, refreshClearIcon);
     top->addWidget(clear);
 
     // 右侧指令面板的开关，紧挨"清空"（用户钦定把面板的收起/展开放在这里）。
@@ -286,18 +291,20 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     });
     // 图标随勾选态换：QPushButton 的图标状态位跟的是 pressed 不是 checked，必须手动换。
     // 展开 → 双左箭头（提示"可以往左收起"）；收起 → 双右箭头（提示"可以往右展开"）。
-    const QIcon expandedIcon = tintedIcon(QStringLiteral(":/icons/chevron-double-left.svg"),
-                                          QColor(0xff, 0xff, 0xff), BarIconSize);
-    const QIcon collapsedIcon = tintedIcon(QStringLiteral(":/icons/chevron-double-right.svg"),
-                                           QColor(0x7a, 0x3f, 0x00), BarIconSize);
-    const auto refreshToggleAppearance = [this, expandedIcon, collapsedIcon](bool expanded) {
-        m_commandPanelToggle->setIcon(expanded ? expandedIcon : collapsedIcon);
+    const auto refreshToggleAppearance = [this](bool expanded) {
+        const QColor ink = expanded ? QColor(0xff, 0xff, 0xff) : checkedInk();
+        const QString path = expanded ? QStringLiteral(":/icons/chevron-double-left.svg")
+                                      : QStringLiteral(":/icons/chevron-double-right.svg");
+        m_commandPanelToggle->setIcon(tintedIcon(path, ink, BarIconSize));
         // 收起态给按钮加一个属性，供 QSS 画出"值得注意"的琥珀底（用户钦定）。
         m_commandPanelToggle->setProperty("collapsed", !expanded);
         m_commandPanelToggle->style()->unpolish(m_commandPanelToggle);
         m_commandPanelToggle->style()->polish(m_commandPanelToggle);
     };
     connect(m_commandPanelToggle, &QPushButton::toggled, this, refreshToggleAppearance);
+    connect(AppTheme::instance(), &AppTheme::schemeChanged, this, [this, refreshToggleAppearance] {
+        refreshToggleAppearance(m_commandPanelToggle->isChecked());
+    });
     refreshToggleAppearance(m_commandPanelToggle->isChecked());
     top->addWidget(m_commandPanelToggle);
 
@@ -350,6 +357,10 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 各自记账，但都要让用户看得见。
     connect(m_text, &TrafficTextView::blocksReleased, this,
         [this](int count) { m_releasedLines += static_cast<quint64>(count); });
+    // 监视区正文画在文档里，换样式表不会改已经写入的字色。系统主题变了就按新颜色重画。
+    connect(AppTheme::instance(), &AppTheme::schemeChanged, this, [this] {
+        reprojectView(/*announce=*/false, /*applyCurrentConditions=*/false);
+    });
     auto *empty = new QLabel(waitingPlaceholder());
     empty->setAlignment(Qt::AlignCenter);
     empty->setObjectName("EmptyState");

@@ -48,6 +48,7 @@ void CommandPanel::setupUi()
     topBar->setContentsMargins(0, 0, 0, 0);
 
     m_setComboBox = new QComboBox(m_topBarWidget);
+    m_setComboBox->setObjectName(QStringLiteral("commandSetSelector"));
     m_setComboBox->setMinimumWidth(120);
     connect(m_setComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &CommandPanel::onCurrentSetChanged);
@@ -209,6 +210,8 @@ void CommandPanel::onCurrentSetChanged(int index)
     m_currentSetId = setId;
     CommandSet set = CommandManager::instance()->getSet(setId);
     m_commandTable->setCommandSet(set);
+    // 只改下拉框也要落盘。否则退出前没再编辑指令、没再展开/收起，这次选择就丢了。
+    savePreferences();
 }
 
 void CommandPanel::onAddSetClicked()
@@ -495,22 +498,18 @@ void CommandPanel::loadPreferences()
 {
     if (!m_preferences) return;
 
+    // 恢复过程中 setExpanded、换行、切分组都会联动 savePreferences。
+    // 不抑制的话，面板从默认收起切到上次的展开时，会把还停在第一组的下拉框写回去，
+    // 盖掉已经存过的分组（与发送区、监视区同一模式）。
+    m_loading = true;
+
     CommandManager::instance()->load(m_preferences);
 
-    // 先把折行读出来。下面 setExpanded 会顺手 savePreferences，那时按钮还是默认的
-    // 「不折行」，会把已经存过的「折行」盖掉。读在保存之前才盖不掉。
+    // 先读再改。即便某次保存逃过 m_loading，写出去的也是上次的分组，不是第一组。
     const bool wrap = m_preferences->value(QStringLiteral("commandPanel/contentWrap"), false).toBool();
+    const bool expanded = m_preferences->value(QStringLiteral("commandPanel/expanded"), false).toBool();
+    const QString lastSetId = m_preferences->value(QStringLiteral("commandPanel/currentSet")).toString();
 
-    // 没有这个键时收起。已经保存过的展开/收起原样恢复。
-    bool expanded = m_preferences->value("commandPanel/expanded", false).toBool();
-    setExpanded(expanded);
-
-    // 没有记过时保持单行。记过的按上次的选择恢复。
-    if (m_wrapButton && m_wrapButton->isChecked() != wrap)
-        m_wrapButton->setChecked(wrap);
-
-    // 恢复当前选中的指令集
-    QString lastSetId = m_preferences->value("commandPanel/currentSet").toString();
     if (!lastSetId.isEmpty()) {
         for (int i = 0; i < m_setComboBox->count(); ++i) {
             if (m_setComboBox->itemData(i).toString() == lastSetId) {
@@ -519,11 +518,20 @@ void CommandPanel::loadPreferences()
             }
         }
     }
+
+    // 没有这个键时收起。已经保存过的展开/收起原样恢复。
+    setExpanded(expanded);
+
+    // 没有记过时保持单行。记过的按上次的选择恢复。
+    if (m_wrapButton && m_wrapButton->isChecked() != wrap)
+        m_wrapButton->setChecked(wrap);
+
+    m_loading = false;
 }
 
 void CommandPanel::savePreferences()
 {
-    if (!m_preferences) return;
+    if (!m_preferences || m_loading) return;
 
     CommandManager::instance()->save(m_preferences);
 

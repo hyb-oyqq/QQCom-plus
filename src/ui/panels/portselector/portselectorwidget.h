@@ -65,6 +65,7 @@ private:
     void updateValidation();
     void updateActionLabels();
     void updateAdvancedToggle();
+    void refreshThemeIcons();
     void fitHuggingFields(); // 波特率、端口按当前文字收宽度
     void unifyParameterHeights(); // 下拉框和数字框同高，切换类型时行高和顶缘不变
     void selectSerialPort(const QString &portName);

@@ -757,7 +757,7 @@ private slots:
         const auto clientSource = clientData.last().at(1).value<Traffic::Source>();
         QVERIFY(clientSource.peerAddress.endsWith(QStringLiteral(":%1").arg(port)));
 
-        // 服务器 → 全部客户端（peerId 为空的广播语义）
+        // 服务器 → 全部客户端（peerId 为空的广播语义）。返回值是接受最少的那个客户端。
         QCOMPARE(server.write("all", QUuid()), qint64(3));
         QTRY_VERIFY(clientData.count() >= 2);
         bool broadcastSeen = false;
@@ -978,9 +978,14 @@ private slots:
         // 仅接收端点（已打开但没有发送目标）发送：显式 Failed，不静默丢弃。
         const int baseline = messages.count();
         runtime.sendPayload(0, "nope", int(Traffic::Origin::Manual));
-        QCOMPARE(messages.count(), baseline + 1);
-        const auto failed = messages.last().at(0).value<Traffic::Message>();
+        QCOMPARE(messages.count(), baseline + 2);
+        const auto failed = messages.at(baseline).at(0).value<Traffic::Message>();
         QCOMPARE(failed.state, Traffic::State::Failed);
+        QCOMPARE(failed.direction, Traffic::Direction::Transmit);
+        const auto dropped = messages.at(baseline + 1).at(0).value<Traffic::Message>();
+        QCOMPARE(dropped.direction, Traffic::Direction::Error);
+        QCOMPARE(dropped.rawLength, qint64(4));
+        QVERIFY(dropped.statusText.contains(QStringLiteral("丢弃未写出数据 4 字节")));
 
         runtime.closeEndpoint(1);
         runtime.closeEndpoint(0);
@@ -1162,6 +1167,187 @@ private slots:
         QTRY_COMPARE(received.count(), 1);
         QCOMPARE(received.at(0).at(2).toByteArray(), QByteArray("fresh"));
         receiver.stop();
+    }
+
+    void tcpClientReceivesBannerWrittenOnAccept()
+    {
+        QTcpServer banner;
+        QVERIFY(banner.listen(QHostAddress::LocalHost, 0));
+        connect(&banner, &QTcpServer::newConnection, &banner, [&banner] {
+            auto *peer = banner.nextPendingConnection();
+            peer->write("hello-now");
+            peer->flush();
+        });
+
+        TcpClientTransport client(0);
+        QSignalSpy clientState(&client, &AbstractTransport::stateChanged);
+        QSignalSpy clientData(&client, &AbstractTransport::dataReceived);
+        client.start(makeDraft(PortDraft::TcpClient,
+            {{"client.host", "127.0.0.1"}, {"client.port", banner.serverPort()}, {"client.timeout", 5000}}), 1);
+        QTRY_COMPARE(lastState(clientState), int(Transport::State::Open));
+        QTRY_VERIFY(!clientData.isEmpty());
+        QCOMPARE(clientData.at(0).at(2).toByteArray(), QByteArray("hello-now"));
+        client.stop();
+        banner.close();
+    }
+
+    void tcpServerReceivesPayloadWrittenOnConnect()
+    {
+        TcpServerTransport server(0);
+        QSignalSpy serverState(&server, &AbstractTransport::stateChanged);
+        QSignalSpy serverData(&server, &AbstractTransport::dataReceived);
+        const int port = findFreePort([&server, &serverState](int candidate) {
+            server.start(makeDraft(PortDraft::TcpServer,
+                {{"server.address", "127.0.0.1"}, {"server.port", candidate}, {"server.clients", 4}}), 1);
+            const bool open = lastState(serverState) == int(Transport::State::Open);
+            if (!open) serverState.clear();
+            return open;
+        });
+        QVERIFY(port != 0);
+
+        QTcpSocket client;
+        connect(&client, &QTcpSocket::connected, &client, [&client] {
+            client.write("instant");
+            client.flush();
+        });
+        client.connectToHost(QHostAddress::LocalHost, quint16(port));
+        QTRY_VERIFY(!serverData.isEmpty());
+        QCOMPARE(serverData.at(0).at(2).toByteArray(), QByteArray("instant"));
+        client.disconnectFromHost();
+        server.stop();
+    }
+
+    void udpReceivesAfterSendToClosedPort()
+    {
+        UdpTransport endpoint(0);
+        QSignalSpy state(&endpoint, &AbstractTransport::stateChanged);
+        QSignalSpy received(&endpoint, &AbstractTransport::dataReceived);
+        const int port = findFreePort([&endpoint, &state](int candidate) {
+            endpoint.start(makeDraft(PortDraft::Udp,
+                {{"udp.address", "127.0.0.1"}, {"udp.port", candidate},
+                 {"udp.target", "127.0.0.1"}, {"udp.targetPort", 1}}), 1);
+            const bool open = lastState(state) == int(Transport::State::Open);
+            if (!open) state.clear();
+            return open;
+        });
+        QVERIFY(port != 0);
+
+        // 1 端口没有监听。Windows 上 ICMP 端口不可达会让后续 recv 失败，接收因此停住。
+        QCOMPARE(endpoint.write(QByteArray("miss"), QUuid()), qint64(4));
+        QTest::qWait(300);
+
+        QUdpSocket sender;
+        QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
+        QCOMPARE(sender.writeDatagram("alive", QHostAddress::LocalHost, quint16(port)), qint64(5));
+        QTRY_COMPARE(received.count(), 1);
+        QCOMPARE(received.at(0).at(2).toByteArray(), QByteArray("alive"));
+        endpoint.stop();
+    }
+
+    void bridgeReportsRejectedForward()
+    {
+        EndpointRuntime runtime;
+        QSignalSpy states(&runtime, &EndpointRuntime::endpointStateChanged);
+        QSignalSpy messages(&runtime, &EndpointRuntime::messageReceived);
+
+        int portA = 0;
+        for (int candidate = PortScanBegin; candidate <= PortScanEnd && portA == 0; ++candidate) {
+            runtime.openEndpoint(0, makeDraft(PortDraft::Udp,
+                {{"udp.address", "127.0.0.1"}, {"udp.port", candidate},
+                 {"udp.target", ""}, {"udp.targetPort", 0}}));
+            if (lastState(states) == int(Transport::State::Open)) portA = candidate;
+            else { runtime.closeEndpoint(0); states.clear(); }
+        }
+        QVERIFY(portA != 0);
+
+        int portB = 0;
+        for (int candidate = portA + 1; candidate <= PortScanEnd && portB == 0; ++candidate) {
+            runtime.openEndpoint(1, makeDraft(PortDraft::Udp,
+                {{"udp.address", "127.0.0.1"}, {"udp.port", candidate},
+                 {"udp.target", ""}, {"udp.targetPort", 0}}));
+            if (lastState(states) == int(Transport::State::Open)) portB = candidate;
+            else { runtime.closeEndpoint(1); states.clear(); }
+        }
+        QVERIFY(portB != 0);
+
+        BridgeLink link;
+        link.enabled = true;
+        link.direction = int(BridgeDirection::BtoA);
+        runtime.setBridge(link);
+
+        QUdpSocket sender;
+        QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
+        QCOMPARE(sender.writeDatagram("fwd", QHostAddress::LocalHost, quint16(portB)), qint64(3));
+
+        QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QList<QVariant> &params) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            return message.direction == Traffic::Direction::Receive
+                && message.source.endpointIndex == 1
+                && message.raw == QByteArray("fwd");
+        }));
+        QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QList<QVariant> &params) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            return message.direction == Traffic::Direction::Transmit
+                && message.origin == Traffic::Origin::Forward
+                && message.source.endpointIndex == 0
+                && message.raw == QByteArray("fwd")
+                && message.state == Traffic::State::Failed;
+        }));
+        QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QList<QVariant> &params) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            return message.direction == Traffic::Direction::Error
+                && message.source.endpointIndex == 0
+                && message.rawLength == 3
+                && message.statusText.contains(QStringLiteral("丢弃未写出数据 3 字节"));
+        }));
+        runtime.shutdown();
+    }
+
+    void bridgeOpeningCountsUnreadInputAsDropped()
+    {
+        EndpointRuntime runtime;
+        QSignalSpy states(&runtime, &EndpointRuntime::endpointStateChanged);
+        QSignalSpy messages(&runtime, &EndpointRuntime::messageReceived);
+
+        int portA = 0;
+        for (int candidate = PortScanBegin; candidate <= PortScanEnd && portA == 0; ++candidate) {
+            runtime.openEndpoint(0, makeDraft(PortDraft::Udp,
+                {{"udp.address", "127.0.0.1"}, {"udp.port", candidate},
+                 {"udp.target", ""}, {"udp.targetPort", 0}}));
+            if (lastState(states) == int(Transport::State::Open)) portA = candidate;
+            else { runtime.closeEndpoint(0); states.clear(); }
+        }
+        QVERIFY(portA != 0);
+        runtime.openEndpoint(1, makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
+             {"udp.target", "127.0.0.1"}, {"udp.targetPort", portA}}));
+        QCOMPARE(lastState(states), int(Transport::State::Open));
+
+        QUdpSocket sender;
+        QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
+        QCOMPARE(sender.writeDatagram("stale", QHostAddress::LocalHost, quint16(portA)), qint64(5));
+        // 数据报先停在套接字里，建立桥接时被丢掉，不能变成一条接收。
+        QTRY_VERIFY(runtime.findChild<QUdpSocket *>()->hasPendingDatagrams());
+
+        BridgeLink link;
+        link.enabled = true;
+        link.direction = int(BridgeDirection::AtoB);
+        runtime.setBridge(link);
+
+        QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QList<QVariant> &params) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            return message.direction == Traffic::Direction::Error
+                && message.source.endpointIndex == 0
+                && message.rawLength == 5
+                && message.statusText.contains(QStringLiteral("建立桥接前丢弃未读数据 5 字节"));
+        }));
+        bool sawStale = false;
+        for (const auto &params : messages) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            sawStale |= message.direction == Traffic::Direction::Receive && message.raw == QByteArray("stale");
+        }
+        QVERIFY(!sawStale);
+        runtime.shutdown();
     }
 
     void ymodemRoundTripOverRawLoopback()

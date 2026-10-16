@@ -1,6 +1,9 @@
 #ifndef TINTEDICON_H
 #define TINTEDICON_H
 
+#include "ui/common/apptheme.h"
+
+#include <QAbstractButton>
 #include <QColor>
 #include <QHash>
 #include <QIcon>
@@ -45,14 +48,41 @@ inline QIcon actionStateIcon(const QString &path, int size)
     return icon;
 }
 
-// Glyphs on light surfaces such as combo items: the stylesheet's muted text colour, since
-// both the popup and the closed combo draw on white.
+// 静音字形跟当前主题的次要文字走。浅色是 #647590，深色是 #8b95a8。
+// 字形是栅格，样式表的 color 染不到它，所以这里按主题取色。
+inline QColor mutedInk()
+{
+    return AppTheme::isDark() ? QColor(QStringLiteral("#8b95a8")) : QColor(QStringLiteral("#647590"));
+}
+
+inline QColor checkedInk()
+{
+    return AppTheme::isDark() ? QColor(QStringLiteral("#fef3c7")) : QColor(QStringLiteral("#7a3f00"));
+}
+
+inline QColor accentInk()
+{
+    return AppTheme::isDark() ? QColor(QStringLiteral("#8eb6ff")) : QColor(QStringLiteral("#1d4ed8"));
+}
+
+// Glyphs on light surfaces such as combo items: the stylesheet's muted text colour.
 inline QIcon mutedIcon(const QString &path, int size)
 {
     QIcon icon;
     for (const int scale : {1, 2})
-        icon.addPixmap(tintedPixmap(path, QColor(QStringLiteral("#647590")), size * scale));
+        icon.addPixmap(tintedPixmap(path, mutedInk(), size * scale));
     return icon;
+}
+
+// 按钮上的静音图标。系统切换浅色/深色时按当前主题重画，避免深色按钮上仍是深灰字形。
+inline void setMutedIcon(QAbstractButton *button, const QString &path, int size)
+{
+    if (!button) return;
+    const auto apply = [button, path, size] {
+        button->setIcon(mutedIcon(path, size));
+    };
+    QObject::connect(AppTheme::instance(), &AppTheme::schemeChanged, button, apply);
+    apply();
 }
 
 // 单色字形（自定颜色）：用于需要随状态换色的勾选型按钮。QPushButton 的图标状态位跟的是
@@ -72,7 +102,7 @@ inline QIcon tintedIcon(const QString &path, const QColor &color, int size)
 // liftPx=2 时没有可见损失。
 inline QIcon liftedMutedIcon(const QString &path, int size, int liftPx = 2)
 {
-    const QPixmap src = tintedPixmap(path, QColor(QStringLiteral("#647590")), size);
+    const QPixmap src = tintedPixmap(path, mutedInk(), size);
     QPixmap dst(size, size);
     dst.fill(Qt::transparent);
     QPainter painter(&dst);
@@ -86,15 +116,17 @@ inline QIcon liftedMutedIcon(const QString &path, int size, int liftPx = 2)
 // 勾选型按钮的图标随勾选态换色：未勾选用静音灰，勾选用 QSS 选中态文字色（深琥珀）。
 // 每个勾选按钮都要这三行，抽出来只有一份——"琥珀底上出现灰字"这个错只需要防一次。
 inline void bindToggleIcon(QPushButton *button, const QString &path, int size,
-    const QColor &off = QColor(0x64, 0x75, 0x90), const QColor &on = QColor(0x7a, 0x3f, 0x00))
+    const QColor &off = QColor(), const QColor &on = QColor())
 {
-    const QIcon offIcon = tintedIcon(path, off, size);
-    const QIcon onIcon = tintedIcon(path, on, size);
-    const auto refresh = [button, offIcon, onIcon](bool checked) {
-        button->setIcon(checked ? onIcon : offIcon);
+    const auto apply = [button, path, size, off, on] {
+        const QColor offColor = off.isValid() ? off : mutedInk();
+        const QColor onColor = on.isValid() ? on : checkedInk();
+        button->setIcon(button->isChecked() ? tintedIcon(path, onColor, size)
+                                            : tintedIcon(path, offColor, size));
     };
-    QObject::connect(button, &QPushButton::toggled, button, refresh);
-    refresh(button->isChecked());
+    QObject::connect(button, &QPushButton::toggled, button, [apply](bool) { apply(); });
+    QObject::connect(AppTheme::instance(), &AppTheme::schemeChanged, button, apply);
+    apply();
 }
 
 #endif

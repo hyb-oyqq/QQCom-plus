@@ -2,6 +2,7 @@
 #include "app/commandmanager.h"
 #include "domain/commandset.h"
 #include "domain/receiveframing.h"
+#include "ui/common/apptheme.h"
 #include "ui/common/endpointformat.h"
 #include "ui/common/payloadcodec.h"
 #include "ui/panels/commands/commandpanel.h"
@@ -15,6 +16,7 @@
 
 #include <QAbstractItemView>
 #include <QAction>
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -25,6 +27,8 @@
 #include <QFile>
 #include <QFrame>
 #include <QFileInfo>
+#include <QGuiApplication>
+#include <QStatusBar>
 #include <QHash>
 #include <QImage>
 #include <QInputDialog>
@@ -42,6 +46,7 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QStyle>
+#include <QStyleHints>
 #include <QStyleOption>
 #include <QSpinBox>
 #include <QSplitter>
@@ -193,9 +198,9 @@ private slots:
         // 每次从干净配置开始，用例的"默认状态"假设才稳定成立。
         QFile::remove(QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
                       + QStringLiteral("/preferences.ini"));
-        QFile style(":/styles/workbench.qss");
-        QVERIFY(style.open(QIODevice::ReadOnly));
-        qApp->setStyleSheet(QString::fromUtf8(style.readAll()));
+        // 用例按浅色样式表里的具体颜色断言。进程钉在亮色上，不跟本机的深色系统走。
+        // 外观用例会切走，cleanup 再钉回来。
+        AppTheme::setMode(AppTheme::Mode::Light);
     }
 
     void payload_data()
@@ -1249,6 +1254,103 @@ private slots:
         CommandManager::instance()->load(&backup);
     }
 
+    // 行内发送按钮要铺满发送列。居中时按钮停在文字宽度上，点文字两侧点不中。
+    void commandSendButtonsFillTheirColumn()
+    {
+        CommandPanel panel;
+        panel.setAttribute(Qt::WA_DontShowOnScreen);
+        panel.setExpanded(true);
+        panel.resize(760, 520);
+        panel.show();
+        QTest::qWait(30);
+
+        auto *table = panel.findChild<CommandTableWidget *>();
+        QVERIFY(table);
+        CommandSet set;
+        set.name = QStringLiteral("发送列");
+        CommandItem shortCmd;
+        shortCmd.content = QStringLiteral("AT");
+        shortCmd.description = QStringLiteral("发送");
+        CommandItem longCmd;
+        longCmd.content = QStringLiteral("AT+REBOOT");
+        longCmd.description = QStringLiteral("重启");
+        set.commands = {shortCmd, longCmd};
+        table->setCommandSet(set);
+        QTest::qWait(30);
+
+        auto *grid = table->findChild<QTableWidget *>();
+        QVERIFY(grid);
+        const int column = 6; // 发送列，见 CommandTableWidget 的列序
+        QList<QPushButton *> buttons;
+        for (auto *button : table->findChildren<QPushButton *>()) {
+            if (button->property("row").isValid()) buttons.append(button);
+        }
+        QCOMPARE(buttons.size(), 2);
+        for (auto *button : buttons) {
+            const int row = button->property("row").toInt();
+            const QRect cell = grid->visualRect(grid->model()->index(row, column));
+            QVERIFY2(cell.width() > 40, qPrintable(QStringLiteral("发送列过窄：%1").arg(cell.width())));
+            // 左右各留 2px 内边距，按钮应贴到列的可用宽度。
+            QVERIFY2(button->width() >= cell.width() - 8,
+                qPrintable(QStringLiteral("发送按钮未铺满列：按钮 %1，列 %2")
+                    .arg(button->width()).arg(cell.width())));
+        }
+    }
+
+    // 扩展面板的「分组」：只改下拉框就要落盘，下次启动还要回到那一组。
+    // 上次若是展开着退出，恢复展开不能把分组盖回第一组。
+    void commandGroupSelectionPersists()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        PreferencesStore backup(nullptr, dir.filePath(QStringLiteral("backup.ini")));
+        CommandManager::instance()->save(&backup);
+        {
+            PreferencesStore store(nullptr, dir.filePath(QStringLiteral("groups.ini")));
+            CommandPanel editor;
+            editor.setPreferencesStore(&store);
+
+            CommandSet second(QStringLiteral("乙组"));
+            CommandItem command;
+            command.content = QStringLiteral("BBB");
+            command.description = QStringLiteral("乙");
+            second.commands = {command};
+            CommandManager::instance()->addSet(second);
+
+            auto *selector = editor.findChild<QComboBox *>(QStringLiteral("commandSetSelector"));
+            auto *table = editor.findChild<CommandTableWidget *>();
+            QVERIFY(selector && table);
+            const int index = selector->findData(second.id.toString());
+            QVERIFY(index > 0);
+            selector->setCurrentIndex(index);
+            QCOMPARE(selector->currentData().toString(), second.id.toString());
+            QCOMPARE(table->commandSet().name, second.name);
+            QCOMPARE(table->commandSet().commands.first().content, command.content);
+            QCOMPARE(store.value(QStringLiteral("commandPanel/currentSet")).toString(),
+                     second.id.toString());
+
+            // 展开会再保存一次。这时下拉框已经在乙组，不能写回第一组。
+            editor.setExpanded(true);
+            QCOMPARE(store.value(QStringLiteral("commandPanel/expanded")).toBool(), true);
+            QCOMPARE(store.value(QStringLiteral("commandPanel/currentSet")).toString(),
+                     second.id.toString());
+
+            CommandPanel restored;
+            restored.setPreferencesStore(&store);
+            auto *again = restored.findChild<QComboBox *>(QStringLiteral("commandSetSelector"));
+            auto *againTable = restored.findChild<CommandTableWidget *>();
+            QVERIFY(again && againTable);
+            QVERIFY(restored.isExpanded());
+            QCOMPARE(again->currentData().toString(), second.id.toString());
+            QCOMPARE(againTable->commandSet().name, second.name);
+            QCOMPARE(againTable->commandSet().commands.first().content, command.content);
+            // 恢复展开本身不得把已存的分组盖掉。
+            QCOMPARE(store.value(QStringLiteral("commandPanel/currentSet")).toString(),
+                     second.id.toString());
+        }
+        CommandManager::instance()->load(&backup);
+    }
+
     // ★ 展开/收起指令面板时，**数据区宽度原地不动、窗口宽度跟着变**（用户钦定）。
     //
     // 早先的行为是"收起就把空出来的宽度全给数据区"，于是收起那一下监视区突然变宽、
@@ -1553,8 +1655,12 @@ private slots:
                  // 收起 / 把窗口拖小之后不还原，下一个用例就在"面板已收起"的前提下断言。
                  // （commandPanel/expanded 由 CommandPanel::savePreferences 写入，属既有遗漏。）
                  "window/geometry", "window/width", "window/height", "window/stayOnTop",
-                 "commandPanel/expanded", "commandPanel/contentWrap"})
+                 "window/colorScheme",
+                 "commandPanel/expanded", "commandPanel/contentWrap", "commandPanel/currentSet"})
             sweep.remove(QString::fromLatin1(key));
+        // 外观是进程级单例。某个用例切到暗色后若没切回来，后面按浅色像素断言的用例会整片失败。
+        if (AppTheme::mode() != AppTheme::Mode::Light)
+            AppTheme::setMode(AppTheme::Mode::Light);
     }
 
     void portDraftsRemainIndependent()
@@ -3954,6 +4060,88 @@ private slots:
         // 改走 showStatusNote 后，失败原因仍必须被播报出来。
         QVERIFY2(note->text().contains(QStringLiteral("失败")),
             qPrintable(QStringLiteral("失败播报丢失：StatusNote 文本不含失败原因：") + note->text()));
+        // 打开失败没有扔掉字节，丢弃计数保持隐藏。
+        auto *drop = window.findChild<QLabel *>(QStringLiteral("DropStatus"));
+        QVERIFY(drop);
+        QVERIFY(!drop->isVisibleTo(&window));
+    }
+
+    void rejectedSendCountsDroppedBytesInStatusAndLog()
+    {
+        clearEndpointDrafts();
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        PreferencesStore store(nullptr, directory.filePath(QStringLiteral("preferences.ini")));
+        store.setValue(QStringLiteral("traffic/recordPath"), directory.filePath(QStringLiteral("traffic.log")));
+        store.setValue(QStringLiteral("traffic/record"), true);
+
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+
+        auto *panel = window.findChild<TrafficPanel *>();
+        auto *model = window.findChild<TrafficModel *>();
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *send = window.findChild<QPushButton *>(QStringLiteral("PrimaryButton"));
+        auto *editor = window.findChild<QPlainTextEdit *>(QStringLiteral("sendEditor"));
+        auto *targetA = window.findChild<QPushButton *>(QStringLiteral("sendTargetA"));
+        auto *targetB = window.findChild<QPushButton *>(QStringLiteral("sendTargetB"));
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        auto *dropGroup = window.findChild<QWidget *>(QStringLiteral("DropGroup"));
+        auto *drop = window.findChild<QLabel *>(QStringLiteral("DropStatus"));
+        auto *note = window.findChild<QLabel *>(QStringLiteral("StatusNote"));
+        QVERIFY(panel && model && text && send && editor && targetA && targetB && b && dropGroup && drop && note);
+        panel->setPreferences(&store);
+        QVERIFY(!dropGroup->isVisibleTo(&window));
+
+        // 只发给已监听但还没有客户端的 B。写入被拒绝，4 字节记入丢弃。
+        // 先勾上 B 再取消 A：一个目标都不剩时，点掉最后一个会立刻被勾回去。
+        if (!targetB->isChecked()) targetB->click();
+        if (targetA->isChecked()) targetA->click();
+        QVERIFY(!targetA->isChecked() && targetB->isChecked());
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(action);
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("停  止"));
+        QTRY_VERIFY(send->isEnabled());
+
+        auto *format = window.findChild<QComboBox *>(QStringLiteral("sendFormat"));
+        auto *suffix = window.findChild<QComboBox *>(QStringLiteral("sendSuffix"));
+        QVERIFY(format && suffix);
+        format->setCurrentText(QStringLiteral("UTF-8"));
+        suffix->setCurrentIndex(0);
+        editor->setPlainText(QStringLiteral("LOST"));
+        send->click();
+
+        bool sawDrop = false;
+        QTRY_VERIFY(([&] {
+            for (int row = 0; row < model->rowCount(); ++row) {
+                const auto record = model->record(row);
+                if (record.direction == Traffic::Direction::Error && record.rawLength == 4) {
+                    sawDrop = record.statusText.contains(QStringLiteral("丢弃未写出数据 4 字节"));
+                    return true;
+                }
+            }
+            return false;
+        })());
+        QVERIFY(sawDrop);
+        QTRY_VERIFY(dropGroup->isVisibleTo(&window));
+        QCOMPARE(drop->text(), QStringLiteral("4 B"));
+        QCOMPARE(note->property("tone").toString(), QStringLiteral("error"));
+        // 底部是短句，完整原因在悬停和数据区。
+        QVERIFY(note->text().contains(QStringLiteral("未写出 4 字节")));
+        QVERIFY(note->toolTip().contains(QStringLiteral("丢弃未写出数据 4 字节")));
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("丢弃未写出数据 4 字节")));
+
+        const auto names = QDir(directory.path()).entryList({QStringLiteral("traffic-*.log")}, QDir::Files);
+        QVERIFY2(!names.isEmpty(), "开启记录后应生成本次日志文件");
+        QFile log(QDir(directory.path()).filePath(names.first()));
+        QVERIFY(log.open(QIODevice::ReadOnly));
+        const auto body = QString::fromUtf8(log.readAll());
+        QVERIFY2(body.contains(QStringLiteral("丢弃未写出数据 4 字节")) && body.contains(QStringLiteral("ERR")),
+            qPrintable(body));
     }
 
     // 正向锁定（QA 补充）：失败合并的**边界**。合并锚点 m_pendingFailureGeneration 会一直挂到
@@ -5283,15 +5471,21 @@ private slots:
             QCOMPARE(pin->toolButtonStyle(), Qt::ToolButtonIconOnly);
             QCOMPARE(pin->iconSize(), QSize(12, 12));
             auto *actions = window.findChild<QWidget *>(QStringLiteral("StatusActions"));
+            auto *schemeChip = window.findChild<QWidget *>(QStringLiteral("StatusScheme"));
             auto *pinChip = window.findChild<QWidget *>(QStringLiteral("StatusPin"));
             auto *chip = window.findChild<QWidget *>(QStringLiteral("EndpointChip"));
-            QVERIFY(actions && pinChip && chip);
+            QVERIFY(actions && schemeChip && pinChip && chip);
             QCOMPARE(actions->height(), chip->height());
+            QCOMPARE(schemeChip->height(), chip->height());
             QCOMPARE(pinChip->height(), chip->height());
-            const int gap = pinChip->mapTo(&window, QPoint(0, 0)).x()
+            const int gap = schemeChip->mapTo(&window, QPoint(0, 0)).x()
                 - actions->mapTo(&window, QPoint(actions->width(), 0)).x();
             QVERIFY2(gap >= 4,
-                qPrintable(QStringLiteral("检查更新与置顶应分开，实际间距 %1").arg(gap)));
+                qPrintable(QStringLiteral("检查更新与外观应分开，实际间距 %1").arg(gap)));
+            const int pinGap = pinChip->mapTo(&window, QPoint(0, 0)).x()
+                - schemeChip->mapTo(&window, QPoint(schemeChip->width(), 0)).x();
+            QVERIFY2(pinGap >= 4,
+                qPrintable(QStringLiteral("外观与置顶应分开，实际间距 %1").arg(pinGap)));
             const int pinMid = pin->mapTo(&window, QPoint(0, pin->height() / 2)).y();
             const int chipMid = chip->mapTo(&window, QPoint(0, chip->height() / 2)).y();
             QVERIFY2(qAbs(pinMid - chipMid) <= 1,
@@ -5331,6 +5525,12 @@ private slots:
         auto *pinAgain = again.findChild<QToolButton *>(QStringLiteral("stayOnTop"));
         QVERIFY(pinAgain && pinAgain->isChecked());
         QVERIFY(again.windowFlags().testFlag(Qt::WindowStaysOnTopHint));
+        auto *schemeAgain = again.findChild<QToolButton *>(QStringLiteral("colorScheme"));
+        QVERIFY(schemeAgain);
+        // 这份配置没存过外观。重开仍按测试钉住的亮色勾选，不能改成跟随系统。
+        auto *lightAgain = again.findChild<QAction *>(QStringLiteral("colorScheme_light"));
+        QVERIFY(lightAgain && lightAgain->isChecked());
+        QCOMPARE(AppTheme::mode(), AppTheme::Mode::Light);
         // 默认尺寸是 1280×860，且不再有 900×720 的下限；恢复后必须贴近"上次"，
         // 而不是退回默认——这是本用例要守的东西。
         //
@@ -5346,6 +5546,83 @@ private slots:
         QVERIFY2(qAbs(again.height() - savedHeight) <= 32,
             qPrintable(QStringLiteral("窗口高度应恢复到上次：实际 %1，上次 %2")
                            .arg(again.height()).arg(savedHeight)));
+    }
+
+    // 外观菜单可以在亮色、暗色、跟随系统之间切换，并把选择记下来。
+    void colorSchemeCanBeSwitchedAndRemembered()
+    {
+        const auto surface = [](QWidget *widget) {
+            return widget->palette().color(QPalette::Window);
+        };
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        QTest::qWait(30);
+        auto *button = window.findChild<QToolButton *>(QStringLiteral("colorScheme"));
+        auto *light = window.findChild<QAction *>(QStringLiteral("colorScheme_light"));
+        auto *dark = window.findChild<QAction *>(QStringLiteral("colorScheme_dark"));
+        auto *system = window.findChild<QAction *>(QStringLiteral("colorScheme_system"));
+        auto *bar = window.findChild<QStatusBar *>();
+        QVERIFY(button && light && dark && system && bar);
+        QVERIFY(button->menu());
+        QCOMPARE(button->text(), QString());
+        QVERIFY(!button->icon().isNull());
+        // 测试进程钉在亮色上，配置里还没有选择。窗口按当前模式勾亮色，不能改去跟随系统。
+        QVERIFY(light->isChecked());
+        QVERIFY(!dark->isChecked());
+        QVERIFY(!system->isChecked());
+        QCOMPARE(AppTheme::mode(), AppTheme::Mode::Light);
+        QCOMPARE(qApp->styleHints()->colorScheme(), Qt::ColorScheme::Light);
+
+        light->trigger();
+        QVERIFY(light->isChecked());
+        QVERIFY(!dark->isChecked());
+        QVERIFY(!system->isChecked());
+        QCOMPARE(AppTheme::mode(), AppTheme::Mode::Light);
+        QVERIFY(!AppTheme::isDark());
+        QCOMPARE(qApp->styleHints()->colorScheme(), Qt::ColorScheme::Light);
+        const QColor lightSurface = surface(bar);
+        QVERIFY2(lightSurface.lightness() > 200,
+            qPrintable(QStringLiteral("亮色状态栏应是浅底：%1").arg(lightSurface.name())));
+
+        dark->trigger();
+        QVERIFY(dark->isChecked());
+        QCOMPARE(AppTheme::mode(), AppTheme::Mode::Dark);
+        QVERIFY(AppTheme::isDark());
+        QCOMPARE(qApp->styleHints()->colorScheme(), Qt::ColorScheme::Dark);
+        const QColor darkSurface = surface(bar);
+        QVERIFY2(darkSurface.lightness() < 80,
+            qPrintable(QStringLiteral("暗色状态栏应是深底：%1").arg(darkSurface.name())));
+        QVERIFY(darkSurface != lightSurface);
+        window.close();
+        QTest::qWait(30);
+
+        MainWindow again;
+        again.setAttribute(Qt::WA_DontShowOnScreen);
+        again.show();
+        QTest::qWait(30);
+        auto *darkAgain = again.findChild<QAction *>(QStringLiteral("colorScheme_dark"));
+        QVERIFY(darkAgain && darkAgain->isChecked());
+        QVERIFY(AppTheme::isDark());
+        auto *barAgain = again.findChild<QStatusBar *>();
+        QVERIFY(barAgain);
+        QCOMPARE(surface(barAgain).lightness(), darkSurface.lightness());
+
+        auto *systemAgain = again.findChild<QAction *>(QStringLiteral("colorScheme_system"));
+        QVERIFY(systemAgain);
+        systemAgain->trigger();
+        QVERIFY(systemAgain->isChecked());
+        QCOMPARE(AppTheme::mode(), AppTheme::Mode::System);
+        // 手动钉过暗色之后放开，必须回到系统当前这一档，不能停在暗色上。
+        // 这台机器若正开着系统暗色，读回来就是暗色；Qt 报 Unknown 时按浅色处理。
+        const Qt::ColorScheme os = qApp->styleHints()->colorScheme();
+        const Qt::ColorScheme resolved = os == Qt::ColorScheme::Unknown ? Qt::ColorScheme::Light : os;
+        QCOMPARE(qApp->styleHints()->colorScheme(), resolved);
+        QCOMPARE(AppTheme::isDark(), resolved == Qt::ColorScheme::Dark);
+        // 后面的用例按浅色像素断言。这里已经放开到系统档，测完立刻钉回亮色，
+        // 不能等 cleanup：cleanup 在本用例返回之后才跑。
+        AppTheme::setMode(AppTheme::Mode::Light);
     }
 
     // 三条用户反馈的契约：

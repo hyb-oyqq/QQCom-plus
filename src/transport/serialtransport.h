@@ -16,9 +16,10 @@ public:
     void start(const PortDraft &draft, quint64 generation) override;
     void stop() override;
     qint64 write(const QByteArray &payload, const QUuid &peerId) override;
-    void discardPendingInput() override;
+    qint64 discardPendingInput() override;
 
 private:
+    void drainPort();
     void handlePortError(QSerialPort::SerialPortError error);
     QSerialPort *m_port = nullptr;
     // open() 失败会在 open() 内部同步发出 errorOccurred；此标志让错误处理

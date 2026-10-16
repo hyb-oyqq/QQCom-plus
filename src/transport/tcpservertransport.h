@@ -19,11 +19,12 @@ public:
     void start(const PortDraft &draft, quint64 generation) override;
     void stop() override;
     qint64 write(const QByteArray &payload, const QUuid &peerId) override;
-    void discardPendingInput() override;
+    qint64 discardPendingInput() override;
     QString writeAddress(const QUuid &peerId) const override;
 
 private:
     void acceptPending();
+    void drainPeer(QTcpSocket *socket);
     void detachPeer(QTcpSocket *socket);
     void publishPeers();
 

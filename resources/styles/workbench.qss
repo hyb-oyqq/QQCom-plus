@@ -180,9 +180,9 @@ QFrame#StatusDot { background: #94a2b8; border: none; border-radius: 3px; }
 QFrame#StatusDot[state="open"] { background: #047857; }
 QFrame#StatusDot[state="opening"] { background: #d97706; }
 QFrame#StatusDot[state="closed"] { background: #94a2b8; }
-/* 检查更新和置顶各一块浅底，和端点状态同一套。按钮本身透明，悬停只点亮按钮。 */
-QWidget#StatusActions, QWidget#StatusPin { background: #f4f6fa; border: 1px solid #e1e7f0; border-radius: 4px; }
-QStatusBar QToolButton#checkUpdate, QStatusBar QToolButton#stayOnTop {
+/* 检查更新、外观和置顶各一块浅底，和端点状态同一套。按钮本身透明，悬停只点亮按钮。 */
+QWidget#StatusActions, QWidget#StatusPin, QWidget#StatusScheme { background: #f4f6fa; border: 1px solid #e1e7f0; border-radius: 4px; }
+QStatusBar QToolButton#checkUpdate, QStatusBar QToolButton#stayOnTop, QStatusBar QToolButton#colorScheme {
     background: transparent;
     border: 1px solid transparent;
     border-radius: 3px;
@@ -193,27 +193,31 @@ QStatusBar QToolButton#checkUpdate, QStatusBar QToolButton#stayOnTop {
     font-size: 11px;
     color: #3d4c66;
 }
-QStatusBar QToolButton#stayOnTop { padding: 0; }
-QStatusBar QToolButton#checkUpdate:hover, QStatusBar QToolButton#stayOnTop:hover {
+QStatusBar QToolButton#stayOnTop, QStatusBar QToolButton#colorScheme { padding: 0; }
+QStatusBar QToolButton#checkUpdate:hover, QStatusBar QToolButton#stayOnTop:hover,
+QStatusBar QToolButton#colorScheme:hover {
     background: #e8eefb;
     border-color: transparent;
     color: #14326f;
 }
 QStatusBar QToolButton#checkUpdate:pressed, QStatusBar QToolButton#stayOnTop:pressed,
+QStatusBar QToolButton#colorScheme:pressed, QStatusBar QToolButton#colorScheme:checked,
 QStatusBar QToolButton#stayOnTop:checked {
     background: #d7e2f7;
     border-color: transparent;
     color: #14326f;
 }
-QLabel#StatusKey, QLabel#StatusKeyRx, QLabel#StatusKeyTx, QLabel#EndpointName {
+QLabel#StatusKey, QLabel#StatusKeyRx, QLabel#StatusKeyTx, QLabel#StatusKeyDrop, QLabel#EndpointName {
     font-size: 11px;
     font-weight: 600;
 }
 QLabel#StatusKey { color: #5c6880; }
 QLabel#StatusKeyRx { color: #047857; }
 QLabel#StatusKeyTx { color: #1d4ed8; }
+QLabel#StatusKeyDrop, QLabel#DropStatus { color: #c0392b; }
 QLabel#EndpointName { color: #182334; }
 QLabel#RxStatus, QLabel#TxStatus { color: #182334; font-size: 11px; font-weight: 600; }
+QLabel#DropStatus { font-size: 11px; font-weight: 600; }
 QLabel#StatusRate, QLabel#TrafficStatus, QLabel#RouteStatus, QLabel#EndpointState { color: #5c6880; }
 QLabel#RouteStatus[active="true"] { color: #1d4ed8; font-size: 11px; font-weight: 600; }
 QMenu { background: white; border: 1px solid #a9b5c9; padding: 4px; }
@@ -311,6 +315,11 @@ SendPanel QTabWidget::pane {
     background: transparent;
     top: 0px;
 }
+/* 与暗色表同一条：页签之间的空隙铺卡片色，不透调色板。 */
+SendPanel QTabBar {
+    background: #ffffff;
+    border: none;
+}
 SendPanel QTabBar::tab {
     background: #f4f6fa;
     border: 1px solid #c8d1e0;
@@ -333,3 +342,34 @@ SendPanel QTabBar::tab:hover:!selected {
     background: #e8eefb;
     color: #14326f;
 }
+
+/* 弹窗不在代码里再写一套浅色。消息框、输入框、导出框都吃这里，跟主界面一起换。
+   标签必须写透明底：QMessageBox 的说明文字默认会铺一块跟按钮一样的底。 */
+QMessageBox, QInputDialog, QDialog {
+    background: #ffffff;
+    color: #182334;
+}
+QMessageBox QLabel, QInputDialog QLabel {
+    color: #182334;
+    background: transparent;
+}
+QDialog QPushButton { min-width: 70px; padding: 2px 12px; }
+QDialog QPushButton:default {
+    background: #1d4ed8;
+    border-color: #1a45c0;
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 600;
+}
+QDialog QPushButton:default:hover { background: #163fb3; border-color: #163fb3; }
+QListWidget {
+    background: #ffffff;
+    color: #182334;
+    border: 1px solid #a9b5c9;
+    border-radius: 5px;
+}
+QListWidget::item { padding: 4px 8px; }
+QListWidget::item:hover { background: #e8eefb; }
+QListWidget::item:selected { background: #d3e0fa; color: #14326f; }
+/* 指令行的拖动手柄。颜色放在样式表里，深色表换一份，不要在代码里写死浅灰。 */
+QLabel#commandDragHandle { color: #8a94a6; background: #f1f5f9; }

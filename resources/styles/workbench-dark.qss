@@ -155,8 +155,8 @@ QFrame#StatusDot { background: #6b7690; border: none; border-radius: 3px; }
 QFrame#StatusDot[state="open"] { background: #10b981; }
 QFrame#StatusDot[state="opening"] { background: #f59e0b; }
 QFrame#StatusDot[state="closed"] { background: #6b7690; }
-QWidget#StatusActions, QWidget#StatusPin { background: #1e2433; border: 1px solid #343d52; border-radius: 4px; }
-QStatusBar QToolButton#checkUpdate, QStatusBar QToolButton#stayOnTop {
+QWidget#StatusActions, QWidget#StatusPin, QWidget#StatusScheme { background: #1e2433; border: 1px solid #343d52; border-radius: 4px; }
+QStatusBar QToolButton#checkUpdate, QStatusBar QToolButton#stayOnTop, QStatusBar QToolButton#colorScheme {
     background: transparent;
     border: 1px solid transparent;
     border-radius: 3px;
@@ -167,27 +167,31 @@ QStatusBar QToolButton#checkUpdate, QStatusBar QToolButton#stayOnTop {
     font-size: 11px;
     color: #c5d0e0;
 }
-QStatusBar QToolButton#stayOnTop { padding: 0; }
-QStatusBar QToolButton#checkUpdate:hover, QStatusBar QToolButton#stayOnTop:hover {
+QStatusBar QToolButton#stayOnTop, QStatusBar QToolButton#colorScheme { padding: 0; }
+QStatusBar QToolButton#checkUpdate:hover, QStatusBar QToolButton#stayOnTop:hover,
+QStatusBar QToolButton#colorScheme:hover {
     background: #2c3548;
     border-color: transparent;
     color: #e8eefb;
 }
 QStatusBar QToolButton#checkUpdate:pressed, QStatusBar QToolButton#stayOnTop:pressed,
+QStatusBar QToolButton#colorScheme:pressed, QStatusBar QToolButton#colorScheme:checked,
 QStatusBar QToolButton#stayOnTop:checked {
     background: #3d4861;
     border-color: transparent;
     color: #e8eefb;
 }
-QLabel#StatusKey, QLabel#StatusKeyRx, QLabel#StatusKeyTx, QLabel#EndpointName {
+QLabel#StatusKey, QLabel#StatusKeyRx, QLabel#StatusKeyTx, QLabel#StatusKeyDrop, QLabel#EndpointName {
     font-size: 11px;
     font-weight: 600;
 }
 QLabel#StatusKey { color: #8b95a8; }
 QLabel#StatusKeyRx { color: #10b981; }
 QLabel#StatusKeyTx { color: #5b9eff; }
+QLabel#StatusKeyDrop, QLabel#DropStatus { color: #f0a8a8; }
 QLabel#EndpointName { color: #e8ecf1; }
 QLabel#RxStatus, QLabel#TxStatus { color: #e8ecf1; font-size: 11px; font-weight: 600; }
+QLabel#DropStatus { font-size: 11px; font-weight: 600; }
 QLabel#StatusRate, QLabel#TrafficStatus, QLabel#RouteStatus, QLabel#EndpointState { color: #8b95a8; }
 QLabel#RouteStatus[active="true"] { color: #8eb6ff; font-size: 11px; font-weight: 600; }
 QTableView {
@@ -218,6 +222,12 @@ SendPanel QTabWidget::pane {
     background: transparent;
     top: 0px;
 }
+/* 基线已在代码里关掉（QTabBar::setDrawBase）。这里再铺卡片色，避免页签之间的空隙
+   透出浅色调色板。 */
+SendPanel QTabBar {
+    background: #242936;
+    border: none;
+}
 SendPanel QTabBar::tab {
     background: #2d3548;
     border: 1px solid #434d64;
@@ -240,3 +250,100 @@ SendPanel QTabBar::tab:hover:!selected {
     background: #353e56;
     color: #d4dae5;
 }
+QToolTip { color: #f4f6fa; background: #26324a; border: 1px solid #26324a; padding: 5px; }
+QScrollBar:vertical { background: #1a1f2e; width: 9px; margin: 0; }
+QScrollBar::handle:vertical { background: #434d64; min-height: 30px; border-radius: 4px; }
+QScrollBar::handle:vertical:hover { background: #5a6885; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal { background: #1a1f2e; height: 9px; margin: 0; }
+QScrollBar::handle:horizontal { background: #434d64; min-width: 30px; border-radius: 4px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QFrame#FilterDivider { color: #2d3649; max-width: 1px; }
+QPushButton#filterRx, QPushButton#filterTx,
+QPushButton#viewPureData, QPushButton#viewHexEcho, QPushButton#viewLineWrap,
+QPushButton#filterCaseSensitive, QPushButton#filterRegex,
+QPushButton#filterRebuild { padding: 2px 6px; }
+
+/* 与浅色表同一套结构。底和字按深色表面取，选中行用主蓝加白字。 */
+CommandPanel { background: #242936; border-left: 1px solid #2f3749; }
+CommandPanel QTableWidget {
+    background: #242936;
+    border: 1px solid #2f3749;
+    border-radius: 5px;
+    gridline-color: #2f3749;
+    color: #e8ecf1;
+}
+CommandPanel QTableWidget::item { padding: 0px; color: #e8ecf1; }
+CommandPanel QTableWidget::item:selected { background: #1d4ed8; color: #ffffff; }
+CommandPanel QHeaderView::section {
+    background: #1e2433;
+    border: none;
+    border-right: 1px solid #2f3749;
+    border-bottom: 1px solid #2f3749;
+    padding: 4px 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #8b95a8;
+}
+CommandPanel QPushButton#primaryButton {
+    background: #1d4ed8;
+    border-color: #1a45c0;
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 600;
+}
+CommandPanel QPushButton#primaryButton:hover { background: #2860e8; border-color: #2860e8; }
+CommandPanel QTabWidget::pane {
+    background: #242936;
+    border: 1px solid #2f3749;
+    border-radius: 5px;
+    top: -1px;
+}
+CommandPanel QTabBar::tab {
+    background: #2d3548;
+    border: 1px solid #434d64;
+    border-bottom: none;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+    padding: 3px 10px;
+    margin-right: 2px;
+    font-size: 12px;
+    color: #8b95a8;
+}
+CommandPanel QTabBar::tab:selected {
+    background: #242936;
+    color: #8eb6ff;
+    font-size: 12px;
+    font-weight: 600;
+    border-bottom: 2px solid #5b9eff;
+}
+CommandPanel QTabBar::tab:hover:!selected { background: #353e56; color: #d4dae5; }
+QLabel#commandDragHandle { color: #8b95a8; background: #2d3548; }
+
+/* 弹窗文字跟这份表走。不要在对话框上再写浅色字，否则深色底上仍是深字。 */
+QMessageBox, QInputDialog, QDialog {
+    background: #242936;
+    color: #e8ecf1;
+}
+QMessageBox QLabel, QInputDialog QLabel {
+    color: #e8ecf1;
+    background: transparent;
+}
+QDialog QPushButton { min-width: 70px; padding: 2px 12px; }
+QDialog QPushButton:default {
+    background: #1d4ed8;
+    border-color: #1a45c0;
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 600;
+}
+QDialog QPushButton:default:hover { background: #2860e8; border-color: #2860e8; }
+QListWidget {
+    background: #1e2433;
+    color: #e8ecf1;
+    border: 1px solid #434d64;
+    border-radius: 5px;
+}
+QListWidget::item { padding: 4px 8px; }
+QListWidget::item:hover { background: #353e56; }
+QListWidget::item:selected { background: #1d4ed8; color: #ffffff; }

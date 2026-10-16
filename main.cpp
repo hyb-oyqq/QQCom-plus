@@ -3,6 +3,8 @@
 #include "domain/networkaddress.h"
 #include "update/updateservice.h"
 
+#include "ui/common/apptheme.h"
+
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDateTime>
@@ -10,6 +12,7 @@
 #include <QFile>
 #include <QIcon>
 #include <QLocale>
+#include <QSettings>
 #include <QTimer>
 #include <QTranslator>
 #include <QUrl>
@@ -83,12 +86,19 @@ int main(int argc, char *argv[])
     a.setOrganizationName("QQCom");
     a.setApplicationVersion(QStringLiteral(QQCOM_VERSION_STR));
     a.setStyle("Fusion");
+    // 样式表写死了颜色，必须按明暗换整份。用户选过亮色或暗色时先钉住，再加载对应样式表，
+    // 避免先按系统画一遍再跳过去。没选过则跟随系统。
+    {
+        QSettings appearance(QSettings::IniFormat, QSettings::UserScope,
+            QStringLiteral("QQCom"), QStringLiteral("QQCom"));
+        const QString saved = appearance.value(QStringLiteral("window/colorScheme")).toString();
+        if (saved == QLatin1String("light") || saved == QLatin1String("dark"))
+            AppTheme::setMode(AppTheme::modeFromKey(saved));
+    }
+    AppTheme::install(&a);
     // 程序主图标（用户钦定 ActionResponse.ico）：exe 内嵌资源（RC_ICONS）管资源管理器，
     // 这行管运行中的窗口与任务栏——两处必须指向同一个图标，否则对不上。
     a.setWindowIcon(QIcon(":/icons/app.ico"));
-    QFile stylesheet(":/styles/workbench.qss");
-    if (stylesheet.open(QIODevice::ReadOnly))
-        a.setStyleSheet(QString::fromUtf8(stylesheet.readAll()));
 
     QCommandLineParser parser;
     parser.setApplicationDescription("QQCom communication workbench");

@@ -8,10 +8,13 @@
 #include "ui/panels/commands/commandpanel.h"
 #include "ui/common/payloadcodec.h"
 #include "ui/common/bytesformat.h"
+#include "ui/common/apptheme.h"
 #include "ui/common/tintedicon.h"
 #include "discovery/portdiscoveryservice.h"
 #include "persistence/preferencesstore.h"
 
+#include <QAction>
+#include <QActionGroup>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QEvent>
@@ -19,6 +22,7 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
 #include <QResizeEvent>
 #include <QSplitter>
 #include <QStatusBar>
@@ -38,7 +42,7 @@ namespace {
 constexpr int SerialAutoRefreshMs = 2000;
 // 收发速率的采样节拍：状态栏数字每秒跳一次足够可读，也更省 GUI 时间。
 constexpr int RateTickMs = 1000;
-// 状态栏右侧动作（检查更新、置顶）与端点状态块共用这一高度，中线才对齐。
+// 状态栏右侧动作（检查更新、外观、置顶）与端点状态块共用这一高度，中线才对齐。
 constexpr int StatusControlHeight = 20;
 
 // 左列（端口条 + 数据区）。内容有多宽只留给「展开面板」当起步宽度，
@@ -418,6 +422,23 @@ MainWindow::MainWindow(QWidget *parent)
     addGap(10);
     m_txRate = makeFigure(zeroRate, QStringLiteral("StatusRate"));
     addCentered(m_txRate);
+    // 没有丢弃时整组隐藏，分隔和间距也不占位。
+    m_dropGroup = new QWidget;
+    m_dropGroup->setObjectName(QStringLiteral("DropGroup"));
+    auto *dropLayout = new QHBoxLayout(m_dropGroup);
+    dropLayout->setContentsMargins(12, 0, 0, 0);
+    dropLayout->setSpacing(0);
+    auto *dropSep = makeStatusSeparator();
+    dropLayout->addWidget(dropSep, 0, Qt::AlignVCenter);
+    dropLayout->addSpacing(12);
+    auto *dropKey = makeKey(tr("丢弃"), QStringLiteral("StatusKeyDrop"));
+    dropKey->setToolTip(tr("读出失败、写出被拒绝或部分写出时扔掉的字节。为 0 时不显示。"));
+    dropLayout->addWidget(dropKey, 0, Qt::AlignVCenter);
+    dropLayout->addSpacing(8);
+    m_dropStatus = makeFigure(zeroBytes, QStringLiteral("DropStatus"));
+    dropLayout->addWidget(m_dropStatus, 0, Qt::AlignVCenter);
+    m_dropGroup->hide();
+    addCentered(m_dropGroup);
     addSep();
     m_trafficStatus = new QLabel(tr("共 0 条"));
     m_trafficStatus->setObjectName(QStringLiteral("TrafficStatus"));
@@ -440,8 +461,11 @@ MainWindow::MainWindow(QWidget *parent)
     // 语义身份而不是样式名：工作区里有多处标签共用 "Muted"，拿它定位是脆的。
     // 样式不丢——QSS 里 `QLabel#Muted, QLabel#StatusNote` 是同一条规则（见 styles/*.qss）。
     m_statusNote->setObjectName(QStringLiteral("StatusNote"));
-    m_statusNote->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    m_statusNote->setMaximumWidth(420);
+    // 左对齐：右对齐时超长会先裁掉左边，地址被切成「!7.0.0.1」。
+    // 短句按内容宽度显示。上限只防异常长句把右侧状态块挤出窗口。
+    m_statusNote->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_statusNote->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+    m_statusNote->setMaximumWidth(280);
     m_statusNote->hide();
     addGap(12);
     addCentered(m_statusNote);
@@ -475,8 +499,8 @@ MainWindow::MainWindow(QWidget *parent)
 
     addGap(6);
 
-    // 检查更新和置顶各占一块浅底，高度、圆角与端点状态一致。
-    // 合在同一块里时，文字和 12px 图钉贴在一起，点的时候分不清点到哪一个。
+    // 检查更新、外观和置顶各占一块浅底，高度、圆角与端点状态一致。
+    // 合在同一块里时，文字和 12px 图标贴在一起，点的时候分不清点到哪一个。
     const auto prepareAction = [](QToolButton *button) {
         button->setFixedHeight(StatusControlHeight - 2);
         button->setAutoRaise(true);
@@ -507,6 +531,45 @@ MainWindow::MainWindow(QWidget *parent)
     connect(checkUpdate, &QToolButton::clicked, this, &MainWindow::updateCheckRequested);
     addGap(6);
 #endif
+    auto *schemeChip = makeActionChip(QStringLiteral("StatusScheme"), 1, 1);
+    m_colorScheme = new QToolButton;
+    m_colorScheme->setObjectName(QStringLiteral("colorScheme"));
+    m_colorScheme->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_colorScheme->setIconSize(QSize(12, 12));
+    m_colorScheme->setFixedSize(StatusControlHeight - 2, StatusControlHeight - 2);
+    m_colorScheme->setPopupMode(QToolButton::InstantPopup);
+    m_colorScheme->setToolTip(tr("外观"));
+    m_colorScheme->setAccessibleName(tr("外观"));
+    prepareAction(m_colorScheme);
+    // 三选一用普通菜单：点一项就切换并收起。勾选保持打开的菜单只翻转勾选，不发 triggered。
+    auto *schemeMenu = new QMenu(m_colorScheme);
+    schemeMenu->setObjectName(QStringLiteral("colorSchemeMenu"));
+    auto *schemeGroup = new QActionGroup(schemeMenu);
+    schemeGroup->setExclusive(true);
+    const QString schemeLabels[3] = {tr("亮色"), tr("暗色"), tr("跟随系统")};
+    const QString schemeKeys[3] = {QStringLiteral("light"), QStringLiteral("dark"),
+        QStringLiteral("system")};
+    for (int index = 0; index < 3; ++index) {
+        auto *action = schemeMenu->addAction(schemeLabels[index]);
+        action->setObjectName(QStringLiteral("colorScheme_") + schemeKeys[index]);
+        action->setCheckable(true);
+        action->setData(schemeKeys[index]);
+        schemeGroup->addAction(action);
+        m_schemeActions[index] = action;
+        connect(action, &QAction::triggered, this, [this, key = schemeKeys[index]] {
+            setColorScheme(key, true);
+        });
+    }
+    m_colorScheme->setMenu(schemeMenu);
+    schemeChip->layout()->addWidget(m_colorScheme);
+    addCentered(schemeChip);
+    // 存过就按保存的来。没存过只把勾对准当前模式，不写入：
+    // 正式程序此时是跟随系统，测试进程会事先钉在亮色上。写入会把那一档当成用户的选择。
+    if (preferences->contains(QStringLiteral("window/colorScheme")))
+        setColorScheme(preferences->value(QStringLiteral("window/colorScheme")).toString(), true);
+    else
+        setColorScheme(AppTheme::modeKey(AppTheme::mode()), false);
+    addGap(6);
     auto *pinChip = makeActionChip(QStringLiteral("StatusPin"), 1, 1);
     m_stayOnTop = new QToolButton;
     m_stayOnTop->setObjectName(QStringLiteral("stayOnTop"));
@@ -520,6 +583,9 @@ MainWindow::MainWindow(QWidget *parent)
     pinChip->layout()->addWidget(m_stayOnTop);
     addCentered(pinChip);
     connect(m_stayOnTop, &QToolButton::toggled, this, &MainWindow::setStayOnTop);
+    connect(AppTheme::instance(), &AppTheme::schemeChanged, this, [this] {
+        if (m_stayOnTop) setStayOnTop(m_stayOnTop->isChecked());
+    });
     if (preferences->value(QStringLiteral("window/stayOnTop"), false).toBool())
         m_stayOnTop->setChecked(true);
     else
@@ -812,12 +878,22 @@ void MainWindow::handleMessage(const Traffic::Message &message)
         else if (message.state == Traffic::State::LocalCompleted
             || message.state == Traffic::State::Partial)
             m_txBytes += message.rawLength;
+    } else if (message.direction == Traffic::Direction::Error && message.rawLength > 0) {
+        // 错误行的 rawLength 只在确实扔掉字节时填写。打开失败等没有载荷的错误保持 0。
+        m_droppedBytes += message.rawLength;
+        if (m_dropStatus) {
+            m_dropStatus->setText(formatBytes(m_droppedBytes));
+            m_dropStatus->setToolTip(tr("已丢弃 %1").arg(formatBytes(m_droppedBytes)));
+        }
+        if (m_dropGroup) m_dropGroup->setVisible(true);
     }
     // 错误播报走状态栏右端的临时提示格（showStatusNote），**不是** showMessage：
     // 后者会隐藏所有 addWidget 挂的普通部件，把 RX/TX/条数统计整行顶掉——而打开失败
     // 常常连续发生，用户看到的正是"统计数据消失、很久才回来"（见 showStatusNote 说明）。
     if (message.direction == Traffic::Direction::Error && !message.statusText.isEmpty()) {
-        showStatusNote(message.statusText, 5000, true);
+        // 底部用短句。全文留在悬停、数据区和日志里。
+        const QString note = message.statusBrief.isEmpty() ? message.statusText : message.statusBrief;
+        showStatusNote(note, 5000, true, message.statusText);
         const int index = message.source.endpointIndex;
         // 监听/连接失败时状态仍是关闭，按钮文字不变。纯数据也不画错误行。
         // 已经处于打开中的运行时错误（例如客户端断开）不写到端口行上，避免把正在听的那一行盖住。
@@ -902,11 +978,38 @@ void MainWindow::releaseWindowSizeFloor()
             page->setSizeConstraint(QLayout::SetNoConstraint);
 }
 
+void MainWindow::setColorScheme(const QString &key, bool persist)
+{
+    const AppTheme::Mode mode = AppTheme::modeFromKey(key);
+    const QString stored = AppTheme::modeKey(mode);
+    // 已经是这一档就只同步勾选和图标。再 setMode 会让「跟随系统」把手动钉住的配色放开。
+    if (AppTheme::mode() != mode)
+        AppTheme::setMode(mode);
+    for (auto *action : m_schemeActions) {
+        if (!action) continue;
+        const bool selected = action->data().toString() == stored;
+        if (action->isChecked() != selected) action->setChecked(selected);
+    }
+    if (m_colorScheme) {
+        const QColor color = AppTheme::isDark() ? QColor(0xe8, 0xee, 0xfb) : QColor(0x14, 0x32, 0x6f);
+        m_colorScheme->setIcon(tintedIcon(QStringLiteral(":/icons/theme.svg"), color, 12));
+        const QString label = mode == AppTheme::Mode::Light ? tr("亮色")
+            : mode == AppTheme::Mode::Dark ? tr("暗色")
+                                            : tr("跟随系统");
+        m_colorScheme->setToolTip(tr("外观：%1").arg(label));
+    }
+    if (persist && m_preferences
+        && m_preferences->value(QStringLiteral("window/colorScheme")).toString() != stored)
+        m_preferences->setValue(QStringLiteral("window/colorScheme"), stored);
+}
+
 void MainWindow::setStayOnTop(bool on)
 {
     if (m_stayOnTop) {
-        // 图钉：未置顶是空心，置顶后填实。颜色跟浅色状态栏的静音字和选中字。
-        const QColor color = on ? QColor(0x14, 0x32, 0x6f) : QColor(0x64, 0x75, 0x90);
+        // 图钉：未置顶是空心，置顶后填实。颜色跟当前主题状态栏的静音字和选中字。
+        const QColor color = AppTheme::isDark()
+            ? (on ? QColor(0xe8, 0xee, 0xfb) : QColor(0x8b, 0x95, 0xa8))
+            : (on ? QColor(0x14, 0x32, 0x6f) : QColor(0x64, 0x75, 0x90));
         m_stayOnTop->setIcon(tintedIcon(on ? QStringLiteral(":/icons/pin.svg")
                                            : QStringLiteral(":/icons/pin-outline.svg"),
             color, 12));
@@ -974,7 +1077,7 @@ void MainWindow::updateEndpointStatus()
     m_statusNote->hide();
 }
 
-void MainWindow::showStatusNote(const QString &text, int ms, bool alert)
+void MainWindow::showStatusNote(const QString &text, int ms, bool alert, const QString &detail)
 {
     if (!m_statusNote) return;
     if (!m_statusNoteTimer) {
@@ -984,7 +1087,7 @@ void MainWindow::showStatusNote(const QString &text, int ms, bool alert)
         connect(m_statusNoteTimer, &QTimer::timeout, this, &MainWindow::updateEndpointStatus);
     }
     m_statusNote->setText(text);
-    m_statusNote->setToolTip(text);
+    m_statusNote->setToolTip(detail.isEmpty() ? text : detail);
     restyleProperty(m_statusNote, "tone", alert ? QStringLiteral("error") : QString());
     m_statusNote->setVisible(!text.isEmpty());
     m_statusNoteTimer->start(qMax(1, ms));

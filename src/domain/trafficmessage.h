@@ -115,6 +115,8 @@ struct Message
     // 自由文本，只放机器放不进去的说明：分包器名称、错误码含义、停止原因。
     // 能用枚举表达的一律用枚举，别往这里塞可枚举的状态。
     QString statusText;
+    // 状态栏用的短句。空则界面回退到 statusText。日志和数据区仍用上面那句全文。
+    QString statusBrief;
 
     bool isValid() const { return id != 0 || !raw.isEmpty() || !source.endpointId.isNull(); }
     bool isData() const { return direction == Direction::Receive || direction == Direction::Transmit; }

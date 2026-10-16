@@ -38,9 +38,10 @@ public:
     // 不在此函数内。
     virtual qint64 write(const QByteArray &payload, const QUuid &peerId) = 0;
 
-    // 丢掉打开前已经到达、还没读走的内容。桥接建立和端点打开时调用，
-    // 避免把开关前的旧字节转发出去。关闭时不调用：意外断开不该靠丢缓冲来收拾。
-    virtual void discardPendingInput();
+    // 丢掉已经在 Qt 缓冲里、还没交给上层的内容。桥接建立时调用，避免把开关前的旧字节转发出去。
+    // 端点打开不要在订阅 readyRead 之后调用：那会吃掉会话第一包。关闭时不调用。
+    // 返回丢掉的字节数。缓冲里没有可读内容时返回 0，不碰空的串口缓冲。
+    virtual qint64 discardPendingInput();
 
     // 这次写出实际交给了谁。单目标端点返回固定对端或配置目标；
     // TCP 服务器按 peerId 返回该客户端，空 peerId 且只有一个客户端时返回那一个。
@@ -58,8 +59,9 @@ signals:
     void peerListChanged(quint64 generation, const QList<Transport::PeerInfo> &peers);
     // TCP 服务器识别到一个客户端完成握手。UDP 没有连接，不发这个信号。
     void peerConnected(quint64 generation, const QUuid &peerId, const QString &address);
-    // 离散错误：打开失败、意外断开、设备拔出等。状态变化仍走 stateChanged。
-    void errorOccurred(quint64 generation, const QString &message);
+    // 离散错误：打开失败、意外断开、设备拔出、读出失败等。状态变化仍走 stateChanged。
+    // droppedBytes 大于 0 表示这次错误扔掉了这么多字节，界面据此累计。
+    void errorOccurred(quint64 generation, const QString &message, qint64 droppedBytes = 0);
 
 protected:
     // 组装消息来源：草稿身份 + 本会话代次 + peer 信息（如有）。
