@@ -165,14 +165,15 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 菜单用完整名。顶栏三个按钮仍是短名，写在 ViewToggles::bind，避免把顶栏撑开。
     m_prefixAction = rowToggle("prefix", tr("显示前缀"), true);
     m_prefixAction->setToolTip(tr(
-        "勾上后每条另起一行，并显示端口、收发方向，以及下面的行号、时间和长度。"
+        "勾上后每条另起一行，并显示端口、收发方向、时间和长度。"
         "端口写成 [A]/[B]，接收是 <<--，发送是 -->>，转发写成 TX+FWD。\n"
         "关掉后是纯数据：接收字节连续接在上一包后面，换行只来自数据自身。"
-        "发送、状态、警告、错误和 HEX 都不显示。打开失败会写在端口行上。A 为琥珀色，B 为青色。\n"
+        "发送、状态、警告、错误和 HEX 都不显示。打开失败会写在端口行上。\n"
+        "行号在左侧，A 为琥珀色，B 为青色，正文保留数据自己的颜色。"
         "再次勾上后，纯数据期间没显示的行会重新出现。"));
     displayMenu->addSeparator();
     m_prefixLineNumberAction = rowToggle("prefixLineNumber", tr("前缀行号"), true);
-    m_prefixLineNumberAction->setToolTip(tr("每条记录开头显示序号，例如「1」「2」"));
+    m_prefixLineNumberAction->setVisible(false);
     m_prefixTimestampAction = rowToggle("prefixTimestamp", tr("前缀时间戳"), true);
     m_prefixTimestampAction->setToolTip(tr("每条记录显示到达时间，精确到毫秒"));
     m_prefixLengthAction = rowToggle("prefixLength", tr("前缀数据长度"), true);
@@ -182,10 +183,10 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_alwaysShowHexAction->setToolTip(tr(
         "在数据行下面另起一行显示 HEX 对照。显示格式已经是 HEX 时不再重复。"
         "纯数据时不可用；勾上「显示前缀」后按当前勾选恢复。"));
-    // 关掉「显示前缀」时，行号/时间/长度和 HEX 对照都置灰。换行不跟前缀走。
+    // 关掉「显示前缀」时，时间和长度、HEX 对照都置灰。换行不跟前缀走。
+    // 行号画在左侧槽里，不跟这个开关。
     connect(m_prefixAction, &QAction::toggled, this, [this](bool prefixes) {
-        for (auto *action : {m_prefixLineNumberAction, m_prefixTimestampAction, m_prefixLengthAction,
-                             m_alwaysShowHexAction})
+        for (auto *action : {m_prefixTimestampAction, m_prefixLengthAction, m_alwaysShowHexAction})
             action->setEnabled(prefixes);
     });
     m_autoWrapAction = rowToggle("autoWrap", tr("自动换行"), true);
@@ -474,6 +475,9 @@ void TrafficPanel::setPorts(const QList<PortDraft> &ports)
     // 端点身份在会话内稳定；这里只刷新两个开关携带的身份并重算可见集合。
     m_portAButton->setProperty("endpoint", ports.value(0).id);
     m_portBButton->setProperty("endpoint", ports.value(1).id);
+    if (m_text) {
+        m_text->setPortLabels(portShortLabel(ports.value(0)), portShortLabel(ports.value(1)));
+    }
     updatePortVisibility();
 }
 
@@ -866,9 +870,8 @@ void TrafficPanel::loadPreferences()
         ? m_preferences->value("traffic/prefix").toBool()
         : !m_preferences->value("traffic/pure", false).toBool();
     m_prefixAction->setChecked(prefixOn);
-    // toggled 在值没变时不发。启动时前缀已是关掉的，要在这里把下面三项置灰。
-    for (auto *action : {m_prefixLineNumberAction, m_prefixTimestampAction, m_prefixLengthAction,
-                         m_alwaysShowHexAction})
+    // toggled 在值没变时不发。启动时前缀已是关掉的，要在这里把时间和长度、HEX 置灰。
+    for (auto *action : {m_prefixTimestampAction, m_prefixLengthAction, m_alwaysShowHexAction})
         action->setEnabled(prefixOn);
     // 初次启动自动换行打开。键不存在时用这个缺省。
     m_autoWrapAction->setChecked(m_preferences->value("traffic/autoWrap",
