@@ -640,7 +640,7 @@ private slots:
         framing.delimiter = QByteArray::fromHex("0D0A");
         framing.idleTimeoutMs = 120;
         framing.bufferThresholdBytes = 300;
-        framing.logHints = true; // 兜底输出要发警告事件
+        framing.logHints = true; // 兜底输出要发一条信息
         draft.framing = framing;
 
         runtime.openEndpoint(0, draft);
@@ -695,7 +695,7 @@ private slots:
         QTRY_VERIFY([&messages] {
             for (const auto &params : messages) {
                 const auto message = params.at(0).value<Traffic::Message>();
-                if (message.direction == Traffic::Direction::Warning) return true;
+                if (message.direction == Traffic::Direction::Info) return true;
             }
             return false;
         }());
@@ -963,7 +963,7 @@ private slots:
             int count = 0;
             for (const auto &params : messages) {
                 const auto message = params.at(0).value<Traffic::Message>();
-                if (message.direction == Traffic::Direction::State && message.source.endpointIndex == 0
+                if (message.direction == Traffic::Direction::Info && message.source.endpointIndex == 0
                     && message.statusText.contains(QStringLiteral("对端"))
                     && message.statusText.contains(QStringLiteral("已连接")))
                     ++count;

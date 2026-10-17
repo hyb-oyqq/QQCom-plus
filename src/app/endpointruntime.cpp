@@ -158,8 +158,8 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             // 数据报自带边界，直接就是一条；字节流片段才交给组帧器。
             // 先发布本端收到，再写转发。反过来日志会先出现对端 TX+FWD，再出现本端 RX。
             if (Traffic::Framing(framing) != Traffic::Framing::Stream) {
-                // UDP 没有握手。首次收到某个来源的数据报，就在数据区记一条对端已出现。
-                // 只记来源，不改用户指定的发送目标。
+                // UDP 没有握手。首次收到某个来源的数据报，就在数据区记一条信息。
+                // 只记来源，不改用户指定的发送目标，也不算端口状态迁移。
                 if (m_drafts[index].kind == PortDraft::Udp && source.hasPeer()
                     && !m_observedUdpPeers[index].contains(source.peerAddress)) {
                     m_observedUdpPeers[index].insert(source.peerAddress);
@@ -167,7 +167,7 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
                     peers.sort();
                     emit endpointPeersChanged(index, peers);
 
-                    auto notice = makeMessage(index, Traffic::Direction::State,
+                    auto notice = makeMessage(index, Traffic::Direction::Info,
                         Traffic::Origin::Automatic, {}, Traffic::Framing::Message);
                     notice.source = source;
                     notice.statusText = tr("%1 · 对端 %2 已连接")
@@ -197,7 +197,7 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
     connect(transport, &AbstractTransport::peerConnected, this,
         [this, index, generation](quint64 gen, const QUuid &peerId, const QString &address) {
             if (gen != m_generations[index]) return;
-            auto notice = makeMessage(index, Traffic::Direction::State, Traffic::Origin::Automatic,
+            auto notice = makeMessage(index, Traffic::Direction::Info, Traffic::Origin::Automatic,
                 {}, Traffic::Framing::Message);
             notice.source.peerId = peerId;
             notice.source.peerAddress = address;
@@ -468,8 +468,9 @@ void EndpointRuntime::publishFrames(int index, const Traffic::Source &source,
         if (!frame.complete) message.hasMoreFragments = true;
         publish(std::move(message));
         // 提示日志：只有开关打开且这次输出有话要说才发，正常定界不产生噪声。
+        // 这是组帧说明，不是端口告警，前缀用 I。
         if (m_drafts[index].framing.logHints && !frame.hint.isEmpty()) {
-            auto hint = makeMessage(index, Traffic::Direction::Warning, Traffic::Origin::Automatic,
+            auto hint = makeMessage(index, Traffic::Direction::Info, Traffic::Origin::Automatic,
                 {}, Traffic::Framing::Message);
             hint.statusText = frame.hint;
             hint.source = source;

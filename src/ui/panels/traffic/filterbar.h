@@ -9,7 +9,7 @@ class QPushButton;
 
 // 条件条的完整状态：与 TrafficFilter::Options 的内容条件一一对应，不依赖它——
 // 条件条只是"收集条件"，不引入反向依赖，也便于单测直接构造。
-// 方向与事件开关（rx/tx/states/warnings/errors）**不在这里**：它们管的是"哪些行进来"
+// 方向与事件开关（rx/tx/infos/warnings/errors/states）**不在这里**：它们管的是"哪些行进来"
 // 而不是"行里的内容长什么样"。方向开关常驻顶栏（FilterFlags），事件开关在显示设置菜单
 // （用户钦定）——两者都在本控件之外，但"重置"要能把它们一并复位，见 setResetAvailable。
 struct FilterBarState

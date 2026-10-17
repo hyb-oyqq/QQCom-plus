@@ -22,6 +22,7 @@ class QAction;
 class QComboBox;
 class QFile;
 class QLabel;
+class QTextStream;
 class QLineEdit;
 class QMenu;
 class PreferencesStore;
@@ -103,7 +104,7 @@ private:
     // 折叠按钮的文字：状态 + 生效条件数，收起时也能一眼看出"当前在过滤"。
     void refreshFilterToggle();
     int activeFlagCount() const;
-    // 过滤开关的完整汇总：方向两项来自顶栏 FilterFlags，事件三项来自显示设置菜单的
+    // 过滤开关的完整汇总：方向两项来自顶栏 FilterFlags，事件四项来自显示设置菜单的
     // QAction。两项分住两处是"顶栏腾位置"的结果，汇总只此一处——其余代码一律读它，
     // 不再各自记"哪项在哪"。
     FilterFlagsState filterFlagsState() const;
@@ -160,12 +161,13 @@ private:
     // 时也要能点。分工不同——方向管"哪些行进来"，显示开关管"每行长什么样"。
     QPushButton *m_filterToggle;
     FilterFlags *m_flags;
-    ViewToggles *m_viewToggles = nullptr; // 显示前缀 / 始终显示 HEX / 自动换行
+    ViewToggles *m_viewToggles = nullptr; // 显示前缀 / 显示颜色 / 始终显示 HEX / 自动换行
     FilterBar *m_filterBar;
-    // 事件开关：显示状态 / 显示警告 / 显示错误
-    QAction *m_showStateAction;
-    QAction *m_showWarningAction;
-    QAction *m_showErrorAction;
+    // 事件开关：显示信息 / 显示警告 / 显示错误 / 显示状态
+    QAction *m_showInfoAction = nullptr;
+    QAction *m_showWarningAction = nullptr;
+    QAction *m_showErrorAction = nullptr;
+    QAction *m_showStateAction = nullptr;
     // 指令面板切换按钮
     QPushButton *m_commandPanelToggle = nullptr;
     // 折叠状态用显式标志而不是 isVisible()：窗口整体隐藏时 isVisible() 恒为假，
@@ -177,6 +179,7 @@ private:
     // 行内容开关。关掉「显示前缀」后进入纯数据：行号、时间、长度、端口方向和 HEX 对照
     // 一起不可用，屏幕只连续显示接收字节。端口方向没有单独开关，跟着前缀总开关。
     QAction *m_prefixAction;            // 显示前缀
+    QAction *m_showAnsiAction = nullptr; // 显示颜色：勾上着色并藏起转义，关掉则原文显示前后缀
     QAction *m_prefixLineNumberAction;  // 前缀行号
     QAction *m_prefixTimestampAction;   // 前缀时间戳
     QAction *m_prefixLengthAction;      // 前缀数据长度
@@ -224,10 +227,13 @@ private:
     PayloadCodec::Format m_projectedFormat = PayloadCodec::Format::Hex;
     TrafficTextView::DisplayOptions m_projectedDisplay;
     bool m_everProjected = false; // 一次投影都没做过时视图是空的，没有"跟不上"这回事
+    // 防抖窗口内按当前条件先画上的行。签名若被拨回上次投影的值，仍要重放一次。
+    bool m_incrementalDiverged = false;
     QTimer *m_reprojectTimer = nullptr;
     PreferencesStore *m_preferences = nullptr;
     bool m_loading = false; // 加载偏好期间联动触发的保存要抑制，否则半成品状态会覆盖已存值
     QFile *m_logFile = nullptr;   // 打开期间持续写入；关闭开关、重开或析构时收口
+    QTextStream *m_logStream = nullptr; // 与 m_logFile 同寿命，避免每批重建编码器
     // 用户选定的**模板**路径（不含时间戳）。空表示还没手动指定，用程序目录下的
     // log/QQCom-log.txt。它只用来定"目录 + 基名 + 扩展名"，实际文件名每次带时间戳另起。
     // 存模板而不是实际路径，是为了避免重启后时间戳层层叠加。

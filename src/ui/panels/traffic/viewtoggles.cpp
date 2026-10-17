@@ -63,18 +63,22 @@ ViewToggles::ViewToggles(QWidget *parent) : QWidget(parent)
     // 点亮表示正在显示前缀：每行先是行首标记，再是正文。
     m_prefix = makeToggle(this, QStringLiteral("viewPrefix"),
         QStringLiteral(":/icons/prefix.svg"));
+    // 点亮表示按颜色显示，并藏起 ESC[36;22m 这类前后缀。
+    m_showAnsi = makeToggle(this, QStringLiteral("viewAnsiColor"),
+        QStringLiteral(":/icons/format-letter-case.svg"));
     m_alwaysShowHex = makeToggle(this, QStringLiteral("viewAlwaysShowHex"),
         QStringLiteral(":/icons/numeric.svg"));
     m_autoWrap = makeToggle(this, QStringLiteral("viewAutoWrap"), QStringLiteral(":/icons/wrap.svg"));
 
-    for (auto *button : {m_prefix, m_alwaysShowHex, m_autoWrap}) row->addWidget(button);
-    // 三个开关按自己的 sizeHint 占位，这一行的下限由布局自己算（见 rowmetrics.h）。
+    for (auto *button : {m_prefix, m_showAnsi, m_alwaysShowHex, m_autoWrap}) row->addWidget(button);
+    // 四个开关按自己的 sizeHint 占位，这一行的下限由布局自己算（见 rowmetrics.h）。
     pinRowToContents(row);
 }
 
-void ViewToggles::bind(QAction *prefix, QAction *alwaysShowHex, QAction *autoWrap)
+void ViewToggles::bind(QAction *prefix, QAction *showAnsi, QAction *alwaysShowHex, QAction *autoWrap)
 {
     bindToggleButton(m_prefix, prefix, QStringLiteral("前缀"));
+    bindToggleButton(m_showAnsi, showAnsi, QStringLiteral("颜色"));
     bindToggleButton(m_alwaysShowHex, alwaysShowHex, QStringLiteral("HEX"));
     bindToggleButton(m_autoWrap, autoWrap, QStringLiteral("换行"));
 }

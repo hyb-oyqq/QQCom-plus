@@ -11,9 +11,10 @@ QString directionName(Direction direction)
     switch (direction) {
     case Direction::Receive: return QStringLiteral("RX");
     case Direction::Transmit: return QStringLiteral("TX");
-    case Direction::State: return QStringLiteral("STATE");
-    case Direction::Warning: return QStringLiteral("WARN");
-    case Direction::Error: return QStringLiteral("ERR");
+    case Direction::Info: return QStringLiteral("I");
+    case Direction::Warning: return QStringLiteral("W");
+    case Direction::Error: return QStringLiteral("E");
+    case Direction::State: return QStringLiteral("S");
     }
     return {};
 }

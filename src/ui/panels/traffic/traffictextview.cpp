@@ -5,11 +5,15 @@
 #include <QColor>
 #include <QFontMetrics>
 #include <QHelpEvent>
+#include <QImage>
 #include <QPainter>
+#include <QtMath>
 #include <QScrollBar>
 #include <QTextBlock>
 #include <QTextCursor>
+#include <QTextLayout>
 #include <QToolTip>
+#include <QTimer>
 
 namespace {
 
@@ -18,7 +22,11 @@ namespace {
 class LineNumberBar : public QWidget
 {
 public:
-    explicit LineNumberBar(TrafficTextView *view) : QWidget(view), m_view(view) {}
+    explicit LineNumberBar(TrafficTextView *view) : QWidget(view), m_view(view)
+    {
+        // 绘制时自己铺满底色，省掉 Qt 先擦一遍再画。
+        setAttribute(Qt::WA_OpaquePaintEvent);
+    }
 
 protected:
     void paintEvent(QPaintEvent *event) override { m_view->paintGutter(event); }
@@ -50,6 +58,11 @@ namespace {
 // 内存由这两个总预算兜底——行数上限挡堆行，字符预算挡"行少但极长"的会话，
 // 超限都从头部整块淘汰，总内存永远有界。
 constexpr int CharTrimReservePercent = 10; // 一次淘汰到预算的 90%，避免逐批都做头部搬移
+// 行号表的死前缀攒到这么多再收一次。触顶后每批只挪起点，不再搬整份表。
+constexpr int MarkCompactThreshold = 1024;
+// 半截 ESC[ 只暂留这么久。默认组帧空闲是 10ms，USB 分包间隙通常更短；
+// 尾包一直不来时，这段时间过后按原文画出来，已经画上的正文不等它。
+constexpr int AnsiHoldMs = 80;
 
 // 语义配色：与工作台主色（连接按钮 #1D4ED8）同一族的高饱和色，浅底上都够深、够清楚。
 // 前缀元信息（行号/时间/长度）与正文同色（#1C2430）——用户钦定：前缀加粗后与正文
@@ -78,6 +91,15 @@ QColor RxColor()
 }
 QColor PortAColor() { return QColor(0xB4, 0x53, 0x09); }
 QColor PortBColor() { return QColor(0x0E, 0x74, 0x90); }
+// 行号是定位用的，不参与端口分色。亮色会把眼睛从正文上拉开，也显得和正文不在一条线上。
+QColor GutterNumberColor()
+{
+    return AppTheme::isDark() ? QColor(0x6B, 0x75, 0x85) : QColor(0x8A, 0x94, 0xA6);
+}
+QColor InfoColor()
+{
+    return AppTheme::isDark() ? QColor(0x7D, 0xD3, 0xFC) : QColor(0x0C, 0x4A, 0x6E);
+}
 QColor StateColor()
 {
     return AppTheme::isDark() ? QColor(0xC4, 0xB5, 0xFD) : QColor(0x6D, 0x28, 0xD9);
@@ -105,7 +127,7 @@ QString portLetter(int endpointIndex)
 }
 
 // 收发箭头只画在数据行上，用 ASCII，13px 下比单字符箭头清楚。
-// 发送 -->>，接收 <<--。状态、警告、错误不画箭头，也不补空格。
+// 发送 -->>，接收 <<--。信息、警告、错误、状态不画箭头，也不补空格。
 QString directionArrow(Traffic::Direction direction)
 {
     return direction == Traffic::Direction::Transmit
@@ -118,9 +140,10 @@ QColor directionColor(Traffic::Direction direction)
     switch (direction) {
     case Traffic::Direction::Transmit: return TxColor();
     case Traffic::Direction::Receive: return RxColor();
-    case Traffic::Direction::State: return StateColor();
+    case Traffic::Direction::Info: return InfoColor();
     case Traffic::Direction::Warning: return WarningColor();
     case Traffic::Direction::Error: return ErrorColor();
+    case Traffic::Direction::State: return StateColor();
     }
     return MetaColor();
 }
@@ -172,76 +195,144 @@ struct TextRun
     QTextCharFormat fmt;
 };
 
-// 把载荷切成带格式的分片。支持 SGR 前景色（30-37 / 90-97）、256 色里的标准色、
-// 加粗（1）与复位。22 只取消加粗，39 只取消前景色；整段复位才是 0。
-// 设备日志常把级别色和普通字重写在同一段里（ESC[36;22m），把 22 当成整段复位
-// 会把刚设上的颜色清回底色，整行看起来就像没有颜色。
-// 其余序列（背景色、光标控制等）识别到即剥离、不渲染。
-// 参数段超过 32 字符或没有终结的 'm'，按普通文本原样保留——被截断的转义序列
-// 不该吞掉真实数据。整段没有 ESC 时直接走单分片快速路径，不付解析成本。
-QList<TextRun> toRuns(const QString &payload, const QTextCharFormat &base)
+// 同一条接收流上的 ANSI 状态。串口分包会把 ESC[36;22m 切在任意字节上；
+// 半截序列先攒着，下一包接上后再当成一条转义处理。颜色和字重同样跨包保留。
+struct AnsiCarry
 {
-    if (!payload.contains(QChar(0x1B))) return {{payload, base}};
-    QList<TextRun> runs;
-    QTextCharFormat fmt = base;
-    QString plain;
-    plain.reserve(payload.size());
-    const auto flush = [&] {
-        if (!plain.isEmpty()) {
-            runs.append({plain, fmt});
-            plain.clear();
+    QTextCharFormat fmt;
+    QString pending;
+};
+
+void applySgr(QTextCharFormat &fmt, const QTextCharFormat &base, const QString &params)
+{
+    const auto codes = params.split(QLatin1Char(';'), Qt::KeepEmptyParts);
+    const QStringList applied = codes.isEmpty() ? QStringList{QStringLiteral("0")} : codes;
+    for (int c = 0; c < applied.size(); ++c) {
+        bool ok = false;
+        const int value = applied.at(c).toInt(&ok);
+        if (!ok) {
+            if (applied.at(c).isEmpty() && applied.size() == 1) fmt = base;
+            continue;
         }
-    };
-    for (int i = 0; i < payload.size();) {
-        const bool esc = payload.at(i) == QChar(0x1B) && i + 1 < payload.size()
-            && payload.at(i + 1) == QLatin1Char('[');
-        int end = -1;
-        if (esc) {
-            int j = i + 2;
-            while (j < payload.size() && j - i < 32
-                   && (payload.at(j).isDigit() || payload.at(j) == QLatin1Char(';')))
-                ++j;
-            if (j < payload.size() && payload.at(j) == QLatin1Char('m')) end = j;
+        if (value == 0) fmt = base;
+        else if (value == 1) fmt.setFontWeight(QFont::Bold);
+        else if (value == 22) fmt.setFontWeight(base.fontWeight());
+        else if (value == 39) fmt.setForeground(base.foreground());
+        else if (value >= 30 && value <= 37) fmt.setForeground(ansiColor(value - 30, false));
+        else if (value >= 90 && value <= 97) fmt.setForeground(ansiColor(value - 90, true));
+        else if (value == 38 && c + 2 < applied.size()) {
+            // 256 色：38;5;n。0–15 落回上面那张 16 色表，其余保持当前色。
+            bool modeOk = false;
+            bool indexOk = false;
+            const int mode = applied.at(c + 1).toInt(&modeOk);
+            const int index = applied.at(c + 2).toInt(&indexOk);
+            if (modeOk && indexOk && mode == 5 && index >= 0 && index <= 15)
+                fmt.setForeground(ansiColor(index % 8, index >= 8));
+            c += 2;
         }
-        if (!esc) {
-            plain += payload.at(i);
+    }
+}
+
+// 把一段接收字节切成带格式的分片。carry 是这条流上一次没画完的转义和当前笔色。
+// 包尾的 ESC 或 ESC[36 先放进 carry.pending，不按字面画出来。
+// 参数段超过 32 字符，或明确不是 SGR 的字节，才按普通文本保留。
+// 关掉颜色时，HEX 跟正文走：正文里还看得到的颜色前后缀，对照里也要有对应字节。
+// 换行只用来断行，不进对照。\xNN、\t 还原成那一个控制字节，避免把转义记成四个字符。
+QString visibleCompanionHex(const QString &text)
+{
+    QByteArray bytes;
+    bytes.reserve(text.size());
+    for (int i = 0; i < text.size();) {
+        const QChar c = text.at(i);
+        if (c == QChar::ParagraphSeparator || c == QLatin1Char('\n') || c == QLatin1Char('\r')) {
             ++i;
             continue;
         }
-        if (end < 0) { // 残缺序列：按字面显示，不吞字节
-            plain += payload.at(i);
+        if (c == QLatin1Char('\\') && i + 3 < text.size() && text.at(i + 1) == QLatin1Char('x')) {
+            bool ok = false;
+            const int value = text.mid(i + 2, 2).toInt(&ok, 16);
+            if (ok && value >= 0 && value <= 255) {
+                bytes.append(char(value));
+                i += 4;
+                continue;
+            }
+        }
+        if (c == QLatin1Char('\\') && i + 1 < text.size()) {
+            const QChar next = text.at(i + 1);
+            if (next == QLatin1Char('t')) {
+                bytes.append('\t');
+                i += 2;
+                continue;
+            }
+            if (next == QLatin1Char('\\')) {
+                bytes.append('\\');
+                i += 2;
+                continue;
+            }
+        }
+        const ushort u = c.unicode();
+        if (u < 0x80)
+            bytes.append(char(u));
+        else
+            bytes.append(QString(c).toUtf8());
+        ++i;
+    }
+    return QString::fromLatin1(bytes.toHex(' ')).toUpper();
+}
+QList<TextRun> toRuns(const QString &payload, const QTextCharFormat &base, AnsiCarry &carry)
+{
+    QString scan;
+    if (!carry.pending.isEmpty()) {
+        scan.reserve(carry.pending.size() + payload.size());
+        scan = carry.pending;
+        scan += payload;
+        carry.pending.clear();
+    }
+    const QString &text = scan.isEmpty() ? payload : scan;
+    QList<TextRun> runs;
+    QString plain;
+    plain.reserve(text.size());
+    const auto flush = [&] {
+        if (plain.isEmpty()) return;
+        runs.append({plain, carry.fmt});
+        plain.clear();
+    };
+    for (int i = 0; i < text.size();) {
+        if (text.at(i) != QChar(0x1B)) {
+            const int start = i;
+            ++i;
+            while (i < text.size() && text.at(i) != QChar(0x1B))
+                ++i;
+            plain += QStringView(text).mid(start, i - start);
+            continue;
+        }
+        // 包尾只剩 ESC，或 ESC 后面还没看到 '['：留给下一包。
+        if (i + 1 >= text.size()) {
+            carry.pending = text.mid(i);
+            break;
+        }
+        if (text.at(i + 1) != QLatin1Char('[')) {
+            plain += text.at(i);
+            ++i;
+            continue;
+        }
+        int j = i + 2;
+        while (j < text.size() && j - i < 32
+               && (text.at(j).isDigit() || text.at(j) == QLatin1Char(';')))
+            ++j;
+        const bool ended = j < text.size() && text.at(j) == QLatin1Char('m');
+        if (!ended && j >= text.size() && j - i < 32) {
+            carry.pending = text.mid(i);
+            break;
+        }
+        if (!ended) { // 超长或不是 SGR：ESC 当字面，后面继续扫
+            plain += text.at(i);
             ++i;
             continue;
         }
         flush();
-        const QString params = payload.mid(i + 2, end - (i + 2));
-        const auto codes = params.split(QLatin1Char(';'), Qt::KeepEmptyParts);
-        const QStringList applied = codes.isEmpty() ? QStringList{QStringLiteral("0")} : codes;
-        for (int c = 0; c < applied.size(); ++c) {
-            bool ok = false;
-            const int value = applied.at(c).toInt(&ok);
-            if (!ok) {
-                if (applied.at(c).isEmpty() && applied.size() == 1) fmt = base;
-                continue;
-            }
-            if (value == 0) fmt = base;
-            else if (value == 1) fmt.setFontWeight(QFont::Bold);
-            else if (value == 22) fmt.setFontWeight(base.fontWeight());
-            else if (value == 39) fmt.setForeground(base.foreground());
-            else if (value >= 30 && value <= 37) fmt.setForeground(ansiColor(value - 30, false));
-            else if (value >= 90 && value <= 97) fmt.setForeground(ansiColor(value - 90, true));
-            else if (value == 38 && c + 2 < applied.size()) {
-                // 256 色：38;5;n。0–15 落回上面那张 16 色表，其余保持底色。
-                bool modeOk = false;
-                bool indexOk = false;
-                const int mode = applied.at(c + 1).toInt(&modeOk);
-                const int index = applied.at(c + 2).toInt(&indexOk);
-                if (modeOk && indexOk && mode == 5 && index >= 0 && index <= 15)
-                    fmt.setForeground(ansiColor(index % 8, index >= 8));
-                c += 2;
-            }
-        }
-        i = end + 1;
+        applySgr(carry.fmt, base, text.mid(i + 2, j - (i + 2)));
+        i = j + 1;
     }
     flush();
     return runs;
@@ -263,35 +354,75 @@ TrafficTextView::TrafficTextView(QWidget *parent) : QPlainTextEdit(parent)
     // 整行等宽，行号、时间、载荷才能上下对齐，看起来才是命令行而不是比例字体的表格。
     // 字体**不在代码里设**：全局 QSS 的 font-family 会覆盖 setFont()（实测），
     // 统一由 QSS 保证——与发送区正文/预览同一套，见用例 hexDisplayFontIsUniform。
-    // 行号槽按当前字体的位数留白。空文档也留一列，第一行到达时不必再挤正文。
+    // 行号槽按当前字体的位数留白。空文档先留两位，第一行到达时不必再挤正文。
     m_bar = new LineNumberBar(this);
+    // 只接滚动和视口脏区。文档 contentsChanged 会在行号表还没改完时把整列标脏，
+    // 和这里叠在一起，每批日志都先搬一次像素再整列重画。
     connect(this, &QPlainTextEdit::updateRequest, this, &TrafficTextView::updateGutter);
-    connect(document(), &QTextDocument::contentsChanged, m_bar, [this] { if (m_bar) m_bar->update(); });
+    m_ansiHold.setSingleShot(true);
+    m_ansiHold.setTimerType(Qt::PreciseTimer);
+    m_ansiHold.setInterval(AnsiHoldMs);
+    connect(&m_ansiHold, &QTimer::timeout, this, &TrafficTextView::flushPendingAnsi);
     syncGutter();
+}
+
+void TrafficTextView::armAnsiHold()
+{
+    if (m_ansiPending.isEmpty()) {
+        stopAnsiHold();
+        return;
+    }
+    m_ansiHold.start(AnsiHoldMs);
+}
+
+void TrafficTextView::stopAnsiHold()
+{
+    m_ansiHold.stop();
+}
+
+void TrafficTextView::flushPendingAnsi()
+{
+    if (m_ansiPending.isEmpty()) return;
+    const GutterFreeze freeze(this, true);
+    QTextCursor cursor(document());
+    cursor.movePosition(QTextCursor::End);
+    cursor.beginEditBlock();
+    // 超时补字落在当前行尾。行号表若还没跟上文档块数，先补齐再写字。
+    if (liveMarks() < document()->blockCount()) {
+        LineMark mark;
+        mark.numbered = true;
+        mark.number = m_entryNumber++;
+        m_marks.append(mark);
+    }
+    cursor.setCharFormat(m_ansiFormat);
+    cursor.insertText(m_ansiPending);
+    cursor.endEditBlock();
+    m_ansiPending.clear();
+    stopAnsiHold();
 }
 
 quint64 TrafficTextView::lineNumberAt(int blockNumber) const
 {
-    if (blockNumber < 0 || blockNumber >= m_marks.size()) return 0;
-    return m_nextNumber + quint64(blockNumber);
+    if (blockNumber < 0 || blockNumber >= liveMarks()) return 0;
+    return markAt(blockNumber).number;
 }
 
 int TrafficTextView::lineEndpointAt(int blockNumber) const
 {
-    if (blockNumber < 0 || blockNumber >= m_marks.size()) return -1;
-    return m_marks.at(blockNumber).endpoint;
+    if (blockNumber < 0 || blockNumber >= liveMarks()) return -1;
+    return markAt(blockNumber).endpoint;
 }
 
 bool TrafficTextView::lineMixedAt(int blockNumber) const
 {
-    if (blockNumber < 0 || blockNumber >= m_marks.size()) return false;
-    return m_marks.at(blockNumber).mixed;
+    if (blockNumber < 0 || blockNumber >= liveMarks()) return false;
+    return markAt(blockNumber).mixed;
 }
 
 QString TrafficTextView::lineTipAt(int blockNumber) const
 {
-    if (blockNumber < 0 || blockNumber >= m_marks.size()) return {};
-    return lineTip(m_marks.at(blockNumber));
+    if (blockNumber < 0 || blockNumber >= liveMarks()) return {};
+    return lineTip(markAt(blockNumber));
 }
 
 void TrafficTextView::setPortLabels(const QString &portA, const QString &portB)
@@ -312,6 +443,10 @@ void TrafficTextView::appendMessages(
     const QList<Traffic::Message> &messages, PayloadCodec::Format format, const DisplayOptions &options)
 {
     if (messages.isEmpty()) return;
+
+    // 冻住槽直到行号表和文档一致。endEditBlock 会同步发出 updateRequest，
+    // 那时 Qt 可能已经按行数上限删了头部，行号表还没跟着删。
+    const GutterFreeze freeze(this, true);
 
     // 一次渲染 = 一个编辑块。**这是整个追加路径最重要的一条**：
     // 不在编辑块里的每一次 insertText 都会单独走一整轮"文档变更 → 排版标脏 →
@@ -337,20 +472,22 @@ void TrafficTextView::appendMessages(
     // QChar::ParagraphSeparator 是 QTextDocument 的块分隔符（appendPlainText 内部同款），
     // 用 '\n' 也成块但会在文本里留下歧义字符，显式用分隔符更干净。
     bool needSeparator = options.prefix && !document()->isEmpty();
+    // 载荷里的换行才是续行。上一条记录结束时留下的分隔，是下一条记录的首行。
+    bool nextIsContinuation = false;
     // 释放记账的两个起点：写入前的块数，以及本次插入的块分隔符个数。
     const int blocksBefore = document()->blockCount();
     int separators = 0;
 
     for (const auto &r : messages) {
-        // 纯数据只留接收字节。发送、状态、警告、错误仍在模型里，打开前缀后重投影能看见。
+        // 纯数据只留接收字节。发送、信息、警告、错误、状态仍在模型里，打开前缀后重投影能看见。
         if (!options.prefix && r.direction != Traffic::Direction::Receive)
             continue;
         // 载荷里的换行还原成真实换行：文本框就该按文本本来的样子显示。
         // renderMultiline 让 UTF-8/GBK/ASCII 解码里的 \r \n 保持真实字符，
-        // 这里统一成 \n；行号与时间只标首行，续行紧跟其后，
+        // 这里统一成 \n；有前缀时行号只标这一条记录的首行，续行在槽上留白，
         // 多行报文在控制台里展开成多行物理文本，与 JCom 一致。
         //
-        // 状态/警告/错误行的正文是 statusText（传输层给的"打开串口 COM1 失败：拒绝访问"
+        // 信息/警告/错误/状态行的正文是 statusText（传输层给的"打开串口 COM1 失败：拒绝访问"
         // "设备错误：…"这类原因），它们的 raw 本来就是空的。以前这里只渲染 raw，
         // 于是这些行在屏幕上只剩一个前缀、冒号后面什么都没有——端口异常因此
         // "有行没内容"，看起来就像没有任何提示。**只有 raw 为空时**才拿 statusText 顶上：
@@ -368,24 +505,72 @@ void TrafficTextView::appendMessages(
         // 错误和警告仍整行着色：那是我们的事件，不是设备日志。
         QTextCharFormat bodyFormat;
         bodyFormat.setForeground(bodyColorFor(r.direction));
-        const auto runs = toRuns(payload, bodyFormat);
+        // 接收字节才是一条连续终端流。发送、事件，或已经关掉颜色时，
+        // 上一笔没接完的转义先补在当前行尾，再开始这一条。不把它写进新行的前缀后面。
+        const bool colorThis = options.showAnsi && r.isData()
+            && r.direction == Traffic::Direction::Receive;
+        if (!colorThis && !m_ansiPending.isEmpty()) {
+            stopAnsiHold();
+            if (liveMarks() < document()->blockCount()) {
+                LineMark mark;
+                mark.numbered = true;
+                mark.number = m_entryNumber++;
+                m_marks.append(mark);
+            }
+            cursor.setCharFormat(m_ansiReady ? m_ansiFormat : bodyFormat);
+            cursor.insertText(m_ansiPending);
+            m_ansiPending.clear();
+            m_ansiReady = false;
+        }
+        QList<TextRun> runs;
+        // HEX 对照跟这一行实际画出的字走。着色时藏起来的转义不进对照；
+        // 关掉颜色后前后缀还在正文里，对照里也留下对应字节。
+        QString companion;
+        if (!options.showAnsi) {
+            m_ansiReady = false;
+            runs.append({payload, bodyFormat});
+            companion = payload;
+        } else {
+            if (!colorThis)
+                m_ansiReady = false;
+            else if (!m_ansiReady) {
+                m_ansiFormat = bodyFormat;
+                m_ansiReady = true;
+            }
+            AnsiCarry carry{colorThis ? m_ansiFormat : bodyFormat, m_ansiPending};
+            runs = toRuns(payload, bodyFormat, carry);
+            if (colorThis) {
+                m_ansiFormat = carry.fmt;
+                m_ansiPending = carry.pending;
+            }
+            for (const auto &run : runs) companion += run.text;
+        }
         const int endpoint = r.source.endpointIndex;
         // 一条物理行记一次端口。新建的行追加，接在上一行后面的纯数据只更新混端口标记。
+        // 有前缀时一条记录只占一个行号。载荷换行和 HEX 对照行仍各占一块，槽上留白。
         bool lineMarked = false;
-        const auto noteLine = [&](bool created) {
+        const auto noteLine = [&](bool created, bool numbered) {
             if (lineMarked) return;
             lineMarked = true;
-            if (created || m_marks.isEmpty()) {
+            if (created || liveMarks() == 0) {
                 LineMark mark;
                 mark.endpoint = endpoint;
+                mark.numbered = numbered;
+                if (numbered) mark.number = m_entryNumber++;
                 m_marks.append(mark);
                 return;
             }
             LineMark &mark = m_marks.last();
             // 上一包以换行收尾时，新字节落在一个还没字的行上。这一行归新端口，不算混行。
-            const bool blank = cursor.block().text().isEmpty();
+            // 用块长度判断，不取整行文本：纯数据会把很多包接在同一行，取文本是按行长复制。
+            const bool blank = cursor.block().length() <= 1;
             if (mark.endpoint < 0 || (blank && !mark.mixed)) mark.endpoint = endpoint;
             else if (endpoint >= 0 && endpoint != mark.endpoint) mark.mixed = true;
+            // 纯数据接在空行上时，这一行才开始有内容，这时才占号。
+            if (numbered && !mark.numbered) {
+                mark.numbered = true;
+                mark.number = m_entryNumber++;
+            }
         };
 
         bool atMessageStart = true;
@@ -400,9 +585,11 @@ void TrafficTextView::appendMessages(
                     ++separators;
                     needSeparator = false;
                     lineMarked = false;
-                    noteLine(true);
+                    // 续行不占号。新一条记录的首行照常编号。
+                    noteLine(true, !nextIsContinuation);
+                    nextIsContinuation = false;
                 }
-                if (!lineMarked) noteLine(false);
+                if (!lineMarked) noteLine(false, true);
                 if (atMessageStart) {
                     atMessageStart = false;
                     // 关掉前缀后只留数据。时间、长度同为元色，拼成一段一次插入：
@@ -446,14 +633,14 @@ void TrafficTextView::appendMessages(
                         // 令牌单独插入：颜色测试按 "RX" 这类子串命中这一段。
                         cursor.insertText(dir);
                         // 字节数紧跟方向令牌，用元信息色，不染成方向色。
-                        // STATE/WARN/ERR 没有载荷，不标长度。
+                        // I/W/E/S 没有载荷，不标长度。
                         if (options.prefixLength && r.isData()) {
                             cursor.setCharFormat(metaFormat);
                             cursor.insertText(QStringLiteral(" [%1B]").arg(r.displayBytes()));
                             cursor.setCharFormat(dirFormat);
                         }
                         // 收发都画箭头。有对端时地址跟在箭头后：收是谁发来的，发是写给谁的。
-                        // 串口没有对端，箭头仍然留着。状态行不画箭头，也不留空位。
+                        // 串口没有对端，箭头仍然留着。信息、警告、错误、状态不画箭头，也不留空位。
                         if (r.isData()) {
                             if (r.source.hasPeer()) {
                                 cursor.insertText(QStringLiteral(" %1 %2")
@@ -470,7 +657,8 @@ void TrafficTextView::appendMessages(
                 cursor.setCharFormat(run.fmt);
                 if (!piece.isEmpty()) cursor.insertText(piece);
                 if (nl < 0) break;
-                needSeparator = true; // 下一物理行另记一个行号
+                needSeparator = true; // 下一物理行。有前缀时它是续行，槽上留白
+                nextIsContinuation = options.prefix;
                 lineMarked = false;
                 start = nl + 1;
             }
@@ -481,14 +669,15 @@ void TrafficTextView::appendMessages(
         // 不受前缀开关控制：关掉行号/时间/方向后，对照行仍然单独跟在数据后面。
         // 纯数据不允许 HEX 对照：对照行自己就要占一行，和“接着输出”冲突。
         if (options.prefix && options.alwaysShowHex && format != PayloadCodec::Format::Hex
-            && !r.raw.isEmpty()) {
-            const auto hex = QString::fromLatin1(r.raw.toHex(' ')).toUpper();
-            if (needSeparator) needSeparator = false; // 载荷以换行收尾：续块此时是空的，行号已经记过
+            && !companion.isEmpty()) {
+            const auto hex = visibleCompanionHex(companion);
+            if (needSeparator) needSeparator = false; // 载荷以换行收尾：续块此时是空的，标记已经记过
             else {
                 cursor.insertText(QString(QChar::ParagraphSeparator));
                 ++separators;
                 LineMark mark;
                 mark.endpoint = endpoint;
+                mark.numbered = false; // HEX 对照跟着本条记录，不另占一个行号
                 m_marks.append(mark);
             }
             cursor.setCharFormat(hexFormat);
@@ -497,14 +686,16 @@ void TrafficTextView::appendMessages(
         // 有前缀时每条另起一行。纯数据时新字节接在上一包后面，
         // 换行只来自载荷里的 0A / 0D 0A。
         needSeparator = options.prefix;
+        nextIsContinuation = false;
     }
+    armAnsiHold();
     // 结算这一批的全部文档变更（也是上面那笔固定开销唯一被付掉的地方）。
     cursor.endEditBlock();
     // 字符预算会在 trimHeadBlocks 里先丢掉对应行号。行数预算是 Qt 在编辑块结束时
     // 自己删块，行号还留着。两笔不能各 drop 一次，否则行号会跳、槽和正文对不齐。
-    const int marksAfterWrite = m_marks.size();
+    const int marksAfterWrite = liveMarks();
     enforceCharBudget();
-    const int droppedByCharBudget = marksAfterWrite - m_marks.size();
+    const int droppedByCharBudget = marksAfterWrite - liveMarks();
     // 释放记账：本次写入的块数 = 插入的块分隔符数（每个分隔符起一个新块；空文档时
     // 首块复用那个已有的空块，所以这里不加 1）。写入后的块数少于"原有的 + 写入的"，
     // 差额就是从头部被释放掉的行——Qt 的 maximumBlockCount 与上面的字符预算两条
@@ -516,13 +707,14 @@ void TrafficTextView::appendMessages(
         m_releasedBlocks += released;
         emit blocksReleased(released);
     }
-    syncGutter();
     // 不在这里滚动：跟随与否是面板的状态，由面板在追加后统一处理滚动条。
+    // 行号槽在 freeze 解开时刷一次，此时行号表已经和文档一致。
 }
 
 void TrafficTextView::trimHeadBlocks(int blocks)
 {
     if (blocks <= 0) return;
+    const GutterFreeze freeze(this, true);
     QTextCursor trimmer(document());
     trimmer.movePosition(QTextCursor::Start);
     trimmer.movePosition(QTextCursor::NextBlock, QTextCursor::KeepAnchor, blocks);
@@ -534,13 +726,28 @@ void TrafficTextView::trimHeadBlocks(int blocks)
 void TrafficTextView::dropMarks(int count)
 {
     if (count <= 0) return;
-    if (count >= m_marks.size()) m_marks.clear();
-    else m_marks.remove(0, count);
-    m_nextNumber += quint64(count);
+    const int dropped = qMin(count, liveMarks());
+    // 槽上的下一个号跟着最早还在的那条编号行走。续行被裁掉时号不动。
+    for (int i = 0; i < dropped; ++i) {
+        const quint64 number = m_marks.at(m_markBegin + i).number;
+        if (number > 0) m_nextNumber = number + 1;
+    }
+    if (dropped >= liveMarks()) {
+        m_marks.clear();
+        m_markBegin = 0;
+        return;
+    }
+    m_markBegin += dropped;
+    // 死前缀只占下标，查询仍从起点读。攒够再收，避免触顶后每批搬动整表。
+    if (m_markBegin >= MarkCompactThreshold) {
+        m_marks.remove(0, m_markBegin);
+        m_markBegin = 0;
+    }
 }
 
 void TrafficTextView::setBudget(int blocks, qint64 chars)
 {
+    const GutterFreeze freeze(this, true);
     m_blockBudget = qMax(1, blocks);
     m_charBudget = qMax<qint64>(1, chars);
     setMaximumBlockCount(m_blockBudget);
@@ -573,11 +780,21 @@ void TrafficTextView::enforceCharBudget()
 
 void TrafficTextView::clearAll()
 {
+    const GutterFreeze freeze(this, true);
     document()->clear(); // maximumBlockCount 是文档属性，clear() 不重置它
     m_marks.clear();
+    m_markBegin = 0;
     m_nextNumber = 1;
+    m_entryNumber = 1;
     m_releasedBlocks = 0; // 清空是新会话：释放计数跟着归零
-    syncGutter();
+    m_ansiPending.clear();
+    m_ansiReady = false;
+    stopAnsiHold();
+}
+
+QString TrafficTextView::pendingAnsi() const
+{
+    return m_ansiPending;
 }
 
 void TrafficTextView::scrollToBottom()
@@ -587,14 +804,20 @@ void TrafficTextView::scrollToBottom()
 
 void TrafficTextView::syncGutter()
 {
-    // 宽度只看还在屏幕上的行号位数，不看已经淘汰掉的累计。
-    // 4 位起跳，避免 999 进到 1000 时正文被挤一下。
-    const quint64 last = m_nextNumber + quint64(qMax(0, m_marks.size() - 1));
-    int digits = 4;
-    for (quint64 probe = 9999; last > probe && digits < 12; probe = probe * 10 + 9)
+    // 追加还没把行号表收口时不刷。外层解开时会再进来一次。
+    if (m_gutterFreeze > 0) return;
+    // 宽度只看还在屏幕上的最大行号位数，不看已经淘汰掉的累计。
+    // 续行不占号，最大号是下一条将要写的号减一。最少两位。
+    // 位数变多时按这个号加宽，9 进 10、99 进 100 时正文跟着让一列。
+    const quint64 last = qMax(quint64(1), m_entryNumber - 1);
+    int digits = 1;
+    for (quint64 value = last; value >= 10 && digits < 20; value /= 10)
         ++digits;
-    const int width = fontMetrics().horizontalAdvance(QLatin1Char('0')) * digits
-        + fontMetrics().horizontalAdvance(QLatin1Char(' ')) * 2 + 8;
+    if (digits < 2) digits = 2;
+    // 槽宽按文档字体量。控件字体和文档字体在样式表下不一定是同一个。
+    const QFontMetrics metrics(document()->defaultFont());
+    const int width = metrics.horizontalAdvance(QLatin1Char('0')) * digits
+        + metrics.horizontalAdvance(QLatin1Char(' ')) * 2 + 8;
     if (width != viewportMargins().left())
         setViewportMargins(width, 0, 0, 0);
     placeGutter();
@@ -611,11 +834,63 @@ void TrafficTextView::placeGutter()
 
 void TrafficTextView::updateGutter(const QRect &rect, int dy)
 {
-    Q_UNUSED(rect);
-    if (!m_bar) return;
+    if (!m_bar || m_gutterFreeze > 0) return;
+    // 滚动只搬已有像素，新露出来的一条由 scroll 自己标脏。
+    // 没滚动时只重画正文脏掉的那一截，不整列重来。
     if (dy != 0) m_bar->scroll(0, dy);
-    else m_bar->update();
+    else if (!rect.isEmpty()) m_bar->update(0, rect.y(), m_bar->width(), rect.height());
 }
+
+// 色标要盖住数字真正画出的墨迹。字体上伸只到基线，雅黑的数字会画出基线以下，竖线就偏高。
+// 按当前绘制设备量一次，滚动时不再每行栅格化。
+namespace {
+QRectF digitInkRelativeToBaseline(const QFont &font, QPaintDevice *device)
+{
+    const qreal dpr = device ? device->devicePixelRatioF() : 1.0;
+    struct Cache {
+        QFont font;
+        qreal dpr = 0;
+        int dpiY = 0;
+        QRectF ink;
+    };
+    static Cache cache;
+    const int dpiY = device ? device->logicalDpiY() : 96;
+    if (cache.font == font && qFuzzyCompare(cache.dpr, dpr) && cache.dpiY == dpiY
+        && cache.ink.height() > 0)
+        return cache.ink;
+
+    const qreal baseline = 40;
+    QImage sample(qCeil(24 * dpr), qCeil(72 * dpr), QImage::Format_ARGB32_Premultiplied);
+    sample.setDevicePixelRatio(dpr);
+    const int dpm = qRound(dpiY / 0.0254);
+    sample.setDotsPerMeterX(dpm);
+    sample.setDotsPerMeterY(dpm);
+    sample.fill(Qt::white);
+    QPainter samplePainter(&sample);
+    samplePainter.setFont(font);
+    samplePainter.setPen(Qt::black);
+    samplePainter.drawText(QPointF(1, baseline), QStringLiteral("8"));
+    samplePainter.end();
+
+    int top = -1;
+    int bottom = -1;
+    for (int y = 0; y < sample.height(); ++y) {
+        const QRgb *line = reinterpret_cast<const QRgb *>(sample.constScanLine(y));
+        for (int x = 0; x < sample.width(); ++x) {
+            if (qGray(line[x]) > 240) continue;
+            if (top < 0) top = y;
+            bottom = y;
+            break;
+        }
+    }
+    QRectF ink(0, -QFontMetricsF(font, device).ascent(), 1,
+        QFontMetricsF(font, device).ascent() + QFontMetricsF(font, device).descent());
+    if (top >= 0)
+        ink = QRectF(0, top / dpr - baseline, 1, (bottom - top + 1) / dpr);
+    cache = {font, dpr, dpiY, ink};
+    return ink;
+}
+} // namespace
 
 QString TrafficTextView::lineTip(const LineMark &mark) const
 {
@@ -629,22 +904,37 @@ QString TrafficTextView::lineTip(const LineMark &mark) const
 }
 
 void TrafficTextView::paintLineNumber(QPainter *painter, const QRect &rect,
-    const QTextBlock &block) const
+    const QTextBlock &block, const QRectF &digitInk, const QFontMetricsF &metrics) const
 {
     const int index = block.blockNumber();
-    if (index < 0 || index >= m_marks.size()) return;
-    const LineMark &mark = m_marks.at(index);
-    painter->setPen(portColor(mark.endpoint));
-    const QString number = QString::number(m_nextNumber + quint64(index));
-    const QRect textRect = rect.adjusted(0, 0, -6, 0);
-    painter->drawText(textRect, Qt::AlignRight | Qt::AlignVCenter, number);
+    if (index < 0 || index >= liveMarks()) return;
+    const LineMark &mark = markAt(index);
+    const QTextLayout *layout = block.layout();
+    if (!layout || layout->lineCount() == 0) return;
+    // 正文按基线排。号若在行框里垂直居中，会比正文高出一截，看起来不在一条线上。
+    const QTextLine textLine = layout->lineAt(0);
+    const qreal baseline = rect.top() + textLine.y() + textLine.ascent();
+    painter->setPen(GutterNumberColor());
+    // 有前缀时续行和 HEX 对照行不占号。槽上留出和数字一样宽的空白，正文仍从同一列起。
+    if (mark.numbered) {
+        const QString number = QString::number(mark.number);
+        const qreal width = metrics.horizontalAdvance(number);
+        painter->drawText(QPointF(rect.right() - 8 - width, baseline), number);
+    }
+    if (mark.endpoint < 0 && !mark.mixed) return;
+    painter->setPen(Qt::NoPen);
+    // 色标跟数字墨迹同一段。只画到基线会停在字的中下段：雅黑的数字会画出基线以下。
+    const qreal top = baseline + digitInk.top();
+    const qreal markH = qMax<qreal>(4, digitInk.height());
+    const int x = rect.right() - 5;
+    auto tick = [&](const QColor &color, int left) {
+        painter->setBrush(color);
+        painter->drawRoundedRect(QRectF(left, top, 2, markH), 1, 1);
+    };
+    if (mark.endpoint >= 0) tick(portColor(mark.endpoint), mark.mixed ? x - 3 : x);
     if (mark.mixed) {
-        // 这一行开头是一个端口，中间又接上了另一个。点画在号的右边，颜色跟后到的那个。
         const QColor other = mark.endpoint == 0 ? PortBColor() : PortAColor();
-        painter->setPen(Qt::NoPen);
-        painter->setBrush(other);
-        const int radius = 3;
-        painter->drawEllipse(QPoint(rect.right() - radius, rect.center().y()), radius, radius);
+        tick(other, x);
     }
 }
 
@@ -652,8 +942,12 @@ void TrafficTextView::paintGutter(QPaintEvent *event)
 {
     if (!m_bar) return;
     QPainter painter(m_bar);
-    painter.setFont(font());
+    // 槽是子控件，样式表的 13px 只落在文本框上。用文档字体，号才和正文同一行高。
+    painter.setFont(document()->defaultFont());
     painter.fillRect(event->rect(), viewport()->palette().color(QPalette::Base));
+    // 数字墨迹和字体度量都只做一次。滚动时一屏有几十行，不能每行再去问一次字体引擎。
+    const QRectF digitInk = digitInkRelativeToBaseline(painter.font(), painter.device());
+    const QFontMetricsF metrics(painter.font());
     // 只画这次脏区盖住的可见块。滚动由槽自己 scroll，不在这里重扫历史。
     QTextBlock block = firstVisibleBlock();
     int y = qRound(blockBoundingGeometry(block).translated(contentOffset()).top());
@@ -661,7 +955,7 @@ void TrafficTextView::paintGutter(QPaintEvent *event)
     while (block.isValid() && y <= limit) {
         const int height = qRound(blockBoundingRect(block).height());
         if (block.isVisible() && y + height >= event->rect().top())
-            paintLineNumber(&painter, QRect(0, y, m_bar->width(), height), block);
+            paintLineNumber(&painter, QRect(0, y, m_bar->width(), height), block, digitInk, metrics);
         y += height;
         block = block.next();
     }

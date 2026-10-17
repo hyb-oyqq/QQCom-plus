@@ -581,8 +581,8 @@ private slots:
 
         const QStringList directions{QStringLiteral("filterRx"), QStringLiteral("filterTx"),
             QStringLiteral("filterForward")};
-        const QStringList viewSwitches{QStringLiteral("viewPrefix"), QStringLiteral("viewAlwaysShowHex"),
-            QStringLiteral("viewAutoWrap")};
+        const QStringList viewSwitches{QStringLiteral("viewPrefix"), QStringLiteral("viewAnsiColor"),
+            QStringLiteral("viewAlwaysShowHex"), QStringLiteral("viewAutoWrap")};
         for (const auto &name : directions) {
             auto *button = flags->findChild<QPushButton *>(name);
             QVERIFY2(button, qPrintable(QStringLiteral("缺方向开关：") + name));
@@ -612,8 +612,8 @@ private slots:
             QVERIFY2(!views->findChild<QPushButton *>(name),
                 qPrintable(QStringLiteral("事件开关不该挪进显示开关组：") + name));
         }
-        for (const auto &name : {QStringLiteral("showState"), QStringLiteral("showWarning"),
-                 QStringLiteral("showError")}) {
+        for (const auto &name : {QStringLiteral("showInfo"), QStringLiteral("showWarning"),
+                 QStringLiteral("showError"), QStringLiteral("showState")}) {
             auto *action = window.findChild<QAction *>(name);
             QVERIFY2(action && action->isCheckable(),
                 qPrintable(QStringLiteral("缺菜单里的事件开关：") + name));
@@ -635,14 +635,17 @@ private slots:
         // 另一侧立刻跟上。两侧都不许"各记一份"，否则用户在菜单里看到的与顶栏按下的
         // 会是两个状态。
         auto *pure = views->findChild<QPushButton *>(QStringLiteral("viewPrefix"));
+        auto *ansiColor = views->findChild<QPushButton *>(QStringLiteral("viewAnsiColor"));
         auto *hexEcho = views->findChild<QPushButton *>(QStringLiteral("viewAlwaysShowHex"));
         auto *lineWrap = views->findChild<QPushButton *>(QStringLiteral("viewAutoWrap"));
         auto *pureAction = window.findChild<QAction *>(QStringLiteral("prefix"));
+        auto *ansiAction = window.findChild<QAction *>(QStringLiteral("showAnsi"));
         auto *hexAction = window.findChild<QAction *>(QStringLiteral("alwaysShowHex"));
         auto *wrapAction = window.findChild<QAction *>(QStringLiteral("autoWrap"));
-        QVERIFY(pure && hexEcho && lineWrap && pureAction && hexAction && wrapAction);
+        QVERIFY(pure && ansiColor && hexEcho && lineWrap && pureAction && ansiAction && hexAction
+            && wrapAction);
         const QList<QPair<QPushButton *, QAction *>> mirrored{
-            {pure, pureAction}, {hexEcho, hexAction}, {lineWrap, wrapAction}};
+            {pure, pureAction}, {ansiColor, ansiAction}, {hexEcho, hexAction}, {lineWrap, wrapAction}};
         for (const auto &pair : mirrored) {
             // 顶栏用短名，菜单写完整说明。两边勾选必须一致，文案不必相同。
             QVERIFY2(!pair.first->text().isEmpty() && !pair.second->text().isEmpty(),
@@ -660,7 +663,7 @@ private slots:
         }
 
         // 关掉「显示前缀」后，时间戳、数据长度和 HEX 置灰：顶栏按钮必须同步置灰，
-        // 否则留下一个"看着能点、点了一下没反应"的死开关。换行不跟前缀走。
+        // 否则留下一个"看着能点、点了一下没反应"的死开关。颜色和换行不跟前缀走。
         // 行号改画在左侧槽，菜单里那一项不再出现。
         if (!pure->isChecked()) pure->click();
         QVERIFY(pure->isChecked());
@@ -676,6 +679,8 @@ private slots:
         QVERIFY(!hexEcho->isEnabled());
         QVERIFY(!hexAction->isEnabled());
         QVERIFY(wrapAction->isEnabled());
+        QVERIFY(ansiColor->isEnabled());
+        QVERIFY(ansiAction->isEnabled());
         pure->click();
         QVERIFY(pure->isChecked());
         QVERIFY(stamp->isEnabled());
@@ -1593,18 +1598,26 @@ private slots:
         options.endpoints = {a.endpointId, b.endpointId};
         model.replaceRecords({stream, datagram, message});
 
-        // 错误/警告日志各自有独立开关：关闭后 Warning/Error 事件不进显示，数据不受影响。
+        // 信息/警告/错误/状态各自有独立开关：关掉后对应事件不进显示，数据不受影响。
         const auto warning = Traffic::makeSampleMessage(
             4, QDateTime(), b, Traffic::Direction::Warning, {});
         const auto error = Traffic::makeSampleMessage(
             5, QDateTime(), b, Traffic::Direction::Error, {});
-        model.replaceRecords({stream, datagram, message, warning, error});
-        QCOMPARE(accepted(options), 5);
+        const auto info = Traffic::makeSampleMessage(
+            8, QDateTime(), b, Traffic::Direction::Info, {});
+        const auto state = Traffic::makeSampleMessage(
+            9, QDateTime(), b, Traffic::Direction::State, {});
+        model.replaceRecords({stream, datagram, message, warning, error, info, state});
+        QCOMPARE(accepted(options), 7);
         options.warnings = false;
         options.errors = false;
+        options.infos = false;
+        options.states = false;
         QCOMPARE(accepted(options), 3);
         options.warnings = true;
         options.errors = true;
+        options.infos = true;
+        options.states = true;
     }
 
     // 端点草稿现在随配置即时持久化（endpoint/A、endpoint/B）：共享 ini 里
@@ -1630,12 +1643,13 @@ private slots:
         PreferencesStore sweep(nullptr, ini);
         for (const auto *key : {"filter/keywords", "filter/excludes", "filter/regex",
                  "filter/caseSensitive", "filter/rx", "filter/tx", "filter/forward", "filter/state",
-                 "filter/warning", "filter/error", "filter/states", "filter/warnings", "filter/errors",
+                 "filter/info", "filter/warning", "filter/error", "filter/states",
+                 "filter/warnings", "filter/errors",
                  "filter/expanded",
                  // 显示开关同样会落盘：某个用例改过长度、HEX、换行后不还原，
                  // 下一个用例就会在"行数多一倍"的前提下断言——与过滤条件同一类串扰。
                  "traffic/prefix", "traffic/prefixLineNumber", "traffic/prefixTimestamp",
-                 "traffic/prefixLength", "traffic/alwaysShowHex", "traffic/autoWrap",
+                 "traffic/prefixLength", "traffic/alwaysShowHex", "traffic/showAnsi", "traffic/autoWrap",
                  "traffic/number", "traffic/timestamp", "traffic/direction", "traffic/length",
                  "traffic/hex", "traffic/pure", "traffic/wrap", "traffic/follow",
                  // 编码格式与发送格式也会落盘，且后果最隐蔽：某个用例把发送格式切成
@@ -1910,7 +1924,7 @@ private slots:
         const auto lengthLines = lengthView.toPlainText().split(QLatin1Char('\n'));
         QCOMPARE(lengthLines.at(0), QStringLiteral("[A] RX [4B] <<--: ping"));
         QCOMPARE(lengthLines.at(1), QStringLiteral("[A] TX+MAN [4B] -->>: pong"));
-        QCOMPARE(lengthLines.at(2), QStringLiteral("[A] ERR: denied"));
+        QCOMPARE(lengthLines.at(2), QStringLiteral("[A] E: denied"));
 
         // 关掉「转发」只从数据区拿走桥接产生的发送行。接收和手动发送留下。
         clearEndpointDrafts();
@@ -2928,7 +2942,7 @@ private slots:
         QVERIFY(status->toolTip().contains(QStringLiteral("日志 ")));
     }
 
-    // 语义配色：方向令牌按类型分色（RX 饱和绿 / TX 主蓝 / 状态紫 / 警告琥珀 / 错误红），
+    // 语义配色：方向令牌按类型分色（RX 饱和绿 / TX 主蓝 / 状态紫 / 信息青 / 警告琥珀 / 错误红），
     // 错误与警告整行同色——这是"一眼分辨消息类型"的落点，改动必须被这里挡住。
     void directionTokensCarrySemanticColors()
     {
@@ -2965,8 +2979,9 @@ private slots:
             make(2, Traffic::Direction::Transmit, "tx-body"),
             make(3, Traffic::Direction::State, "state-body"),
             make(4, Traffic::Direction::Warning, "warning-body"),
-            make(5, Traffic::Direction::Error, "error-body")});
-        QTRY_COMPARE(model->rowCount(), 5);
+            make(5, Traffic::Direction::Error, "error-body"),
+            make(6, Traffic::Direction::Info, "info-body")});
+        QTRY_COMPARE(model->rowCount(), 6);
         const auto fragmentColor = [text](int blockIndex, const QString &needle, bool exact = false) {
             const QTextBlock block = text->document()->findBlockByNumber(blockIndex);
             for (auto it = block.begin(); !it.atEnd(); ++it) {
@@ -2982,9 +2997,10 @@ private slots:
         QVERIFY(text->document()->findBlockByNumber(0).text().contains(QStringLiteral("[A] RX <<--")));
         QVERIFY(text->document()->findBlockByNumber(1).text().contains(QStringLiteral("[A] TX -->>")));
         QCOMPARE(fragmentColor(1, QStringLiteral("TX")), QColor(0x1D, 0x4E, 0xD8));
-        QCOMPARE(fragmentColor(2, QStringLiteral("STATE")), QColor(0x6D, 0x28, 0xD9));
-        QCOMPARE(fragmentColor(3, QStringLiteral("WARN")), QColor(0x92, 0x40, 0x0E));
-        QCOMPARE(fragmentColor(4, QStringLiteral("ERR")), QColor(0xC6, 0x28, 0x28));
+        QCOMPARE(fragmentColor(2, QStringLiteral("S")), QColor(0x6D, 0x28, 0xD9));
+        QCOMPARE(fragmentColor(3, QStringLiteral("W")), QColor(0x92, 0x40, 0x0E));
+        QCOMPARE(fragmentColor(4, QStringLiteral("E")), QColor(0xC6, 0x28, 0x28));
+        QCOMPARE(fragmentColor(5, QStringLiteral("I")), QColor(0x0C, 0x4A, 0x6E));
         // 数据行的正文保持近黑（数据是主体）；错误/警告整行随类型着色。
         QCOMPARE(fragmentColor(0, QStringLiteral("rx-body")), QColor(0x1C, 0x24, 0x30));
         QCOMPARE(fragmentColor(3, QStringLiteral("warning-body")), QColor(0x92, 0x40, 0x0E));
@@ -3941,7 +3957,7 @@ private slots:
         action->click();
         QTRY_COMPARE(action->text(), QStringLiteral("停  止"));
         QTRY_VERIFY(lastLine().contains(QStringLiteral("已打开")));
-        QVERIFY2(lastLine().contains(QStringLiteral("STATE")),
+        QVERIFY2(lastLine().contains(QStringLiteral("S")),
             qPrintable(QStringLiteral("状态行应带方向词：") + lastLine()));
         const QString openedLine = lastLine();
 
@@ -4143,7 +4159,7 @@ private slots:
         QFile log(QDir(directory.path()).filePath(names.first()));
         QVERIFY(log.open(QIODevice::ReadOnly));
         const auto body = QString::fromUtf8(log.readAll());
-        QVERIFY2(body.contains(QStringLiteral("丢弃未写出数据 4 字节")) && body.contains(QStringLiteral("ERR")),
+        QVERIFY2(body.contains(QStringLiteral("丢弃未写出数据 4 字节")) && body.contains(QStringLiteral("\tE\t")),
             qPrintable(body));
     }
 
@@ -4686,7 +4702,16 @@ private slots:
         Traffic::Message warning;
         warning.direction = Traffic::Direction::Warning;
         QVERIFY(!warning.isData());
-        QCOMPARE(Traffic::directionName(warning.direction), QStringLiteral("WARN"));
+        QCOMPARE(Traffic::directionName(warning.direction), QStringLiteral("W"));
+        Traffic::Message info;
+        info.direction = Traffic::Direction::Info;
+        QCOMPARE(Traffic::directionName(info.direction), QStringLiteral("I"));
+        Traffic::Message stateName;
+        stateName.direction = Traffic::Direction::State;
+        QCOMPARE(Traffic::directionName(stateName.direction), QStringLiteral("S"));
+        Traffic::Message errorName;
+        errorName.direction = Traffic::Direction::Error;
+        QCOMPARE(Traffic::directionName(errorName.direction), QStringLiteral("E"));
     }
 
     // 文本视图的安全阀触发时同样必须播报：屏幕上看不到的几行，可能是用户唯一想
@@ -4719,11 +4744,14 @@ private slots:
             qPrintable(QStringLiteral("首块应已不是第 1 条：%1").arg(view.lineNumberAt(0))));
         QVERIFY2(view.document()->toPlainText().contains(QStringLiteral("line one")),
                  "最新一条必须还在");
-        // 每条是「line one」「line two」再加末尾换行留下的空行，共 3 行。
-        // 60 条 180 行，预算 50，留下的倒数第二行是第 179 行。
-        QCOMPARE(view.lineNumberAt(view.document()->blockCount() - 2), quint64(179));
-        QCOMPARE(view.lineNumberAt(view.document()->blockCount() - 1),
-            view.lineNumberAt(0) + quint64(view.document()->blockCount() - 1));
+        // 每条是「line one」「line two」再加末尾换行留下的空行，共 3 块。
+        // 60 条 180 块，预算 50，裁掉 130 块：第 44 条的首行被裁掉，
+        // 留下的第一块是它的续行，槽上留白。完整留下的下一条是第 45 条。
+        // 末块是第 60 条以换行收尾的空行，也留白。
+        QCOMPARE(view.lineNumberAt(0), quint64(0));
+        QCOMPARE(view.lineNumberAt(2), quint64(45));
+        QCOMPARE(view.lineNumberAt(view.document()->blockCount() - 3), quint64(60));
+        QCOMPARE(view.lineNumberAt(view.document()->blockCount() - 1), quint64(0));
 
         // 字符预算单独裁掉头部时，行号只能记一次。记两次会让后面的行号变成 0 或跳号。
         TrafficTextView byChars;
@@ -4746,6 +4774,215 @@ private slots:
         QVERIFY(kept >= 1);
         QVERIFY(byChars.releasedBlocks() > 0);
         QCOMPARE(byChars.lineNumberAt(kept - 1), byChars.lineNumberAt(0) + quint64(kept - 1));
+
+        // 超过行号表一次回收的量之后，行号和端口仍然对齐。回收不能把号跳掉或错位。
+        TrafficTextView many;
+        many.setBudget(20, 1024 * 1024);
+        QList<Traffic::Message> rows;
+        rows.reserve(1100);
+        for (int i = 0; i < 1100; ++i) {
+            Traffic::Message message;
+            message.id = i + 1;
+            message.timestamp = QDateTime::currentDateTime();
+            message.direction = Traffic::Direction::Receive;
+            message.source.endpointIndex = i % 2;
+            message.source.endpointKind = PortDraft::Serial;
+            message.raw = QByteArray("x");
+            message.rawLength = 1;
+            rows.append(message);
+        }
+        many.appendMessages(rows, PayloadCodec::Format::Utf8, TrafficTextView::DisplayOptions());
+        QCOMPARE(many.document()->blockCount(), 20);
+        QCOMPARE(many.lineNumberAt(0), quint64(1081));
+        QCOMPARE(many.lineNumberAt(19), quint64(1100));
+        QCOMPARE(many.lineEndpointAt(0), 0);
+        QCOMPARE(many.lineEndpointAt(19), 1);
+    }
+
+    // 行号槽默认按两位留白。空文档、1 位和 2 位都是这个宽度；到 100 才再加一列。
+    void lineNumberGutterGrowsWithDigits()
+    {
+        TrafficTextView view;
+        view.resize(640, 240);
+        const auto widthFor = [&](int count) {
+            view.clearAll();
+            if (count > 0) {
+                QList<Traffic::Message> rows;
+                rows.reserve(count);
+                for (int i = 0; i < count; ++i) {
+                    Traffic::Message message;
+                    message.id = quint64(i + 1);
+                    message.timestamp = QDateTime::currentDateTime();
+                    message.direction = Traffic::Direction::Receive;
+                    message.source.endpointIndex = 0;
+                    message.source.endpointKind = PortDraft::Serial;
+                    message.raw = QByteArray("x");
+                    message.rawLength = 1;
+                    rows.append(message);
+                }
+                view.appendMessages(rows, PayloadCodec::Format::Utf8,
+                    TrafficTextView::DisplayOptions());
+            }
+            return view.gutterWidth();
+        };
+        const int twoDigits = widthFor(0);
+        QVERIFY(twoDigits > 0);
+        QCOMPARE(widthFor(9), twoDigits);
+        QCOMPARE(widthFor(99), twoDigits);
+        QVERIFY2(widthFor(100) > twoDigits,
+            qPrintable(QStringLiteral("2位 %1，100 行 %2，末行号 %3，块数 %4")
+                .arg(twoDigits)
+                .arg(view.gutterWidth())
+                .arg(view.lineNumberAt(view.document()->blockCount() - 1))
+                .arg(view.document()->blockCount())));
+        // 头部淘汰后槽看的是还在的最大行号，不是留下的行数。
+        view.setBudget(5, 1024 * 1024);
+        const int afterTrim = widthFor(100);
+        QVERIFY(afterTrim > twoDigits);
+        QCOMPARE(view.lineNumberAt(view.document()->blockCount() - 1), quint64(100));
+    }
+
+    // 行号和正文必须落在同一条基线上。垂直居中会让号比正文高出一截。
+    void lineNumbersShareTheTextBaseline()
+    {
+        QFile styleFile(QStringLiteral(":/styles/workbench.qss"));
+        QVERIFY(styleFile.open(QIODevice::ReadOnly));
+        const QString previousStyle = qApp->styleSheet();
+        qApp->setStyleSheet(QString::fromUtf8(styleFile.readAll()));
+
+        QWidget host;
+        host.setAttribute(Qt::WA_DontShowOnScreen);
+        host.resize(900, 240);
+        auto *view = new TrafficTextView(&host);
+        view->setGeometry(0, 0, 900, 240);
+        host.show();
+        QTest::qWait(40);
+
+        Traffic::Message message;
+        message.id = 1;
+        message.timestamp = QDateTime::currentDateTime();
+        message.direction = Traffic::Direction::Receive;
+        message.source.endpointIndex = 0;
+        message.source.endpointKind = PortDraft::Serial;
+        message.raw = QByteArray("22:23:35.574 ABC");
+        message.rawLength = message.raw.size();
+        view->appendMessages({message}, PayloadCodec::Format::Utf8, TrafficTextView::DisplayOptions());
+        QCoreApplication::processEvents();
+
+        const QImage image = host.grab().toImage();
+        int contentTop = -1;
+        int contentBottom = image.height();
+        for (int y = 0; y < image.height(); ++y) {
+            bool ink = false;
+            for (int x = 0; x < image.width(); ++x) {
+                if (image.pixelColor(x, y).lightness() < 180) {
+                    ink = true;
+                    break;
+                }
+            }
+            if (ink && contentTop < 0) contentTop = y;
+            else if (!ink && contentTop >= 0) {
+                contentBottom = y;
+                break;
+            }
+        }
+        QVERIFY(contentTop >= 0);
+
+        // 第一行里从左到右是行号、端口色标、正文。两端的墨迹中心必须落在同一高度。
+        QVector<int> count(image.width());
+        QVector<qint64> ySum(image.width());
+        for (int y = contentTop; y < contentBottom; ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                if (image.pixelColor(x, y).lightness() >= 180) continue;
+                ++count[x];
+                ySum[x] += y;
+            }
+        }
+        int first = -1;
+        int firstEnd = -1;
+        int last = -1;
+        int lastEnd = -1;
+        int run = -1;
+        for (int x = 0; x <= image.width(); ++x) {
+            const bool ink = x < image.width() && count.at(x) > 0;
+            if (ink && run < 0) run = x;
+            if (!ink && run >= 0) {
+                if (first < 0) {
+                    first = run;
+                    firstEnd = x;
+                }
+                last = run;
+                lastEnd = x;
+                run = -1;
+            }
+        }
+        const auto center = [&](int x0, int x1) {
+            qint64 sum = 0;
+            int n = 0;
+            for (int x = x0; x < x1; ++x) {
+                sum += ySum.at(x);
+                n += count.at(x);
+            }
+            return n == 0 ? -1.0 : double(sum) / double(n);
+        };
+        const double numberY = center(first, firstEnd);
+        const double bodyY = center(last, lastEnd);
+        qApp->setStyleSheet(previousStyle);
+        QVERIFY2(first >= 0 && last > firstEnd,
+            qPrintable(QStringLiteral("没分开行号和正文：%1 %2").arg(first).arg(last)));
+        QVERIFY2(qAbs(numberY - bodyY) <= 1.5,
+            qPrintable(QStringLiteral("行号与正文不在一条线上：号 %1 正文 %2")
+                           .arg(numberY, 0, 'f', 2)
+                           .arg(bodyY, 0, 'f', 2)));
+
+        // 端口色标是行号右侧第一段墨迹，不能把后面的正文算进去。
+        int markX0 = -1;
+        int markX1 = -1;
+        int markRun = -1;
+        for (int x = firstEnd; x <= last; ++x) {
+            const bool ink = x < last && count.at(x) > 0;
+            if (ink && markRun < 0) markRun = x;
+            if (!ink && markRun >= 0) {
+                markX0 = markRun;
+                markX1 = x;
+                break;
+            }
+        }
+        const double markY = center(markX0, markX1);
+        QVERIFY2(markX0 >= 0,
+            qPrintable(QStringLiteral("行号和正文之间应有端口色标：%1 %2")
+                           .arg(firstEnd).arg(last)));
+        QVERIFY2(qAbs(markY - bodyY) <= 1.5,
+            qPrintable(QStringLiteral("端口色标与正文不在一条线上：标 %1 正文 %2")
+                           .arg(markY, 0, 'f', 2)
+                           .arg(bodyY, 0, 'f', 2)));
+
+        // 中心对齐还不够：色标若只画到基线，底边会停在字的中下段。上下沿都要贴着行号墨迹。
+        const auto edge = [&](int x0, int x1) {
+            int top = -1;
+            int bottom = -1;
+            for (int y = contentTop; y < contentBottom; ++y) {
+                bool hit = false;
+                for (int x = x0; x < x1; ++x) {
+                    if (image.pixelColor(x, y).lightness() >= 180) continue;
+                    hit = true;
+                    break;
+                }
+                if (!hit) continue;
+                if (top < 0) top = y;
+                bottom = y;
+            }
+            return qMakePair(top, bottom);
+        };
+        const auto numberEdge = edge(first, firstEnd);
+        const auto markEdge = edge(markX0, markX1);
+        QVERIFY2(qAbs(markEdge.first - numberEdge.first) <= 1
+                     && qAbs(markEdge.second - numberEdge.second) <= 1,
+            qPrintable(QStringLiteral("端口色标没有盖住行号：标 %1..%2 号 %3..%4")
+                           .arg(markEdge.first)
+                           .arg(markEdge.second)
+                           .arg(numberEdge.first)
+                           .arg(numberEdge.second)));
     }
 
     // 文本显示模式的三条底线：高速追加后跟随钉底；模型触顶淘汰后文本历史原样保留；
@@ -4878,8 +5115,8 @@ private slots:
         QCOMPARE(text->lineNumberAt(0), quint64(1));
     }
 
-    // 报文里的 \r\n 必须还原成真实换行（按文本本来的样子显示），而不是转义字面量；
-    // 行号时间只标首行，续行紧随其后不带前缀——与 JCom 的多行报文显示一致。
+    // 报文里的 \r\n 必须还原成真实换行，而不是转义字面量。
+    // 有前缀时一条记录一个行号，续行槽上留白，下一条接着编号。
     void textViewKeepsRealLineBreaks()
     {
         MainWindow window;
@@ -4914,8 +5151,16 @@ private slots:
         QVERIFY2(lines.at(0).trimmed().endsWith(QStringLiteral("OK")),
                  qPrintable(QStringLiteral("首行应以 OK 结尾：") + lines.at(0)));
         QCOMPARE(text->lineNumberAt(0), quint64(1));
-        QCOMPARE(text->lineNumberAt(1), quint64(2));
-        QCOMPARE(lines.at(1), QStringLiteral("next")); // 续行正文不带行号
+        QCOMPARE(text->lineNumberAt(1), quint64(0)); // 续行跟这条前缀，槽上留白
+        QCOMPARE(lines.at(1), QStringLiteral("next")); // 续行正文不带前缀，行号槽留白
+
+        // 下一条记录接着编号。续行不把号吃掉。
+        message.id = 2;
+        message.raw = QByteArray("more");
+        message.rawLength = message.raw.size();
+        window.findChild<TrafficPanel *>()->appendMessages({message});
+        QTRY_COMPARE(text->document()->blockCount(), 3);
+        QCOMPARE(text->lineNumberAt(2), quint64(2));
         QVERIFY2(!text->toPlainText().contains(QStringLiteral("\\r\\n")),
                  "换行不能再以转义字面量出现");
     }
@@ -5011,7 +5256,7 @@ private slots:
         QCOMPARE(text->lineNumberAt(0), quint64(1));
         QCOMPARE(text->lineEndpointAt(0), 0);
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("4F 4B"));
-        QCOMPARE(text->lineNumberAt(1), quint64(2));
+        QCOMPARE(text->lineNumberAt(1), quint64(0)); // HEX 对照跟这条记录，不另占号
 
         // 行号和长度各自独立：关掉后只剩端口方向与数据。
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
@@ -5181,8 +5426,9 @@ private slots:
         // ② 打开 HEX 对照：已有行要长出对照行——它们不是"新数据"，是重新渲染出来的。
         hexEcho->setChecked(true);
         QTRY_COMPARE(text->document()->blockCount(), Count * 2);
-        // 每条数据后面跟一行 HEX，左右都有行号。第 5 条数据在第 9 行。
-        QCOMPARE(text->lineNumberAt(Count * 2 - 2), quint64(9));
+        // 每条数据后面跟一行 HEX。对照行留白，第 5 条数据仍是第 5 号。
+        QCOMPARE(text->lineNumberAt(Count * 2 - 2), quint64(5));
+        QCOMPARE(text->lineNumberAt(Count * 2 - 1), quint64(0));
         // HEX 对照行是附注而不是数据本身，必须比数据行浅：上下两行一眼能分出主次。
         const QColor dataLine = lastFragmentColor(text->document()->firstBlock());
         const QColor hexLine = lastFragmentColor(text->document()->firstBlock().next());
@@ -5235,8 +5481,8 @@ private slots:
         // 切 UTF-8：对照行恢复出现，且**已显示的那一行**也要一起重画为 UTF-8 + 对照行。
         window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
-        QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次重投影，等掉它
-        QCOMPARE(text->document()->blockCount(), 2); // 旧行已重画为：数据行 + HEX 对照行
+        // 首次建窗时字体扫描可能占住界面线程，固定 90ms 会在防抖重投影之前返回。
+        QTRY_COMPARE(text->document()->blockCount(), 2); // 旧行已重画为：数据行 + HEX 对照行
         message.id = 2;
         panel->appendMessages({message});
         QTRY_COMPARE(model->rowCount(), 2);
@@ -5285,10 +5531,10 @@ private slots:
             ->setCurrentText(QStringLiteral("UTF-8"));
         // 始终显示 HEX 缺省关闭。这里再关一次，保证一条消息一行。
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
-        QTest::qWait(AppearanceReprojectWaitMs); // 设计上必然发生的一次重投影，等掉它
+        // 等防抖重投影把已显示的 HEX 行换成 UTF-8。用轮询而不是固定 90ms：
+        // 首次创建窗口时字体扫描可能占住界面线程，固定等待会在重投影之前返回。
+        QTRY_VERIFY(text->document()->lastBlock().text().endsWith(QStringLiteral("data")));
         const auto baseline = text->document()->lastBlock().text();
-        QVERIFY2(baseline.endsWith(QStringLiteral("data")), // 不再是 HEX 的 …64 61 74 61
-            qPrintable(QStringLiteral("切格式后基线行应已变 UTF-8：") + baseline));
         // 关闭错误日志：错误事件进模型不进显示，数据行纹丝不动。
         // 事件开关住在显示设置菜单里（QAction），不在顶栏。
         window.findChild<QAction *>(QStringLiteral("showError"))->setChecked(false);
@@ -6131,11 +6377,11 @@ private slots:
         // 切到 HEX：已应用条件 "255" 不变，但外观路径按**当前格式 HEX** 重建判定器，
         // DEC 渲染视图不再是候选。若"外观不改行集"严格成立，这里应仍是 3 行。
         format->setCurrentText(QStringLiteral("HEX"));
-        QTest::qWait(AppearanceReprojectWaitMs);
+        // 首次建窗后的字体扫描可能占住界面线程，固定 90ms 会在重投影之前返回。
+        QTRY_COMPARE(text->lineCount(), 1);
         // 实测固化：格式相关候选（DEC 渲染）消失后，3 条全部不再命中 → 只剩空文档保底块。
         // 这与"未应用条件被套上"不同：条件 "255" 早已 apply（m_projectedOptions 就是它），
         // 提示也干净，属于**同一条件在新渲染下的重新求值**。
-        QCOMPARE(text->lineCount(), 1);
         QCOMPARE(apply->text(), QStringLiteral("应用过滤")); // 提示干净：不是待应用机制在动行集
     }
 
@@ -6206,6 +6452,89 @@ private slots:
         QVERIFY(foundInfo);
         QVERIFY(foundCyan);
         QCOMPARE(text->lineEndpointAt(text->document()->blockCount() - 1), 0);
+
+        // 串口会把 ESC[36;22m 切在任意字节上。前一包末尾的半截转义不能画成正文，
+        // 下一包接上后，I/panel 仍按青色显示。
+        text->clearAll();
+        message.id = 3;
+        message.raw = QByteArray("boot\n\x1b[36;");
+        message.rawLength = message.raw.size();
+        panel->appendMessages({message});
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("boot")));
+        QVERIFY2(!text->toPlainText().contains(QStringLiteral("[36")),
+            qPrintable(QStringLiteral("半截转义不该进正文：") + text->toPlainText()));
+        QCOMPARE(text->pendingAnsi(), QStringLiteral("\x1b[36;"));
+        message.id = 4;
+        message.raw = QByteArray("22mI/panel    normal display");
+        message.rawLength = message.raw.size();
+        panel->appendMessages({message});
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("I/panel    normal display")));
+        QVERIFY(!text->toPlainText().contains(QStringLiteral("22m")));
+        QVERIFY(text->pendingAnsi().isEmpty());
+        bool foundPanel = false;
+        for (auto block = text->document()->firstBlock(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                if (it.fragment().text().contains(QStringLiteral("I/panel")))
+                    foundPanel = it.fragment().charFormat().foreground().color()
+                        == QColor(0x00, 0x85, 0x77);
+            }
+        }
+        QVERIFY(foundPanel);
+
+        // 尾包一直不来时，半截转义不能一直藏着。已经画出来的 boot 仍在，超时后原文补上。
+        text->clearAll();
+        message.id = 5;
+        message.raw = QByteArray("boot\n\x1b[36;");
+        message.rawLength = message.raw.size();
+        panel->appendMessages({message});
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("boot")));
+        QVERIFY(!text->toPlainText().contains(QStringLiteral("[36")));
+        QCOMPARE(text->pendingAnsi(), QStringLiteral("\x1b[36;"));
+        QTRY_VERIFY_WITH_TIMEOUT(text->toPlainText().contains(QStringLiteral("[36;")), 500);
+        QVERIFY(text->pendingAnsi().isEmpty());
+        QVERIFY(text->toPlainText().contains(QStringLiteral("boot")));
+
+        // 「显示颜色」关掉后，颜色前后缀按原文出现，正文不再上色。再勾上则按颜色重画。
+        text->clearAll();
+        auto *showAnsi = window.findChild<QAction *>(QStringLiteral("showAnsi"));
+        QVERIFY(showAnsi && showAnsi->isChecked());
+        showAnsi->setChecked(false);
+        message.id = 6;
+        message.raw = QByteArray("\x1b[36;22mI/panel    normal display");
+        message.rawLength = message.raw.size();
+        panel->appendMessages({message});
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("[36;22m")));
+        QVERIFY(text->toPlainText().contains(QStringLiteral("I/panel    normal display")));
+        bool coloredWhileOff = false;
+        for (auto block = text->document()->firstBlock(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                if (it.fragment().text().contains(QStringLiteral("I/panel"))
+                    && it.fragment().charFormat().foreground().color() == QColor(0x00, 0x85, 0x77))
+                    coloredWhileOff = true;
+            }
+        }
+        QVERIFY(!coloredWhileOff);
+
+        // 关掉颜色后，HEX 对照必须带上颜色前后缀的字节。调试时看到的字和 HEX 是同一份数据。
+        window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(true);
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("1B 5B 33 36 3B 32 32 6D")));
+        QVERIFY(text->toPlainText().contains(QStringLiteral("[36;22m")));
+        showAnsi->setChecked(true);
+        // 关掉时正文里已经有 I/panel。要等重投影把颜色前后缀拿掉，不能只等这几个字出现。
+        QTRY_VERIFY(!text->toPlainText().contains(QStringLiteral("[36;22m")));
+        QVERIFY(text->toPlainText().contains(QStringLiteral("I/panel    normal display")));
+        bool recolored = false;
+        for (auto block = text->document()->firstBlock(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                if (it.fragment().text().contains(QStringLiteral("I/panel")))
+                    recolored = it.fragment().charFormat().foreground().color()
+                        == QColor(0x00, 0x85, 0x77);
+            }
+        }
+        QVERIFY(recolored);
+        // 重新着色后，正文不再出现前后缀，HEX 对照也不再列出被藏起来的转义字节。
+        QTRY_VERIFY(!text->toPlainText().contains(QStringLiteral("1B 5B 33 36 3B 32 32 6D")));
+        QVERIFY(text->toPlainText().contains(QStringLiteral("49 2F 70 61 6E 65 6C")));
     }
 
     // 接收组帧是端点配置：模式联动显隐、结束符可校验、开关随草稿下发到运行时。

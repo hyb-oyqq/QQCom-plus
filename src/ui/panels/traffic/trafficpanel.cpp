@@ -137,7 +137,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     top->addWidget(m_portBButton);
 
     // 方向开关（RX / TX）就住在折叠按钮旁边（用户钦定）：它们**不进可折叠的第二行**，
-    // 这样条件条收起来时这两个开关仍在原位。事件类型（状态/警告/错误）在显示设置
+    // 这样条件条收起来时这两个开关仍在原位。事件类型（信息/警告/错误/状态）在显示设置
     // 菜单里——切换频次低得多，且与那批行内容开关同类，放一起更顺（用户钦定）。
     m_flags = new FilterFlags(this);
     top->addWidget(m_flags);
@@ -147,11 +147,11 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
 
     // 日志设置：行内容开关收进菜单，顶栏只留一个入口。
     // 方向与事件开关不在这里——它们管的是"哪些行进来"，不是外观：方向常驻顶栏，
-    // 事件（状态/警告/错误）与上面那批"显示哪些行类型"的项一起留在这个菜单里。
+    // 事件（信息/警告/错误/状态）与上面那批"显示哪些行类型"的项一起留在这个菜单里。
     auto *settings = new QPushButton(tr("设置"));
     settings->setObjectName("displaySettings");
     setMutedIcon(settings, QStringLiteral(":/icons/cog.svg"), BarIconSize);
-    settings->setToolTip(tr("显示前缀、HEX、换行、状态、警告、错误，以及记录到文件"));
+    settings->setToolTip(tr("显示前缀、颜色、HEX、换行、信息、警告、错误、状态，以及记录到文件"));
     auto *displayMenu = new StayOpenMenu(settings);
     // 行内容开关：控制台语义，全部在消息到达时生效，已固化的行不重排。
     const auto rowToggle = [this, &displayMenu](const char *name, const QString &text, bool checked) {
@@ -162,15 +162,23 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         connect(action, &QAction::toggled, this, &TrafficPanel::updateFilter);
         return action;
     };
-    // 菜单用完整名。顶栏三个按钮仍是短名，写在 ViewToggles::bind，避免把顶栏撑开。
+    // 菜单用完整名。顶栏四个按钮仍是短名，写在 ViewToggles::bind，避免把顶栏撑开。
     m_prefixAction = rowToggle("prefix", tr("显示前缀"), true);
     m_prefixAction->setToolTip(tr(
         "勾上后每条另起一行，并显示端口、收发方向、时间和长度。"
-        "端口写成 [A]/[B]，接收是 <<--，发送是 -->>，转发写成 TX+FWD。\n"
+        "端口写成 [A]/[B]，接收是 <<--，发送是 -->>，转发写成 TX+FWD。"
+        "信息、警告、错误、状态写成 I、W、E、S。\n"
         "关掉后是纯数据：接收字节连续接在上一包后面，换行只来自数据自身。"
-        "发送、状态、警告、错误和 HEX 都不显示。打开失败会写在端口行上。\n"
-        "行号在左侧，A 为琥珀色，B 为青色，正文保留数据自己的颜色。"
+        "发送、信息、警告、错误、状态和 HEX 都不显示。打开失败会写在端口行上。\n"
+        "行号在左侧，浅灰色。端口用行号旁的短色标区分，A 为琥珀色，B 为青色。"
+        "正文保留数据自己的颜色。"
         "再次勾上后，纯数据期间没显示的行会重新出现。"));
+    m_showAnsiAction = rowToggle("showAnsi", tr("显示颜色"), true);
+    m_showAnsiAction->setToolTip(tr(
+        "勾上后，UTF-8、GBK、ASCII 里的颜色标识按颜色显示，标识本身不出现。"
+        "例如 ESC[36;22m 后面的字按青色显示，22 只取消加粗。"
+        "关掉后，颜色前后缀按原文显示，正文不再上色。"
+        "HEX 对照跟着屏幕上实际出现的字：关掉颜色后，前后缀的字节仍留在 HEX 里。"));
     displayMenu->addSeparator();
     m_prefixLineNumberAction = rowToggle("prefixLineNumber", tr("前缀行号"), true);
     m_prefixLineNumberAction->setVisible(false);
@@ -197,25 +205,31 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     });
     displayMenu->addSeparator();
     // 事件类型开关。点了必须立刻作用到已经收到的行，不能等「应用过滤」。
-    m_showStateAction = rowToggle("showState", tr("显示状态"), true);
-    m_showStateAction->setToolTip(tr(
-        "显示端口打开、关闭、连接和断开，以及对端连上、断开。"
+    // 前缀单字母与菜单顺序一致：I 信息、W 警告、E 错误、S 状态。
+    m_showInfoAction = rowToggle("showInfo", tr("显示信息"), true);
+    m_showInfoAction->setToolTip(tr(
+        "显示信息，前缀为 I。例如首次出现的 UDP 来源、接入的客户端，以及打开「提示日志」后的组帧说明。"
         "纯数据时不出现在数据区。勾上「显示前缀」后按本项显示。"));
     m_showWarningAction = rowToggle("showWarning", tr("显示警告"), true);
     m_showWarningAction->setToolTip(tr(
-        "显示警告，例如串口消失后等待它重新出现再自动打开。"
+        "显示警告，前缀为 W。例如串口消失后等待它重新出现再自动打开。"
         "纯数据时不出现在数据区。勾上「显示前缀」后按本项显示。"));
     m_showErrorAction = rowToggle("showError", tr("显示错误"), true);
     m_showErrorAction->setToolTip(tr(
-        "显示打开失败、设备错误、连接断开。"
+        "显示错误，前缀为 E。例如打开失败、设备错误、连接断开和丢弃未写出的数据。"
         "纯数据时不出现在数据区。打开失败写在该端口行上，直到打开成功或改了参数；底部状态栏也会短时用红色提示。勾上「显示前缀」后按本项显示。"));
+    m_showStateAction = rowToggle("showState", tr("显示状态"), true);
+    m_showStateAction->setToolTip(tr(
+        "显示状态，前缀为 S。例如端口打开、关闭，以及桥接建立、停止。"
+        "纯数据时不出现在数据区。勾上「显示前缀」后按本项显示。"));
 
-    // 显示开关（前缀 / HEX / 换行）常驻顶栏，紧跟方向开关之后：
-    // 三者都是"随手切一下"的外观项目，频次高到不该藏在菜单里两步。顶上的是同一批
+    // 显示开关（前缀 / 颜色 / HEX / 换行）常驻顶栏，紧跟方向开关之后：
+    // 都是"随手切一下"的外观项目，频次高到不该藏在菜单里两步。顶上的是同一批
     // QAction 的门面——菜单项照旧保留，两处永远一致（见 ViewToggles）。
     // 插在 m_flags 之后而不是 addWidget：顶栏右端那批动作按钮的位置与顺序不动。
+    // 颜色不跟前缀走：纯数据同样要决定转义是上色还是原文显示。
     m_viewToggles = new ViewToggles(this);
-    m_viewToggles->bind(m_prefixAction, m_alwaysShowHexAction, m_autoWrapAction);
+    m_viewToggles->bind(m_prefixAction, m_showAnsiAction, m_alwaysShowHexAction, m_autoWrapAction);
     top->insertWidget(top->indexOf(m_flags) + 1, m_viewToggles);
     // 菜单项显示 tooltip：顶栏按钮文案为了省宽度已经收短，完整解释只在这里还留着，
     // 不该让用户"按了才知道是什么意思"。
@@ -256,7 +270,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     auto *exportButton = new QPushButton(tr("导出"));
     exportButton->setObjectName("exportTraffic");
     setMutedIcon(exportButton, QStringLiteral(":/icons/export.svg"), BarIconSize);
-    exportButton->setToolTip(tr("导出当前缓冲里的全部记录，含数据区没显示的发送、状态、警告和错误"));
+    exportButton->setToolTip(tr("导出当前缓冲里的全部记录，含数据区没显示的发送、信息、警告、错误和状态"));
     top->addWidget(exportButton);
 
     m_follow = new QPushButton(tr("滚动"));
@@ -345,7 +359,8 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(m_reprojectTimer, &QTimer::timeout, this, [this] {
         // 外观路径：关键词仍用上次已应用的条件。事件开关和行前缀一样，落定时时用当前值。
         // 也不播报"已按当前条件重投影"那句（会撒谎）。
-        if (appearanceChanged() || m_projectedOptions.liveVisibilityDiffers(m_filterOptions))
+        if (appearanceChanged() || m_incrementalDiverged
+            || m_projectedOptions.liveVisibilityDiffers(m_filterOptions))
             reprojectView(/*announce=*/false, /*applyCurrentConditions=*/false);
     });
     // 文本视图是唯一显示视图：每条消息按行号、时间、方向起头，载荷按文本本来的
@@ -379,7 +394,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(m_filterBar, &FilterBar::resetRequested, this, [this] {
         m_flags->restore(DirectionFlags());
         // 事件类型开关也要一并复位：条件分散在两个控件里，"回到不过滤"必须是整套动作。
-        for (auto *action : {m_showStateAction, m_showWarningAction, m_showErrorAction}) {
+        for (auto *action : {m_showInfoAction, m_showWarningAction, m_showErrorAction, m_showStateAction}) {
             const QSignalBlocker blocker(action);
             action->setChecked(true);
         }
@@ -576,6 +591,12 @@ void TrafficPanel::flushPending()
     m_filteredOut += static_cast<quint64>(filtered);
     m_text->appendMessages(accepted, format, m_displayOptions);
     if (m_follow->isChecked()) m_text->scrollToBottom();
+    // 防抖还没把已有行收成当前外观时，这批已经按当前条件画上去了。
+    // 若随后开关被拨回上次投影的值，scheduleReproject() 会看成"没变化"直接返回，
+    // 定时器回调也一样，这批行就留在屏幕上。记下偏离，让那次排队仍然落地。
+    if (!accepted.isEmpty() && m_everProjected
+        && (appearanceChanged() || m_projectedOptions.liveVisibilityDiffers(m_filterOptions)))
+        m_incrementalDiverged = true;
     m_lastBatchWorkMs = qMax(m_lastBatchWorkMs, work.elapsed());
     // 第一批数据按当前条件进了屏幕。此刻还没有「已应用」基线时，把当前条件记下来，
     // 后面改前缀、HEX、换行才不会把还没点「应用过滤」的关键词套到这些行上。
@@ -654,11 +675,14 @@ bool TrafficPanel::openNewLogFile()
 void TrafficPanel::writeLogText(const QString &text)
 {
     if (!m_logFile || text.isEmpty()) return;
-    QTextStream out(m_logFile);
-    out << text;
-    out.flush();
+    if (!m_logStream) {
+        m_logStream = new QTextStream(m_logFile);
+        m_logStream->setEncoding(QStringConverter::Utf8);
+    }
+    *m_logStream << text;
+    m_logStream->flush();
     // 写失败不能静默：说清原因并立即停止记录（数据批与 # 元信息行同此路径）。
-    if (out.status() != QTextStream::Ok) stopLogOnFailure(m_logFile->errorString());
+    if (m_logStream->status() != QTextStream::Ok) stopLogOnFailure(m_logFile->errorString());
 }
 
 void TrafficPanel::stopLogOnFailure(const QString &reason)
@@ -680,7 +704,7 @@ void TrafficPanel::refreshRecordTooltip()
     m_recordAction->setToolTip(m_logFile
             ? tr("写入全部到达的消息，与数据区是否显示无关。目录 %1 · 正在写 %2")
                   .arg(dir, QFileInfo(m_logFilePath).fileName())
-            : tr("把新到的接收、发送、状态、警告和错误按当前显示格式写入日志，与数据区是否显示无关。目录：%1。可在「日志位置」中修改")
+            : tr("把新到的接收、发送、信息、警告、错误和状态按当前显示格式写入日志，与数据区是否显示无关。目录：%1。可在「日志位置」中修改")
                   .arg(dir));
 }
 
@@ -769,10 +793,12 @@ void TrafficPanel::writeLog(const QList<Traffic::Message> &messages)
     if (!m_logFile || messages.isEmpty()) return;
     // 一条一行，与监视区同源渲染：方向是事实字段，内容由当前显示格式决定。
     // 数据行格式保持原样（制表符分隔），仅新文件与格式切换时才多出 # 元信息行。
+    // 流在文件打开期间复用：每批新建 QTextStream 会再编一次编码器，和这一批的正文无关。
     const auto format = currentDisplayFormat();
     QString block;
+    block.reserve(messages.size() * 96);
     for (const auto &r : messages) {
-        // 状态/警告/错误行的正文是 statusText（"打开串口 COM1 失败：…"这类原因），
+        // 信息/警告/错误/状态行的正文是 statusText（"打开串口 COM1 失败：…"这类原因），
         // raw 是空的。只写 render(raw) 会让日志里出现"有时间有方向、后面空的"行——
         // 端口异常因此既没弹窗也没日志可查。只有 raw 为空时才用 statusText 顶正文：
         // 两者都在时载荷本身才是用户要看的东西。
@@ -802,6 +828,8 @@ void TrafficPanel::writeLog(const QList<Traffic::Message> &messages)
 
 void TrafficPanel::closeLogFile()
 {
+    delete m_logStream;
+    m_logStream = nullptr;
     if (m_logFile) {
         m_logFile->close();
         delete m_logFile;
@@ -832,7 +860,7 @@ void TrafficPanel::loadPreferences()
         m_format->setCurrentText(format);
     // 过滤条件：filter/* 是现在的键，旧版 traffic/rx|tx|errors 作为兜底——
     // 上一版把方向开关放在显示设置里，升级后不该让用户的开关状态凭空复位。
-    // 方向两项（RX/TX）回到顶栏控件；事件三项回到显示设置的 QAction——它们各住一处，
+    // 方向两项（RX/TX）回到顶栏控件；事件四项回到显示设置的 QAction——它们各住一处，
     // 但共用同一套 filter/* 键，所以"条件存在哪"与"开关画在哪"互不影响。
     DirectionFlags directions;
     directions.rx = m_preferences->value("filter/rx", m_preferences->value("traffic/rx", true)).toBool();
@@ -841,9 +869,13 @@ void TrafficPanel::loadPreferences()
     m_flags->restore(directions);
     {
         const auto legacyEvents = m_preferences->value("traffic/errors", true);
-        const QSignalBlocker s(m_showStateAction), w(m_showWarningAction), e(m_showErrorAction);
-        m_showStateAction->setChecked(m_preferences->value("filter/state",
-            m_preferences->value("filter/states", true)).toBool());
+        const auto stateShown = m_preferences->value("filter/state",
+            m_preferences->value("filter/states", true));
+        const QSignalBlocker infoBlock(m_showInfoAction), s(m_showStateAction),
+            w(m_showWarningAction), e(m_showErrorAction);
+        // 以前信息和状态共用「显示状态」。没单独存过信息开关时，沿用那一次选择。
+        m_showInfoAction->setChecked(m_preferences->value("filter/info", stateShown).toBool());
+        m_showStateAction->setChecked(stateShown.toBool());
         m_showWarningAction->setChecked(m_preferences->value("filter/warning",
             m_preferences->value("filter/warnings", legacyEvents)).toBool());
         m_showErrorAction->setChecked(m_preferences->value("filter/error",
@@ -866,6 +898,8 @@ void TrafficPanel::loadPreferences()
         m_preferences->value("traffic/length", true)).toBool());
     m_alwaysShowHexAction->setChecked(m_preferences->value("traffic/alwaysShowHex",
         m_preferences->value("traffic/hex", false)).toBool());
+    // 初次启动按颜色显示，并藏起颜色前后缀。键不存在时用这个缺省。
+    m_showAnsiAction->setChecked(m_preferences->value("traffic/showAnsi", true).toBool());
     const bool prefixOn = m_preferences->contains("traffic/prefix")
         ? m_preferences->value("traffic/prefix").toBool()
         : !m_preferences->value("traffic/pure", false).toBool();
@@ -914,6 +948,7 @@ void TrafficPanel::savePreferences()
     m_preferences->setValue("filter/rx", flags.rx);
     m_preferences->setValue("filter/tx", flags.tx);
     m_preferences->setValue("filter/forward", flags.forward);
+    m_preferences->setValue("filter/info", flags.infos);
     m_preferences->setValue("filter/state", flags.states);
     m_preferences->setValue("filter/warning", flags.warnings);
     m_preferences->setValue("filter/error", flags.errors);
@@ -926,6 +961,7 @@ void TrafficPanel::savePreferences()
     m_preferences->setValue("traffic/prefixTimestamp", m_prefixTimestampAction->isChecked());
     m_preferences->setValue("traffic/prefixLength", m_prefixLengthAction->isChecked());
     m_preferences->setValue("traffic/alwaysShowHex", m_alwaysShowHexAction->isChecked());
+    m_preferences->setValue("traffic/showAnsi", m_showAnsiAction->isChecked());
     m_preferences->setValue("traffic/autoWrap", m_autoWrapAction->isChecked());
     m_preferences->setValue("traffic/follow", m_follow->isChecked());
     m_preferences->setValue("traffic/portA", m_portAButton->isChecked());
@@ -959,13 +995,15 @@ void TrafficPanel::updatePortVisibility()
 
 FilterFlagsState TrafficPanel::filterFlagsState() const
 {
-    // 条件分散在两个控件里：方向（RX/TX）在顶栏的 FilterFlags，事件类型（状态/警告/错误）
-    // 在显示设置菜单的 QAction。汇总只此一处，其余代码一律读它，不再各自记"哪项在哪"。
+    // 条件分散在两个控件里：方向（RX/TX）在顶栏的 FilterFlags，
+    // 事件类型（信息/警告/错误/状态）在显示设置菜单的 QAction。
+    // 汇总只此一处，其余代码一律读它，不再各自记"哪项在哪"。
     const auto directions = m_flags->directions();
     FilterFlagsState flags;
     flags.rx = directions.rx;
     flags.tx = directions.tx;
     flags.forward = directions.forward;
+    if (m_showInfoAction) flags.infos = m_showInfoAction->isChecked();
     if (m_showStateAction) flags.states = m_showStateAction->isChecked();
     if (m_showWarningAction) flags.warnings = m_showWarningAction->isChecked();
     if (m_showErrorAction) flags.errors = m_showErrorAction->isChecked();
@@ -978,7 +1016,8 @@ int TrafficPanel::activeFlagCount() const
     // "只关掉了警告"这种最容易被忘掉的情形，而那个数字正是「过滤 · N」的唯一出口。
     const auto flags = filterFlagsState();
     return (flags.rx ? 0 : 1) + (flags.tx ? 0 : 1) + (flags.forward ? 0 : 1)
-        + (flags.states ? 0 : 1) + (flags.warnings ? 0 : 1) + (flags.errors ? 0 : 1);
+        + (flags.infos ? 0 : 1) + (flags.warnings ? 0 : 1)
+        + (flags.errors ? 0 : 1) + (flags.states ? 0 : 1);
 }
 
 void TrafficPanel::updateFilter()
@@ -993,6 +1032,7 @@ void TrafficPanel::updateFilter()
     options.rx = flags.rx;
     options.tx = flags.tx;
     options.forwards = flags.forward;
+    options.infos = flags.infos;
     options.states = flags.states;
     options.warnings = flags.warnings;
     options.errors = flags.errors;
@@ -1011,6 +1051,7 @@ void TrafficPanel::updateFilter()
     m_displayOptions.prefixTimestamp = m_prefixTimestampAction->isChecked();
     m_displayOptions.prefixLength = m_prefixLengthAction->isChecked();
     m_displayOptions.alwaysShowHex = m_prefixAction->isChecked() && m_alwaysShowHexAction->isChecked();
+    m_displayOptions.showAnsi = m_showAnsiAction->isChecked();
     // 外观、端点、方向、转发和事件开关一点就作用到已有行。
     // 关键词和排除词只作用于新行，等「应用过滤」再补到已有记录上。
     scheduleReproject();
@@ -1140,7 +1181,9 @@ void TrafficPanel::scheduleReproject()
         return;
     }
     // 端点、方向、转发和事件开关决定哪些行进来，不在外观签名里，所以这里单独比。
-    if (!appearanceChanged() && !m_projectedOptions.liveVisibilityDiffers(m_filterOptions)) return;
+    if (!appearanceChanged() && !m_incrementalDiverged
+        && !m_projectedOptions.liveVisibilityDiffers(m_filterOptions))
+        return;
     m_reprojectTimer->start();
 }
 
@@ -1155,6 +1198,7 @@ void TrafficPanel::markReprojected(bool conditionsApplied)
     // 防抖定时器每拍都会再做一次同样的重投影。
     m_projectedFormat = currentDisplayFormat();
     m_projectedDisplay = m_displayOptions;
+    m_incrementalDiverged = false;
     m_everProjected = true;
     // 只有真正"让视图跟上当前条件"的这次投影才更新已应用条件（外观路径不动它）：
     // 这一条正是「应用过滤 •」待应用提示能被正确保持/清除的根据。

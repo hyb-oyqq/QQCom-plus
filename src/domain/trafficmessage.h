@@ -20,19 +20,20 @@
 
 namespace Traffic {
 
-// 消息方向。State/Warning/Error 不是字节流，记录的是端口状态迁移与离散事件，
+// 消息方向。Info/Warning/Error/State 不是字节流，记录的是说明与离散事件，
 // 同样占用显示行，但 raw 为空、统计不计入收发字节。
-// 与参考实现（BLE 调试工具 TransmissionLogType）的分级对应：State ≈ info
-// （连接建立、自动重连完成），Warning ≈ 可观察但不中止的降级（显示预览裁剪、
-// 队列溢出丢弃、重连中），Error ≈ error（写入失败、编码失败）。
-// TX/RX 之外借用 Direction 承载离散事件，避免为它们单开一套平行类型。
+// 前缀单字母：I 信息（对端出现、客户端接入、组帧兜底说明），
+// W 警告（等待重开、可观察的降级），E 错误（打开失败、断开、丢弃），
+// S 状态（端口打开、关闭，以及桥接建立、停止）。
+// TX/RX 之外借用 Direction 承载这些事件，避免为它们单开一套平行类型。
 enum class Direction
 {
     Receive,
     Transmit,
-    State,
+    Info,
     Warning,
-    Error
+    Error,
+    State
 };
 
 // 消息从哪来。与 SendRequest::origin 对齐：转发产生的 TX 不该和用户手动
@@ -131,8 +132,8 @@ struct Message
 Source makeSource(const PortDraft &draft, int index);
 
 // 中文名称，供列显示、导出与筛选器使用；经 tr() 保留翻译能力。
-// 日志前缀和文件列共用的 ASCII 标记：RX/TX/STATE/WARN/ERR，AUTO/MAN/TIMER/FWD/SAMPLE。
-// 不走翻译，避免前缀里出现中文。
+// 日志前缀和文件列共用的 ASCII 标记：RX/TX/I/W/E/S，AUTO/MAN/TIMER/FWD/SAMPLE。
+// I 信息、W 警告、E 错误、S 状态。不走翻译，避免前缀里出现中文。
 QString directionName(Direction direction);
 QString originName(Origin origin);
 QString stateName(State state);

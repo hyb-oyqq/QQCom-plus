@@ -7,7 +7,7 @@ class QPushButton;
 
 // 方向开关（RX / TX）的取值：本控件持有的那两个。
 //
-// 事件类型（状态 / 警告 / 错误）同样参与过滤，但它们的开关住在显示设置菜单的 QAction 里
+// 事件类型（信息 / 警告 / 错误 / 状态）同样参与过滤，但它们的开关住在显示设置菜单的 QAction 里
 // （用户钦定：顶栏让位给显示开关），不在本控件内，因此也不在这个结构里。两者在
 // TrafficPanel::filterFlagsState() 汇总成 FilterFlagsState——"条件住在哪个控件"与
 // "判定/落盘要哪几项"是两件事，结构分开就不必假装它们同源。
@@ -26,9 +26,10 @@ struct FilterFlagsState
     bool rx = true;
     bool tx = true;
     bool forward = true;
-    bool states = true;
+    bool infos = true;
     bool warnings = true;
     bool errors = true;
+    bool states = true;
 };
 
 // 方向开关（RX / TX / 转发）——顶栏上负责"哪些行进来"的一组按钮。
@@ -41,7 +42,7 @@ struct FilterFlagsState
 // 补上文案让"这排按钮在做什么"不需要悬停才能确认。
 // 「转发」只管桥接产生的发送行是否出现在数据区，不停止转发。
 //
-// 事件类型开关（状态 / 警告 / 错误）**不在这里**：它们与"行内容"选项同类，
+// 事件类型开关（信息 / 警告 / 错误 / 状态）**不在这里**：它们与"行内容"选项同类，
 // 收进了显示设置的菜单（用户钦定），顶栏那个位置留给了显示开关（见 ViewToggles）。
 class FilterFlags : public QWidget
 {

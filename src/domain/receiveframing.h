@@ -33,7 +33,7 @@ struct ReceiveFraming
     // 长度前缀默认保留帧头（下游解析器常需要它定位 payload）。
     bool includeDelimiter = false;  // 输出帧是否包含结束符本身（仅 Delimiter）
     bool includeLengthPrefix = true;// 输出帧是否包含 2 字节长度前缀（仅 LengthPrefixU16LE）
-    // 组帧提示日志：兜底输出（空闲超时/缓冲阈值/关闭收尾）时发一条警告事件到监视区。
+    // 组帧提示日志：兜底输出（空闲超时/缓冲阈值/关闭收尾）时发一条信息到监视区。
     // 默认关——正常定界下这些事件只是噪声，排查"为什么这几字节被拆出来"时才需要。
     bool logHints = false;
 

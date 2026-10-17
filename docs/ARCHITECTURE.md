@@ -40,7 +40,7 @@ flowchart LR
 
 ## 消息与监视
 
-`Traffic::Message` 保存来源端点/peer、时间、方向、原始字节、真实长度、截断及组帧标记。State/Warning/Error 不计入 RX/TX 字节，示例数据不发送给真实设备。显示编码与派生文本不写回消息。
+`Traffic::Message` 保存来源端点/peer、时间、方向、原始字节、真实长度、截断及组帧标记。Info/Warning/Error/State 不计入 RX/TX 字节，示例数据不发送给真实设备。显示编码与派生文本不写回消息。
 
 `TrafficPanel` 以 16 ms 定时攒批。`TrafficModel` 管历史预算，`TrafficFilter::Matcher` 负责结构条件和文本短路匹配，`TrafficTextView` 负责批量文本插入、滚动和视图容量。显示设置改变时重绘历史；过滤输入的当前条件与历史已应用条件分别保存，语义见 [界面约定](UI_DESIGN.md)。
 

@@ -45,14 +45,17 @@ bool TrafficFilter::Matcher::accepts(const Traffic::Message &r) const
         if (!m_options.tx) return false;
         if (r.origin == Traffic::Origin::Forward && !m_options.forwards) return false;
         break;
-    case Traffic::Direction::State:
-        if (!m_options.states) return false;
+    case Traffic::Direction::Info:
+        if (!m_options.infos) return false;
         break;
     case Traffic::Direction::Warning:
         if (!m_options.warnings) return false;
         break;
     case Traffic::Direction::Error:
         if (!m_options.errors) return false;
+        break;
+    case Traffic::Direction::State:
+        if (!m_options.states) return false;
         break;
     }
     if (m_keywords.isEmpty() && m_excludes.isEmpty()) return true;

@@ -32,9 +32,10 @@ public:
         bool rx = true;
         bool tx = true;
         bool forwards = true; // 桥接转发产生的发送行。关掉只影响显示，不停止转发。
-        bool states = true;   // 状态迁移（端口打开/关闭/重连等）
+        bool infos = true;    // 信息：对端出现、客户端接入、组帧说明
         bool warnings = true; // 警告日志
         bool errors = true;   // 错误日志
+        bool states = true;   // 状态：端口打开/关闭，桥接建立/停止
 
         // 顶栏显示开关和显示设置里的事件开关：点了就作用到已有行。
         // 关键词、排除词、大小写仍等「应用过滤」。
@@ -44,15 +45,17 @@ public:
             rx = current.rx;
             tx = current.tx;
             forwards = current.forwards;
-            states = current.states;
+            infos = current.infos;
             warnings = current.warnings;
             errors = current.errors;
+            states = current.states;
         }
         bool liveVisibilityDiffers(const Options &other) const
         {
             return endpoints != other.endpoints || rx != other.rx || tx != other.tx
-                || forwards != other.forwards || states != other.states
-                || warnings != other.warnings || errors != other.errors;
+                || forwards != other.forwards || infos != other.infos
+                || warnings != other.warnings || errors != other.errors
+                || states != other.states;
         }
         // 内容条件：关键词任一命中即通过（组内 OR），排除词命中任一即隐藏（黑名单）。
         // 两者共用同一套候选文本视图，见 Matcher。
@@ -65,7 +68,8 @@ public:
         {
             return endpoints == other.endpoints && rx == other.rx && tx == other.tx
                 && forwards == other.forwards
-                && states == other.states && warnings == other.warnings && errors == other.errors
+                && infos == other.infos && warnings == other.warnings
+                && errors == other.errors && states == other.states
                 && keywords == other.keywords && excludes == other.excludes
                 && caseSensitive == other.caseSensitive;
         }
