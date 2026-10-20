@@ -4,8 +4,10 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMap>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QUdpSocket>
 #include "app/endpointruntime.h"
 #include "app/receiveframer.h"
@@ -160,7 +162,7 @@ private slots:
         QCOMPARE(framer.feed("a").first().bytes, QByteArray("YY"));
         QVERIFY(framer.flush(ReceiveFramer::Closed).isEmpty());
 
-        config.mode = ReceiveFraming::LengthPrefixU16LE;
+        config.mode = ReceiveFraming::IdleTimeout;
         config.bufferThresholdBytes = 1;
         framer.setConfig(config);
         const auto partial = framer.feed(QByteArray(1, '\x02'));
@@ -505,44 +507,6 @@ private slots:
         QCOMPARE(framer.pendingBytes(), 3);
     }
 
-    void framerFollowsLengthPrefix()
-    {
-        ReceiveFraming config;
-        config.mode = ReceiveFraming::LengthPrefixU16LE;
-        config.includeLengthPrefix = true; // 默认保留帧头
-        config.bufferThresholdBytes = 1000;
-        ReceiveFramer framer(config);
-
-        // 帧头说"后面还有 2 字节"，但一个也没到：继续等。
-        QVERIFY(framer.feed(QByteArray::fromHex("0200")).isEmpty());
-        QVERIFY(framer.feed(QByteArray("xy")).size() == 1);
-        // 半帧：帧头说 3 字节，只到了 1 字节 → 不出帧。
-        QVERIFY(framer.feed(QByteArray::fromHex("0300")).isEmpty());
-        QVERIFY(framer.feed(QByteArray("a")).isEmpty());
-        auto frames = framer.feed(QByteArray("bc"));
-        QCOMPARE(frames.size(), 1);
-        QCOMPARE(frames.at(0).bytes, QByteArray::fromHex("0300616263")); // 含帧头
-        QVERIFY(frames.at(0).complete);
-
-        // 跨包拆分：帧头与 payload 分两次到，收齐才出帧。
-        frames = framer.feed(QByteArray::fromHex("0100")); // payload 1 字节
-        QVERIFY(frames.isEmpty());
-        frames = framer.feed(QByteArray("Z"));
-        QCOMPARE(frames.size(), 1);
-        QCOMPARE(frames.at(0).bytes, QByteArray::fromHex("01005A"));
-
-        // 长度 0 的空帧也要收：不收就会永远等第 3 字节。
-        // 花括号构造：写成 ReceiveFramer x(ReceiveFraming()) 会被解析成函数声明。
-        ReceiveFramer stripped{ReceiveFraming()};
-        ReceiveFraming noPrefix = config;
-        noPrefix.includeLengthPrefix = false;
-        stripped.setConfig(noPrefix);
-        frames = stripped.feed(QByteArray::fromHex("0000"));
-        QCOMPARE(frames.size(), 1);
-        QCOMPARE(frames.at(0).bytes, QByteArray()); // 剥离帧头后为空帧
-        QCOMPARE(stripped.pendingBytes(), 0);
-    }
-
     void framerSplitsOnIdleTimeout()
     {
         ReceiveFraming config;
@@ -607,15 +571,6 @@ private slots:
         QCOMPARE(out.size(), 1);
         QCOMPARE(out.at(0).bytes, QByteArray("a\r\nb"));
         QVERIFY(out.at(0).complete);
-
-        // 配置不合法（结束符模式却没有结束符）时退回直通，绝不把数据吞在缓冲里。
-        ReceiveFraming broken;
-        broken.mode = ReceiveFraming::Delimiter;
-        ReceiveFramer fallback(broken);
-        out = fallback.feed(QByteArray("kept"));
-        QCOMPARE(out.size(), 1);
-        QCOMPARE(out.at(0).bytes, QByteArray("kept"));
-        QCOMPARE(fallback.pendingBytes(), 0);
     }
 
     // 组帧端到端：字节流经 EndpointRuntime 的组帧器后，界面看到的是帧而不是片段。
@@ -702,6 +657,154 @@ private slots:
 
         client.disconnectFromHost();
         QTest::qWait(60);
+        runtime.closeEndpoint(0);
+    }
+
+    // 空闲超时同样经传输事件进组帧器：连续写入合并成一条，静默满超时后才输出。
+    void runtimeFramesByteStreamByIdleTimeout()
+    {
+        EndpointRuntime runtime;
+        QSignalSpy states(&runtime, &EndpointRuntime::endpointStateChanged);
+        QSignalSpy messages(&runtime, &EndpointRuntime::messageReceived);
+
+        QTcpServer probe;
+        QVERIFY(probe.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = probe.serverPort();
+        probe.close();
+
+        PortDraft draft = makeDraft(PortDraft::TcpServer,
+            {{"server.address", "127.0.0.1"}, {"server.port", int(port)}, {"server.clients", 4}});
+        ReceiveFraming framing;
+        framing.mode = ReceiveFraming::IdleTimeout;
+        framing.idleTimeoutMs = 180;
+        framing.bufferThresholdBytes = 300;
+        draft.framing = framing;
+
+        runtime.openEndpoint(0, draft);
+        QTRY_COMPARE(lastState(states), int(Transport::State::Open));
+
+        const auto received = [&messages] {
+            QList<Traffic::Message> rx;
+            for (const auto &params : messages) {
+                const auto message = params.at(0).value<Traffic::Message>();
+                if (message.direction == Traffic::Direction::Receive) rx.append(message);
+            }
+            return rx;
+        };
+
+        QTcpSocket client;
+        client.connectToHost(QStringLiteral("127.0.0.1"), port);
+        QVERIFY(client.waitForConnected(3000));
+
+        client.write(QByteArray("ab"));
+        QVERIFY(client.waitForBytesWritten(1000));
+        QTest::qWait(60);
+        client.write(QByteArray("cd"));
+        QVERIFY(client.waitForBytesWritten(1000));
+        QTest::qWait(60);
+        QCOMPARE(received().size(), 0);
+
+        QTRY_COMPARE(received().size(), 1);
+        QCOMPARE(received().at(0).raw, QByteArray("abcd"));
+        QCOMPARE(received().at(0).framing, Traffic::Framing::Stream);
+        QVERIFY(received().at(0).hasMoreFragments);
+
+        client.disconnectFromHost();
+        runtime.closeEndpoint(0);
+    }
+
+    // 连接中改组帧立刻生效。空闲模式先把 "tail" 留在缓冲里；改成结束符时
+    // 这半包按旧规则吐出，后面的 "next" 才按新规则切。
+    void runtimeAppliesFramingChangeWithoutReconnect()
+    {
+        EndpointRuntime runtime;
+        QSignalSpy states(&runtime, &EndpointRuntime::endpointStateChanged);
+        QSignalSpy messages(&runtime, &EndpointRuntime::messageReceived);
+
+        QTcpServer probe;
+        QVERIFY(probe.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = probe.serverPort();
+        probe.close();
+
+        PortDraft draft = makeDraft(PortDraft::TcpServer,
+            {{"server.address", "127.0.0.1"}, {"server.port", int(port)}, {"server.clients", 4}});
+        draft.framing.mode = ReceiveFraming::IdleTimeout;
+        draft.framing.idleTimeoutMs = 5000;
+        runtime.openEndpoint(0, draft);
+        QTRY_COMPARE(lastState(states), int(Transport::State::Open));
+        auto *transport = runtime.findChild<AbstractTransport *>();
+        QVERIFY(transport);
+        QSignalSpy chunks(transport, &AbstractTransport::dataReceived);
+
+        const auto received = [&messages] {
+            QList<Traffic::Message> rx;
+            for (const auto &params : messages) {
+                const auto message = params.at(0).value<Traffic::Message>();
+                if (message.direction == Traffic::Direction::Receive) rx.append(message);
+            }
+            return rx;
+        };
+
+        QTcpSocket client;
+        client.connectToHost(QStringLiteral("127.0.0.1"), port);
+        QVERIFY(client.waitForConnected(3000));
+        client.write(QByteArray("tail"));
+        QVERIFY(client.waitForBytesWritten(1000));
+        QTRY_COMPARE(chunks.size(), 1);
+        QCOMPARE(received().size(), 0);
+        ReceiveFraming framing;
+        framing.mode = ReceiveFraming::Delimiter;
+        framing.delimiter = QByteArray::fromHex("0D0A");
+        framing.idleTimeoutMs = 5000;
+        runtime.updateFraming(0, framing);
+        QTRY_COMPARE(received().size(), 1);
+        QCOMPARE(received().at(0).raw, QByteArray("tail"));
+
+        client.write(QByteArray("next\r\nmore"));
+        QVERIFY(client.waitForBytesWritten(1000));
+        QTRY_COMPARE(received().size(), 2);
+        QCOMPARE(received().at(1).raw, QByteArray("next"));
+        QTest::qWait(40);
+        QCOMPARE(received().size(), 2);
+
+        client.disconnectFromHost();
+        runtime.closeEndpoint(0);
+    }
+
+    // 空结束符不是合法规则。送进来也不能拿空序列去查找，否则组帧循环不前进。
+    void runtimeDropsAnEmptyDelimiter()
+    {
+        EndpointRuntime runtime;
+        QSignalSpy states(&runtime, &EndpointRuntime::endpointStateChanged);
+        QSignalSpy messages(&runtime, &EndpointRuntime::messageReceived);
+
+        QTcpServer probe;
+        QVERIFY(probe.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = probe.serverPort();
+        probe.close();
+
+        runtime.openEndpoint(0, makeDraft(PortDraft::TcpServer,
+            {{"server.address", "127.0.0.1"}, {"server.port", int(port)}, {"server.clients", 4}}));
+        QTRY_COMPARE(lastState(states), int(Transport::State::Open));
+
+        ReceiveFraming broken;
+        broken.mode = ReceiveFraming::Delimiter;
+        runtime.updateFraming(0, broken);
+
+        QTcpSocket client;
+        client.connectToHost(QStringLiteral("127.0.0.1"), port);
+        QVERIFY(client.waitForConnected(3000));
+        client.write(QByteArray("kept"));
+        QVERIFY(client.waitForBytesWritten(1000));
+        // 拒绝后仍是直通：收到即完整输出。空结束符若被换上，这段会卡住或变成流片段。
+        QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QList<QVariant> &params) {
+            const auto message = params.at(0).value<Traffic::Message>();
+            return message.direction == Traffic::Direction::Receive
+                && message.raw == QByteArray("kept")
+                && message.framing == Traffic::Framing::Message;
+        }));
+
+        client.disconnectFromHost();
         runtime.closeEndpoint(0);
     }
 
@@ -868,6 +971,391 @@ private slots:
         }
         sender.stop();
         receiver.stop();
+    }
+
+    void runtimeUdpPassthroughPreservesEmptyDatagrams()
+    {
+        QList<Traffic::Message> received;
+        EndpointRuntime runtime;
+        connect(&runtime, &EndpointRuntime::messageReceived, this,
+            [&received](const Traffic::Message &message) {
+                if (message.direction == Traffic::Direction::Receive) received.append(message);
+            });
+        runtime.openEndpoint(0, makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0}}));
+        auto *socket = runtime.findChild<QUdpSocket *>();
+        QVERIFY(socket && socket->state() == QAbstractSocket::BoundState);
+        QSignalSpy chunks(runtime.findChild<AbstractTransport *>(), &AbstractTransport::dataReceived);
+        QUdpSocket sender;
+        QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
+        const auto address = QStringLiteral("127.0.0.1:%1").arg(sender.localPort());
+        const QList<QByteArray> datagrams = {"one\r\ntwo", QByteArray(), "tail"};
+        for (int i = 0; i < datagrams.size(); ++i) {
+            QCOMPARE(sender.writeDatagram(datagrams[i], QHostAddress::LocalHost, socket->localPort()),
+                qint64(datagrams[i].size()));
+            QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), i + 1, 5000);
+            QCOMPARE(received.size(), i + 1);
+            QCOMPARE(received[i].raw, datagrams[i]);
+            QCOMPARE(received[i].rawLength, qint64(datagrams[i].size()));
+            QCOMPARE(received[i].framing, Traffic::Framing::Datagram);
+            QCOMPARE(received[i].source.peerAddress, address);
+            QVERIFY(!received[i].hasMoreFragments);
+        }
+        runtime.closeEndpoint(0);
+        QCOMPARE(received.size(), datagrams.size());
+    }
+
+    void runtimeUdpDelimiterSeparatesInterleavedSources_data()
+    {
+        QTest::addColumn<bool>("includeDelimiter");
+        QTest::addColumn<bool>("samePortDifferentIp");
+        QTest::newRow("strip-delimiter") << false << false;
+        QTest::newRow("keep-delimiter") << true << false;
+        QTest::newRow("same-port-different-ip") << false << true;
+    }
+
+    void runtimeUdpDelimiterSeparatesInterleavedSources()
+    {
+        QFETCH(bool, includeDelimiter);
+        QFETCH(bool, samePortDifferentIp);
+        QList<Traffic::Message> received;
+        EndpointRuntime runtime;
+        auto draft = makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0}});
+        draft.framing.mode = ReceiveFraming::Delimiter;
+        draft.framing.delimiter = "\r\n";
+        draft.framing.includeDelimiter = includeDelimiter;
+        draft.framing.idleTimeoutMs = 10000;
+        connect(&runtime, &EndpointRuntime::messageReceived, this,
+            [&received](const Traffic::Message &message) {
+                if (message.direction == Traffic::Direction::Receive) received.append(message);
+            });
+        runtime.openEndpoint(0, draft);
+        auto *socket = runtime.findChild<QUdpSocket *>();
+        QVERIFY(socket && socket->state() == QAbstractSocket::BoundState);
+        const auto port = socket->localPort();
+        QSignalSpy chunks(runtime.findChild<AbstractTransport *>(), &AbstractTransport::dataReceived);
+        QUdpSocket first, second;
+        QVERIFY(first.bind(QHostAddress::LocalHost, 0));
+        const QHostAddress secondIp(samePortDifferentIp ? QStringLiteral("127.0.0.2")
+                                                       : QStringLiteral("127.0.0.1"));
+        QVERIFY2(second.bind(secondIp, samePortDifferentIp ? first.localPort() : quint16(0)),
+            qPrintable(second.errorString()));
+        if (samePortDifferentIp) QCOMPARE(first.localPort(), second.localPort());
+        else QVERIFY(first.localPort() != second.localPort());
+        const auto firstAddress = QStringLiteral("127.0.0.1:%1").arg(first.localPort());
+        const auto secondAddress = QStringLiteral("%1:%2").arg(secondIp.toString()).arg(second.localPort());
+
+        QCOMPARE(first.writeDatagram("first\r", QHostAddress::LocalHost, port), qint64(6));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 1, 5000);
+        QVERIFY(received.isEmpty()); // 已收到原始报，不是靠等待没有消息来判定缓存成功。
+        QCOMPARE(second.writeDatagram("second\r", QHostAddress::LocalHost, port), qint64(7));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 2, 5000);
+        QVERIFY(received.isEmpty());
+        QCOMPARE(first.writeDatagram("\nnext\r\n\r\nfirst-tail", QHostAddress::LocalHost, port), qint64(19));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 3, 5000);
+        QCOMPARE(received.size(), 3);
+        const QList<QByteArray> firstFrames = {"first", "next", QByteArray()};
+        for (int i = 0; i < firstFrames.size(); ++i) {
+            QCOMPARE(received[i].raw, firstFrames[i] + (includeDelimiter ? QByteArray("\r\n") : QByteArray()));
+            QCOMPARE(received[i].source.peerAddress, firstAddress);
+            QCOMPARE(received[i].framing, Traffic::Framing::Message);
+            QVERIFY(!received[i].hasMoreFragments);
+        }
+        QCOMPARE(second.writeDatagram("\nsecond-tail", QHostAddress::LocalHost, port), qint64(12));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 4, 5000);
+        QCOMPARE(received.size(), 4);
+        QCOMPARE(received[3].raw, includeDelimiter ? QByteArray("second\r\n") : QByteArray("second"));
+        QCOMPARE(received[3].source.peerAddress, secondAddress);
+        QCOMPARE(received[3].framing, Traffic::Framing::Message);
+
+        // 关闭必须排空每个来源；QHash 的遍历顺序不构成消息顺序约定。
+        runtime.closeEndpoint(0);
+        QCOMPARE(received.size(), 6);
+        QMap<QString, QByteArray> tails;
+        for (int i = 4; i < received.size(); ++i) {
+            QCOMPARE(received[i].framing, Traffic::Framing::Stream);
+            QVERIFY(received[i].hasMoreFragments);
+            tails.insert(received[i].source.peerAddress, received[i].raw);
+        }
+        QCOMPARE(tails.size(), 2);
+        QCOMPARE(tails.value(firstAddress), QByteArray("first-tail"));
+        QCOMPARE(tails.value(secondAddress), QByteArray("second-tail"));
+        runtime.closeEndpoint(0);
+        QCOMPARE(received.size(), 6); // 重复关闭不得重复吐尾帧。
+    }
+
+    void runtimeUdpIdleTimersArePerSource_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::newRow("idle-mode") << int(ReceiveFraming::IdleTimeout);
+        QTest::newRow("delimiter-fallback") << int(ReceiveFraming::Delimiter);
+    }
+
+    void runtimeUdpIdleTimersArePerSource()
+    {
+        QFETCH(int, mode);
+        QList<Traffic::Message> received;
+        EndpointRuntime runtime;
+        auto draft = makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0}});
+        draft.framing.mode = ReceiveFraming::Mode(mode);
+        draft.framing.delimiter = "\r\n";
+        draft.framing.idleTimeoutMs = 500;
+        draft.framing.bufferThresholdBytes = 100000;
+        connect(&runtime, &EndpointRuntime::messageReceived, this,
+            [&received](const Traffic::Message &message) {
+                if (message.direction == Traffic::Direction::Receive) received.append(message);
+            });
+        runtime.openEndpoint(0, draft);
+        auto *socket = runtime.findChild<QUdpSocket *>();
+        QVERIFY(socket && socket->state() == QAbstractSocket::BoundState);
+        const auto port = socket->localPort();
+        QSignalSpy chunks(runtime.findChild<AbstractTransport *>(), &AbstractTransport::dataReceived);
+        QUdpSocket first, second;
+        QVERIFY(first.bind(QHostAddress::LocalHost, 0));
+        QVERIFY(second.bind(QHostAddress::LocalHost, 0));
+        const auto firstAddress = QStringLiteral("127.0.0.1:%1").arg(first.localPort());
+        const auto secondAddress = QStringLiteral("127.0.0.1:%1").arg(second.localPort());
+        QCOMPARE(first.writeDatagram("quiet", QHostAddress::LocalHost, port), qint64(5));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 1, 5000);
+        QVERIFY(received.isEmpty());
+        QCOMPARE(second.writeDatagram("busy", QHostAddress::LocalHost, port), qint64(4));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 2, 5000);
+        QVERIFY(received.isEmpty());
+
+        // B 持续有输入：不能延后 A 的空闲输出，也不能让 B 在自己的期限前输出。
+        QTimer heartbeat;
+        heartbeat.setInterval(40);
+        int sent = 0;
+        bool writeFailed = false;
+        connect(&heartbeat, &QTimer::timeout, this, [&] {
+            if (second.writeDatagram("x", QHostAddress::LocalHost, port) != 1) writeFailed = true;
+            else ++sent;
+        });
+        heartbeat.start();
+        QTRY_COMPARE_WITH_TIMEOUT(received.size(), 1, 5000);
+        heartbeat.stop();
+        QVERIFY(!writeFailed);
+        QVERIFY(sent > 0);
+        QCOMPARE(received[0].raw, QByteArray("quiet"));
+        QCOMPARE(received[0].source.peerAddress, firstAddress);
+        QCOMPARE(received[0].framing, Traffic::Framing::Stream);
+        QVERIFY(received[0].hasMoreFragments);
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), sent + 2, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(received.size(), 2, 5000);
+        QCOMPARE(received[1].raw, QByteArray("busy") + QByteArray(sent, 'x'));
+        QCOMPARE(received[1].source.peerAddress, secondAddress);
+        QCOMPARE(received[1].framing, Traffic::Framing::Stream);
+        QVERIFY(received[1].hasMoreFragments);
+        runtime.closeEndpoint(0);
+        QCOMPARE(received.size(), 2);
+    }
+
+    void runtimeUdpThresholdIsPerSource_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::newRow("idle-mode") << int(ReceiveFraming::IdleTimeout);
+        QTest::newRow("delimiter-mode") << int(ReceiveFraming::Delimiter);
+    }
+
+    void runtimeUdpThresholdIsPerSource()
+    {
+        QFETCH(int, mode);
+        QList<Traffic::Message> received;
+        EndpointRuntime runtime;
+        auto draft = makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0}});
+        draft.framing.mode = ReceiveFraming::Mode(mode);
+        draft.framing.delimiter = "\r\n";
+        draft.framing.idleTimeoutMs = 10000;
+        draft.framing.bufferThresholdBytes = 6;
+        connect(&runtime, &EndpointRuntime::messageReceived, this,
+            [&received](const Traffic::Message &message) {
+                if (message.direction == Traffic::Direction::Receive) received.append(message);
+            });
+        runtime.openEndpoint(0, draft);
+        auto *socket = runtime.findChild<QUdpSocket *>();
+        QVERIFY(socket && socket->state() == QAbstractSocket::BoundState);
+        const auto port = socket->localPort();
+        QSignalSpy chunks(runtime.findChild<AbstractTransport *>(), &AbstractTransport::dataReceived);
+        QUdpSocket first, second;
+        QVERIFY(first.bind(QHostAddress::LocalHost, 0));
+        QVERIFY(second.bind(QHostAddress::LocalHost, 0));
+        QCOMPARE(first.writeDatagram("abc", QHostAddress::LocalHost, port), qint64(3));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 1, 5000);
+        QCOMPARE(second.writeDatagram("123", QHostAddress::LocalHost, port), qint64(3));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 2, 5000);
+        QVERIFY(received.isEmpty()); // 合计已达 6 字节，但每个来源都尚未达到阈值。
+        QCOMPARE(first.writeDatagram("def", QHostAddress::LocalHost, port), qint64(3));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 3, 5000);
+        QCOMPARE(received.size(), 1); // 阈值应立即输出，不等待 10 秒 idle 兜底。
+        QCOMPARE(received[0].raw, QByteArray("abcdef"));
+        QCOMPARE(received[0].source.peerAddress, QStringLiteral("127.0.0.1:%1").arg(first.localPort()));
+        QCOMPARE(received[0].framing, Traffic::Framing::Stream);
+        QVERIFY(received[0].hasMoreFragments);
+        QCOMPARE(second.writeDatagram("4567", QHostAddress::LocalHost, port), qint64(4));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 4, 5000);
+        QCOMPARE(received.size(), 2);
+        QCOMPARE(received[1].raw, QByteArray("1234567"));
+        QCOMPARE(received[1].source.peerAddress, QStringLiteral("127.0.0.1:%1").arg(second.localPort()));
+        QCOMPARE(received[1].framing, Traffic::Framing::Stream);
+        QVERIFY(received[1].hasMoreFragments);
+        runtime.closeEndpoint(0);
+        QCOMPARE(received.size(), 2);
+    }
+
+    void runtimeUdpFramingHotUpdateKeepsSocketAndFlushes()
+    {
+        QList<Traffic::Message> received;
+        EndpointRuntime runtime;
+        QSignalSpy states(&runtime, &EndpointRuntime::endpointStateChanged);
+        connect(&runtime, &EndpointRuntime::messageReceived, this,
+            [&received](const Traffic::Message &message) {
+                if (message.direction == Traffic::Direction::Receive) received.append(message);
+            });
+        runtime.openEndpoint(0, makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0}}));
+        auto *transport = runtime.findChild<AbstractTransport *>();
+        auto *socket = runtime.findChild<QUdpSocket *>();
+        QVERIFY(transport && socket && socket->state() == QAbstractSocket::BoundState);
+        const auto descriptor = socket->socketDescriptor();
+        const auto port = socket->localPort();
+        const auto stateCount = states.size();
+        QSignalSpy chunks(transport, &AbstractTransport::dataReceived);
+        QUdpSocket first, second;
+        QVERIFY(first.bind(QHostAddress::LocalHost, 0));
+        QVERIFY(second.bind(QHostAddress::LocalHost, 0));
+        const auto firstAddress = QStringLiteral("127.0.0.1:%1").arg(first.localPort());
+        const auto secondAddress = QStringLiteral("127.0.0.1:%1").arg(second.localPort());
+        QCOMPARE(first.writeDatagram("native\r\n", QHostAddress::LocalHost, port), qint64(8));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 1, 5000);
+        QCOMPARE(received.size(), 1);
+        QCOMPARE(received[0].raw, QByteArray("native\r\n"));
+        QCOMPARE(received[0].framing, Traffic::Framing::Datagram);
+        const auto generation = received[0].source.generation;
+
+        ReceiveFraming framing;
+        framing.mode = ReceiveFraming::Delimiter;
+        framing.delimiter = "\r\n";
+        framing.idleTimeoutMs = 10000;
+        runtime.updateFraming(0, framing);
+        QCOMPARE(first.writeDatagram("one\r\nold-a", QHostAddress::LocalHost, port), qint64(10));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 2, 5000);
+        QCOMPARE(received.size(), 2);
+        QCOMPARE(received[1].raw, QByteArray("one"));
+        QCOMPARE(received[1].framing, Traffic::Framing::Message);
+        QCOMPARE(second.writeDatagram("old-b", QHostAddress::LocalHost, port), qint64(5));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 3, 5000);
+        QCOMPARE(received.size(), 2);
+
+        framing.mode = ReceiveFraming::IdleTimeout;
+        runtime.updateFraming(0, framing);
+        QCOMPARE(received.size(), 4);
+        QMap<QString, QByteArray> flushed;
+        for (int i = 2; i < 4; ++i) {
+            QCOMPARE(received[i].framing, Traffic::Framing::Stream);
+            QVERIFY(received[i].hasMoreFragments);
+            flushed.insert(received[i].source.peerAddress, received[i].raw);
+        }
+        QCOMPARE(flushed.value(firstAddress), QByteArray("old-a"));
+        QCOMPARE(flushed.value(secondAddress), QByteArray("old-b"));
+        QCOMPARE(first.writeDatagram("idle-tail", QHostAddress::LocalHost, port), qint64(9));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 4, 5000);
+        QCOMPARE(received.size(), 4);
+        runtime.updateFraming(0, ReceiveFraming());
+        QCOMPARE(received.size(), 5);
+        QCOMPARE(received[4].raw, QByteArray("idle-tail"));
+        QCOMPARE(received[4].framing, Traffic::Framing::Stream);
+        QCOMPARE(received[4].source.peerAddress, firstAddress);
+        QVERIFY(received[4].hasMoreFragments);
+        QCOMPARE(first.writeDatagram(QByteArray(), QHostAddress::LocalHost, port), qint64(0));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 5, 5000);
+        QCOMPARE(received.size(), 6);
+        QCOMPARE(received[5].raw, QByteArray());
+        QCOMPARE(received[5].framing, Traffic::Framing::Datagram);
+        QCOMPARE(first.writeDatagram("native-again\r\n", QHostAddress::LocalHost, port), qint64(14));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 6, 5000);
+        QCOMPARE(received.size(), 7);
+        QCOMPARE(received[6].raw, QByteArray("native-again\r\n"));
+        QCOMPARE(received[6].framing, Traffic::Framing::Datagram);
+
+        framing.mode = ReceiveFraming::Delimiter;
+        runtime.updateFraming(0, framing);
+        QCOMPARE(first.writeDatagram("fresh\r\n", QHostAddress::LocalHost, port), qint64(7));
+        QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), 7, 5000);
+        QCOMPARE(received.size(), 8);
+        QCOMPARE(received[7].raw, QByteArray("fresh"));
+        QCOMPARE(received[7].framing, Traffic::Framing::Message);
+        QCOMPARE(runtime.findChild<AbstractTransport *>(), transport);
+        QCOMPARE(runtime.findChild<QUdpSocket *>(), socket);
+        QCOMPARE(socket->socketDescriptor(), descriptor);
+        QCOMPARE(socket->localPort(), port);
+        QCOMPARE(socket->state(), QAbstractSocket::BoundState);
+        QCOMPARE(states.size(), stateCount);
+        for (const auto &message : received) QCOMPARE(message.source.generation, generation);
+        runtime.closeEndpoint(0);
+        QCOMPARE(received.size(), 8);
+    }
+
+    void runtimeUdpFramingPreservesRawInputAndBridgeDatagrams()
+    {
+        QList<Traffic::Message> received;
+        EndpointRuntime runtime;
+        connect(&runtime, &EndpointRuntime::messageReceived, this,
+            [&received](const Traffic::Message &message) {
+                if (message.direction == Traffic::Direction::Receive) received.append(message);
+            });
+        QSignalSpy raw(&runtime, &EndpointRuntime::rawDataReceived);
+        auto draft = makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0}});
+        draft.framing.mode = ReceiveFraming::Delimiter;
+        draft.framing.delimiter = "\r\n";
+        draft.framing.idleTimeoutMs = 10000;
+        runtime.openEndpoint(0, draft);
+        auto *input = runtime.findChild<QUdpSocket *>();
+        auto *transport = runtime.findChild<AbstractTransport *>();
+        QVERIFY(input && input->state() == QAbstractSocket::BoundState);
+        const auto port = input->localPort();
+        QSignalSpy chunks(transport, &AbstractTransport::dataReceived);
+        UdpTransport sink(0);
+        sink.start(makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0}}), 1);
+        auto *sinkSocket = sink.findChild<QUdpSocket *>();
+        QVERIFY(sinkSocket && sinkSocket->state() == QAbstractSocket::BoundState);
+        QSignalSpy forwarded(&sink, &AbstractTransport::dataReceived);
+        runtime.openEndpoint(1, makeDraft(PortDraft::Udp,
+            {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
+             {"udp.target", "127.0.0.1"}, {"udp.targetPort", sinkSocket->localPort()}}));
+        BridgeLink link;
+        link.enabled = true;
+        link.direction = int(BridgeDirection::AtoB);
+        runtime.setBridge(link);
+        QUdpSocket sender;
+        QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
+        const QList<QByteArray> datagrams = {"one\r", "\ntwo\r\nleft", "over\r\n"};
+        const QList<int> frameCounts = {0, 2, 3};
+        for (int i = 0; i < datagrams.size(); ++i) {
+            QCOMPARE(sender.writeDatagram(datagrams[i], QHostAddress::LocalHost, port), qint64(datagrams[i].size()));
+            QTRY_COMPARE_WITH_TIMEOUT(chunks.size(), i + 1, 5000);
+            QCOMPARE(raw.size(), i + 1);
+            QCOMPARE(raw[i][0].toInt(), 0);
+            QCOMPARE(raw[i][1].value<Traffic::Source>().peerAddress,
+                QStringLiteral("127.0.0.1:%1").arg(sender.localPort()));
+            QCOMPARE(raw[i][2].toByteArray(), datagrams[i]);
+            QCOMPARE(received.size(), frameCounts[i]);
+            QTRY_COMPARE_WITH_TIMEOUT(forwarded.size(), i + 1, 5000);
+            QCOMPARE(forwarded[i][2].toByteArray(), datagrams[i]);
+            QCOMPARE(forwarded[i][3].toInt(), int(Traffic::Framing::Datagram));
+        }
+        QCOMPARE(received[0].raw, QByteArray("one"));
+        QCOMPARE(received[1].raw, QByteArray("two"));
+        QCOMPARE(received[2].raw, QByteArray("leftover"));
+        for (const auto &message : received) QCOMPARE(message.framing, Traffic::Framing::Message);
+        runtime.shutdown();
+        QCOMPARE(received.size(), 3);
+        QCOMPARE(raw.size(), datagrams.size());
+        sink.stop();
     }
 
     void udpWithoutTargetRejectsSend()

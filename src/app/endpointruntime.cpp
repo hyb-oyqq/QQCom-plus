@@ -155,25 +155,27 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             if (gen != m_generations[index]) return;
             if (!payload.isEmpty())
                 emit rawDataReceived(index, source, payload);
-            // 数据报自带边界，直接就是一条；字节流片段才交给组帧器。
-            // 先发布本端收到，再写转发。反过来日志会先出现对端 TX+FWD，再出现本端 RX。
-            if (Traffic::Framing(framing) != Traffic::Framing::Stream) {
-                // UDP 没有握手。首次收到某个来源的数据报，就在数据区记一条信息。
-                // 只记来源，不改用户指定的发送目标，也不算端口状态迁移。
-                if (m_drafts[index].kind == PortDraft::Udp && source.hasPeer()
-                    && !m_observedUdpPeers[index].contains(source.peerAddress)) {
-                    m_observedUdpPeers[index].insert(source.peerAddress);
-                    QStringList peers = m_observedUdpPeers[index].values();
-                    peers.sort();
-                    emit endpointPeersChanged(index, peers);
+            // 来源发现独立于组帧：启用后也在首报到达时记录来源，不等待完整帧。
+            // UDP 没有握手；只记来源，不改发送目标，也不算端口状态迁移。
+            if (m_drafts[index].kind == PortDraft::Udp && source.hasPeer()
+                && !m_observedUdpPeers[index].contains(source.peerAddress)) {
+                m_observedUdpPeers[index].insert(source.peerAddress);
+                QStringList peers = m_observedUdpPeers[index].values();
+                peers.sort();
+                emit endpointPeersChanged(index, peers);
 
-                    auto notice = makeMessage(index, Traffic::Direction::Info,
-                        Traffic::Origin::Automatic, {}, Traffic::Framing::Message);
-                    notice.source = source;
-                    notice.statusText = tr("%1 · 对端 %2 已连接")
-                        .arg(endpointIdentity(index, m_drafts[index]), source.peerAddress);
-                    publish(std::move(notice));
-                }
+                auto notice = makeMessage(index, Traffic::Direction::Info,
+                    Traffic::Origin::Automatic, {}, Traffic::Framing::Message);
+                notice.source = source;
+                notice.statusText = tr("%1 · 对端 %2 已连接")
+                    .arg(endpointIdentity(index, m_drafts[index]), source.peerAddress);
+                publish(std::move(notice));
+            }
+            const auto &config = m_drafts[index].framing;
+            const bool userFraming = config.isValid() && config.mode != ReceiveFraming::Passthrough;
+            // 用户规则优先于传输边界；未启用时 UDP 保持数据报（包括零长报）语义。
+            // 原始数据入口和桥接仍按传输输入工作，不剥结束符、不等待组帧。
+            if (!userFraming && Traffic::Framing(framing) != Traffic::Framing::Stream) {
                 auto message = makeMessage(index, Traffic::Direction::Receive,
                     Traffic::Origin::Automatic, payload, Traffic::Framing(framing));
                 message.source = source; // 传输层带 peer/代次的完整来源
@@ -181,7 +183,7 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             } else {
                 feedFramer(index, source, payload);
             }
-            // 空载荷不转发：零长 UDP 仍是一条接收，但没有字节可写到另一端。
+            // 空载荷不转发；零长 UDP 仅在未启用组帧时保留为原生接收记录。
             if (!payload.isEmpty())
                 forwardReceived(index, payload);
         });
@@ -430,7 +432,9 @@ void EndpointRuntime::feedFramer(int index, const Traffic::Source &source, const
     }
 
     auto &sessions = m_receiveSessions[index];
-    auto it = sessions.find(source.peerId);
+    const bool datagram = m_drafts[index].kind == PortDraft::Udp;
+    const QString key = datagram ? source.peerAddress : source.peerId.toString();
+    auto it = sessions.find(key);
     if (it == sessions.end()) {
         ReceiveSession session;
         session.framer.setConfig(config);
@@ -440,21 +444,31 @@ void EndpointRuntime::feedFramer(int index, const Traffic::Source &source, const
         // 空闲超时不能提前触发；忙时允许延后，由 I/O 事件循环调度。
         session.idle->setTimerType(Qt::PreciseTimer);
         connect(session.idle, &QTimer::timeout, this,
-            [this, index, peerId = source.peerId, generation = m_generations[index]] {
+            [this, index, key, datagram, generation = m_generations[index]] {
                 if (generation != m_generations[index]) return;
-                auto found = m_receiveSessions[index].find(peerId);
-                if (found != m_receiveSessions[index].end())
-                    flushSession(index, found.value(), ReceiveFramer::Idle);
+                auto &sessions = m_receiveSessions[index];
+                auto found = sessions.find(key);
+                if (found == sessions.end()) return;
+                flushSession(index, found.value(), ReceiveFramer::Idle);
+                if (datagram) {
+                    found->idle->deleteLater(); // 不在 timeout 派发过程中删除发送者
+                    sessions.erase(found);
+                }
             });
-        it = sessions.insert(source.peerId, std::move(session));
+        it = sessions.insert(key, std::move(session));
     }
     auto &session = it.value();
     const auto frames = session.framer.feed(payload);
     publishFrames(index, source, frames);
     if (session.framer.pendingBytes() > 0)
         session.idle->start(config.idleTimeoutMs);
-    else
+    else {
         session.idle->stop();
+        if (datagram) {
+            session.idle->deleteLater();
+            sessions.erase(it);
+        }
+    }
 }
 
 void EndpointRuntime::publishFrames(int index, const Traffic::Source &source,
@@ -491,10 +505,26 @@ void EndpointRuntime::flushFramers(int index, ReceiveFramer::Trigger trigger)
         flushSession(index, session, trigger);
 }
 
+void EndpointRuntime::updateFraming(int index, const ReceiveFraming &framing)
+{
+    if (index < 0 || index >= EndpointCount) return;
+    if (!m_transports[index] || !framing.isValid()) return;
+    if (m_drafts[index].framing == framing) return;
+    // 半包按旧规则收尾，再换成新规则。两种判定下的缓冲不能混。
+    flushFramers(index, ReceiveFramer::Reconfigured);
+    // 已排空的会话按需重建；关闭组帧时不留下无用计时器。
+    for (auto &session : m_receiveSessions[index])
+        session.idle->deleteLater();
+    m_receiveSessions[index].clear();
+    m_drafts[index].framing = framing;
+}
+
 void EndpointRuntime::removeDisconnectedPeers(int index, const QList<Transport::PeerInfo> &peers)
 {
-    QSet<QUuid> active;
-    for (const auto &peer : peers) active.insert(peer.id);
+    // UDP 来源并非有连接生命周期的 peer，不能按 TCP 的断线列表清除它们。
+    if (m_drafts[index].kind != PortDraft::TcpServer) return;
+    QSet<QString> active;
+    for (const auto &peer : peers) active.insert(peer.id.toString());
     auto &sessions = m_receiveSessions[index];
     for (auto it = sessions.begin(); it != sessions.end();) {
         if (active.contains(it.key())) {

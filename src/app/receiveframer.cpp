@@ -6,12 +6,6 @@ namespace {
 
 QString tr(const char *text) { return QCoreApplication::translate("ReceiveFramer", text); }
 
-// 小端 16 位长度前缀：帧头两字节表示后续 payload 字节数。
-int prefixLength(const QByteArray &buffer, qsizetype offset)
-{
-    return int(quint8(buffer.at(offset))) | (int(quint8(buffer.at(offset + 1))) << 8);
-}
-
 } // namespace
 
 ReceiveFramer::ReceiveFramer(const ReceiveFraming &config) : m_config(config) {}
@@ -40,6 +34,8 @@ QString ReceiveFramer::triggerText(Trigger trigger, int bytes)
         return tr("空闲超时，强制输出 %1 字节").arg(bytes);
     case Closed:
         return tr("端口关闭，输出残留 %1 字节").arg(bytes);
+    case Reconfigured:
+        return tr("组帧设置变更，输出残留 %1 字节").arg(bytes);
     }
     return {};
 }
@@ -54,9 +50,9 @@ QList<ReceiveFramer::Frame> ReceiveFramer::takeByThreshold()
 QList<ReceiveFramer::Frame> ReceiveFramer::feed(const QByteArray &chunk)
 {
     QList<Frame> frames;
-    // 配置不合法（含"结束符模式却没有结束符"）时退回直通：绝不把数据吞在缓冲里。
-    const bool usable = m_config.isValid() && m_config.mode != ReceiveFraming::Passthrough;
-    if (!usable) {
+    // 不拆分直接吐出这一段。结束符缺失这类非法配置由打开前的校验拦住，
+    // 运行时不再在这里退回直通。
+    if (m_config.mode == ReceiveFraming::Passthrough) {
         if (chunk.isEmpty()) return frames;
         Frame frame;
         frame.bytes = chunk;
@@ -67,40 +63,27 @@ QList<ReceiveFramer::Frame> ReceiveFramer::feed(const QByteArray &chunk)
 
     if (chunk.isEmpty()) return frames;
     m_buffer += chunk;
-    if (m_config.mode == ReceiveFraming::IdleTimeout) {
+    if (m_config.mode != ReceiveFraming::Delimiter || m_config.delimiter.isEmpty()) {
         // 空闲模式的正常输出由 EndpointRuntime 的单次定时器触发；
         // 这里仅处理长度兜底，避免单次输入过大时缓冲无限增长。
+        // 空结束符同样走这里：空序列的查找会停在当前位置，不能拿去匹配。
         return takeByThreshold();
     }
     // 一批只消费一次缓冲头部；未匹配的旧前缀下次无需重新扫描。
     qsizetype consumed = 0;
     for (;;) {
-        if (m_config.mode == ReceiveFraming::Delimiter) {
-            const qsizetype at = m_buffer.indexOf(m_config.delimiter, m_scanFrom);
-            if (at < 0) {
-                m_scanFrom = qMax(consumed, m_buffer.size() - m_config.delimiter.size() + 1);
-                break;
-            }
-            const qsizetype end = at + m_config.delimiter.size();
-            const qsizetype taken = (m_config.includeDelimiter ? end : at) - consumed;
-            Frame frame;
-            frame.bytes = m_buffer.mid(consumed, taken);
-            frame.trigger = Boundary;
-            consumed = end;
-            m_scanFrom = consumed;
-            frames.append(frame);
-            continue;
+        const qsizetype at = m_buffer.indexOf(m_config.delimiter, m_scanFrom);
+        if (at < 0) {
+            m_scanFrom = qMax(consumed, m_buffer.size() - m_config.delimiter.size() + 1);
+            break;
         }
-        // 长度前缀：帧头不足 2 字节就继续等；长度 0 的空帧也要收（占位帧），
-        // 否则会陷入"永远等第 3 字节"的死循环。
-        if (m_buffer.size() - consumed < 2) break;
-        const int payload = prefixLength(m_buffer, consumed);
-        if (m_buffer.size() - consumed < 2 + payload) break;
+        const qsizetype end = at + m_config.delimiter.size();
+        const qsizetype taken = (m_config.includeDelimiter ? end : at) - consumed;
         Frame frame;
-        frame.bytes = m_config.includeLengthPrefix ? m_buffer.mid(consumed, 2 + payload)
-                                                   : m_buffer.mid(consumed + 2, payload);
+        frame.bytes = m_buffer.mid(consumed, taken);
         frame.trigger = Boundary;
-        consumed += 2 + payload;
+        consumed = end;
+        m_scanFrom = consumed;
         frames.append(frame);
     }
     if (consumed > 0) m_buffer.remove(0, consumed);

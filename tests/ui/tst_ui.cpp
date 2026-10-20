@@ -4571,6 +4571,214 @@ private slots:
         QVERIFY(a->findChild<QComboBox *>("portType")->isEnabled());
     }
 
+    // 连接中改组帧不必断开。结束符还没写完时不能下发，弹窗说明，并退回上次生效的方式。
+    void liveFramingRejectsAnIncompleteDelimiter()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.show();
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(b && action);
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("停  止"));
+
+        b->findChild<QToolButton *>(QStringLiteral("advancedToggle"))->click();
+        auto *mode = b->findChild<QComboBox *>(QStringLiteral("framingMode"));
+        auto *delimiter = b->findChild<QLineEdit *>(QStringLiteral("framingDelimiter"));
+        QVERIFY(mode && delimiter);
+        QString notice;
+        QTimer::singleShot(0, &window, [&window, &notice] {
+            auto *box = window.findChild<QMessageBox *>();
+            QVERIFY(box);
+            notice = box->text();
+            box->accept();
+        });
+        mode->setCurrentIndex(mode->findData(int(ReceiveFraming::Delimiter)));
+        QVERIFY(notice.contains(QStringLiteral("结束符还没写完")));
+        QCOMPARE(mode->currentData().toInt(), int(ReceiveFraming::Passthrough));
+        QCOMPARE(b->draft().framing.mode, ReceiveFraming::Passthrough);
+
+        delimiter->setText(QStringLiteral("0D 0A"));
+        mode->setCurrentIndex(mode->findData(int(ReceiveFraming::Delimiter)));
+        QTest::qWait(30);
+        QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
+        QCOMPARE(b->draft().framing.mode, ReceiveFraming::Delimiter);
+        QCOMPARE(b->draft().framing.delimiter, QByteArray::fromHex("0D0A"));
+
+        delimiter->setText(QStringLiteral("0"));
+        QTimer::singleShot(0, &window, [&window] {
+            if (auto *box = window.findChild<QMessageBox *>()) box->accept();
+        });
+        QTest::keyClick(delimiter, Qt::Key_Return);
+        QCOMPARE(b->draft().framing.mode, ReceiveFraming::Delimiter);
+        QVERIFY(!b->canApplyFraming());
+
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("监  听"));
+    }
+
+    // 连接中只改结束符文本（回车或离开焦点）也要当场下发。
+    // 早先这个输入框只在内容不合法时弹窗，合法时什么都不做：模式、开关、空闲超时、
+    // 阈值都各自接了事件，唯独结束符没有，于是"改结束符"要断开重连才生效，
+    // 与「端口已打开时改结束符不必断开」的承诺相反。
+    void liveFramingAppliesDelimiterEdit()
+    {
+        PortSelectorWidget selectorWidget;
+        selectorWidget.show();
+        auto *selector = &selectorWidget;
+        selector->setSerialPorts({{"COM17", "USB Serial", {}, "COM17"}});
+        auto *portField = selector->findChild<QComboBox *>(QStringLiteral("serial.port"));
+        portField->setCurrentIndex(portField->findData(QStringLiteral("COM17")));
+        selector->findChild<QToolButton *>(QStringLiteral("advancedToggle"))->click();
+        QTest::qWait(20);
+
+        auto *mode = selector->findChild<QComboBox *>(QStringLiteral("framingMode"));
+        auto *delimiter = selector->findChild<QLineEdit *>(QStringLiteral("framingDelimiter"));
+        QVERIFY(mode && delimiter);
+        // 已连接是这条规则的前提：未连接时控件照样广播，但"实时生效"说的是运行中。
+        selector->setConnectionOpen(true);
+
+        QSignalSpy changes(selector, &PortSelectorWidget::configurationChanged);
+        delimiter->setText(QStringLiteral("0D 0A"));
+        mode->setCurrentIndex(mode->findData(int(ReceiveFraming::Delimiter)));
+        QTest::qWait(20);
+        QCOMPARE(selector->draft().framing.delimiter, QByteArray::fromHex("0D0A"));
+        QVERIFY(!changes.isEmpty());
+
+        // 只改文本、回车：必须广播一次，并且草稿里换成新结束符。
+        changes.clear();
+        delimiter->setText(QStringLiteral("0A"));
+        QTest::keyClick(delimiter, Qt::Key_Return);
+        QTest::qWait(20);
+        QCOMPARE(changes.size(), 1);
+        QCOMPARE(selector->draft().framing.delimiter, QByteArray::fromHex("0A"));
+        QCOMPARE(selector->draft().framing.mode, ReceiveFraming::Delimiter);
+        QVERIFY(selectorWidget.findChildren<QMessageBox *>().isEmpty());
+
+        // 内容没变时再回车不重复广播：否则每离开一次焦点都白跑一遍配置同步。
+        changes.clear();
+        QTest::keyClick(delimiter, Qt::Key_Return);
+        QTest::qWait(20);
+        QCOMPARE(changes.size(), 0);
+
+        // 半截 HEX 回车：不下发，弹窗说明，运行中的规则保持不变。
+        changes.clear();
+        delimiter->setText(QStringLiteral("0"));
+        QTimer::singleShot(0, &selectorWidget, [&selectorWidget] {
+            if (auto *box = selectorWidget.findChild<QMessageBox *>()) box->accept();
+        });
+        QTest::keyClick(delimiter, Qt::Key_Return);
+        QTest::qWait(20);
+        QCOMPARE(changes.size(), 0);
+        QCOMPARE(selector->draft().framing.mode, ReceiveFraming::Delimiter);
+        QVERIFY(!selector->canApplyFraming());
+    }
+
+
+    void liveUdpFramingAppliesControlsWithoutRebind()
+    {
+        clearEndpointDrafts();
+        QUdpSocket probe, sender;
+        QVERIFY(probe.bind(QHostAddress::LocalHost, 0, QUdpSocket::DontShareAddress));
+        const quint16 port = probe.localPort();
+        QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.resize(1280, 720);
+        window.show();
+        auto *selector = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointA"));
+        auto *model = window.findChild<TrafficModel *>();
+        auto *sendPanel = window.findChild<SendPanel *>();
+        QVERIFY(selector && model && sendPanel);
+        auto *type = selector->findChild<QComboBox *>(QStringLiteral("portType"));
+        QVERIFY(type);
+        type->setCurrentIndex(PortDraft::Udp);
+        auto *bind = selector->findChild<QComboBox *>(QStringLiteral("udp.address"));
+        auto *bindPort = selector->findChild<QSpinBox *>(QStringLiteral("udp.port"));
+        auto *target = selector->findChild<QComboBox *>(QStringLiteral("udp.target"));
+        auto *targetPort = selector->findChild<QSpinBox *>(QStringLiteral("udp.targetPort"));
+        auto *action = selector->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(bind && bindPort && target && targetPort && action);
+        if (bind->findData(QStringLiteral("127.0.0.1")) < 0)
+            bind->addItem(QStringLiteral("127.0.0.1"), QStringLiteral("127.0.0.1"));
+        bind->setCurrentIndex(bind->findData(QStringLiteral("127.0.0.1")));
+        bindPort->setValue(port);
+        target->setCurrentText(QStringLiteral("127.0.0.1"));
+        targetPort->setValue(sender.localPort());
+        probe.close(); // 配置完成才释放探测端口；sender 也不会碰巧占用该端口。
+        action->click();
+        QTRY_COMPARE_WITH_TIMEOUT(action->text(), QStringLiteral("解  绑"), 5000);
+        QVERIFY(action->property("open").toBool());
+        auto *advanced = selector->findChild<QToolButton *>(QStringLiteral("advancedToggle"));
+        QVERIFY(advanced);
+        if (!advanced->isChecked()) advanced->click();
+        auto *enabled = selector->findChild<QCheckBox *>(QStringLiteral("framingEnabled"));
+        auto *mode = selector->findChild<QComboBox *>(QStringLiteral("framingMode"));
+        auto *delimiter = selector->findChild<QLineEdit *>(QStringLiteral("framingDelimiter"));
+        auto *idle = selector->findChild<QSpinBox *>(QStringLiteral("framingIdle"));
+        auto *keep = selector->findChild<QCheckBox *>(QStringLiteral("framingKeepBoundary"));
+        QVERIFY(enabled && mode && delimiter && idle && keep);
+        QVERIFY(enabled->isEnabled());
+        idle->setValue(30000); // 大于所有等待上限，不能把 idle 兜底误认为结束符已生效。
+        keep->setChecked(false);
+        delimiter->setText(QStringLiteral("0D 0A"));
+        enabled->setChecked(true);
+        mode->setCurrentIndex(mode->findData(int(ReceiveFraming::Delimiter)));
+        QCOMPARE(selector->draft().framing.mode, ReceiveFraming::Delimiter);
+
+        const auto received = [model] {
+            QList<Traffic::Message> result;
+            for (int row = 0; row < model->rowCount(); ++row) {
+                const auto message = model->record(row);
+                if (message.direction == Traffic::Direction::Receive && message.source.endpointIndex == 0)
+                    result.append(message);
+            }
+            return result;
+        };
+        const QList<QByteArray> inputs = {"first\r\n", "second\r\nEND", "native\r\nEND"};
+        const QList<QByteArray> expected = {"first", "second\r\n", "native\r\nEND"};
+        for (int step = 0; step < inputs.size(); ++step) {
+            if (step == 1) {
+                // 只改结束符文本并回车，不触碰模式或开关。
+                delimiter->setText(QStringLiteral("45 4E 44"));
+                QTest::keyClick(delimiter, Qt::Key_Return);
+                QCOMPARE(selector->draft().framing.delimiter, QByteArray("END"));
+            } else if (step == 2) {
+                enabled->setChecked(false);
+                QCOMPARE(selector->draft().framing.mode, ReceiveFraming::Passthrough);
+            }
+            // UI 配置更新和 sendPayload 同由 GUI 排队。收到这条真实 UDP 回包，
+            // 证明之前的更新已执行；不用 sleep，也不跨线程读取运行时/socket。
+            const QByteArray barrier = QByteArray("framing-barrier-") + QByteArray::number(step);
+            sendPanel->sendRequested(barrier, 1, false);
+            QTRY_VERIFY_WITH_TIMEOUT(sender.hasPendingDatagrams(), 5000);
+            QByteArray reply(sender.pendingDatagramSize(), Qt::Uninitialized);
+            QHostAddress replyAddress;
+            quint16 replyPort = 0;
+            QCOMPARE(sender.readDatagram(reply.data(), reply.size(), &replyAddress, &replyPort),
+                qint64(barrier.size()));
+            QCOMPARE(reply, barrier);
+            QCOMPARE(replyPort, port);
+            QCOMPARE(sender.writeDatagram(inputs[step], QHostAddress::LocalHost, port),
+                qint64(inputs[step].size()));
+            QTRY_COMPARE_WITH_TIMEOUT(received().size(), step + 1, 5000);
+            const auto message = received().at(step);
+            QCOMPARE(message.raw, expected[step]);
+            QCOMPARE(message.framing, step == 2 ? Traffic::Framing::Datagram : Traffic::Framing::Message);
+            QVERIFY(!message.hasMoreFragments);
+            QCOMPARE(message.source.peerAddress, QStringLiteral("127.0.0.1:%1").arg(sender.localPort()));
+            QCOMPARE(message.source.generation, received().first().source.generation);
+            QCOMPARE(action->text(), QStringLiteral("解  绑"));
+            QVERIFY(action->property("open").toBool());
+            QVERIFY(!type->isEnabled());
+        }
+        QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
+        action->click();
+        QTRY_COMPARE_WITH_TIMEOUT(action->text(), QStringLiteral("绑  定"), 5000);
+        QCOMPARE(received().size(), 3);
+    }
 
     void compactWindowAndExamples()
     {
@@ -4673,7 +4881,6 @@ private slots:
         QCOMPARE(defaults.idleTimeoutMs, 10);
         QCOMPARE(defaults.bufferThresholdBytes, 2048);
         QVERIFY(!defaults.includeDelimiter);           // 结束符默认剥离
-        QVERIFY(defaults.includeLengthPrefix);         // 长度前缀默认保留帧头
 
         // Delimiter 模式必须有非空结束符；超时与阈值必须为正。
         Framing delimiter;
@@ -5488,6 +5695,22 @@ private slots:
         QTRY_COMPARE(model->rowCount(), 2);
         QCOMPARE(text->document()->blockCount(), 4); // 两行各带一个 HEX 对照行
         QCOMPARE(text->document()->lastBlock().text(), QStringLiteral("4F 4B"));
+
+        // 对照是原始字节，不是把屏幕上的字再编码。非法 UTF-8 正文会显示成替换字符，
+        // 但对照不能变成 EF BF BD。流片段末尾的 ⏎ 同样只是续接记号，不能变成 E2 8F 8E。
+        message.id = 3;
+        message.framing = Traffic::Framing::Stream;
+        message.hasMoreFragments = true;
+        message.raw = QByteArray::fromHex("5AA501FF1A200000CA1A");
+        message.rawLength = message.raw.size();
+        panel->appendMessages({message});
+        QTRY_COMPARE(model->rowCount(), 3);
+        QVERIFY(text->document()->toPlainText().contains(QStringLiteral("\u23CE")));
+        QVERIFY(text->document()->toPlainText().contains(
+            QStringLiteral("5A A5 01 FF 1A 20 00 00 CA 1A")));
+        QVERIFY(!text->document()->toPlainText().contains(QStringLiteral("EF BF BD")));
+        QVERIFY(!text->document()->toPlainText().contains(QStringLiteral("E2 8F 8E")));
+
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(false);
         window.findChild<QAction *>(QStringLiteral("prefixTimestamp"))->setChecked(true);
         window.findChild<QAction *>(QStringLiteral("prefixLength"))->setChecked(true);
@@ -6515,7 +6738,7 @@ private slots:
         }
         QVERIFY(!coloredWhileOff);
 
-        // 关掉颜色后，HEX 对照必须带上颜色前后缀的字节。调试时看到的字和 HEX 是同一份数据。
+        // HEX 对照是原始字节。颜色关掉时正文能看见前后缀，对照里也必须有这些字节。
         window.findChild<QAction *>(QStringLiteral("alwaysShowHex"))->setChecked(true);
         QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("1B 5B 33 36 3B 32 32 6D")));
         QVERIFY(text->toPlainText().contains(QStringLiteral("[36;22m")));
@@ -6532,8 +6755,8 @@ private slots:
             }
         }
         QVERIFY(recolored);
-        // 重新着色后，正文不再出现前后缀，HEX 对照也不再列出被藏起来的转义字节。
-        QTRY_VERIFY(!text->toPlainText().contains(QStringLiteral("1B 5B 33 36 3B 32 32 6D")));
+        // 重新着色后正文藏起前后缀，对照仍是原始字节，转义不能因为没画出来就消失。
+        QTRY_VERIFY(text->toPlainText().contains(QStringLiteral("1B 5B 33 36 3B 32 32 6D")));
         QVERIFY(text->toPlainText().contains(QStringLiteral("49 2F 70 61 6E 65 6C")));
     }
 
@@ -6651,15 +6874,15 @@ private slots:
         QCOMPARE(draft.framing.idleTimeoutMs, 250);
         QVERIFY(draft.framing.logHints);
 
-        // 长度前缀模式：结束符输入隐去，不再要求结束符。
-        mode->setCurrentIndex(mode->findData(int(ReceiveFraming::LengthPrefixU16LE)));
+        // 端口未打开时，空结束符只让打开按钮失效，不弹窗打断输入。
+        delimiter->clear();
         QTest::qWait(20);
-        QVERIFY(!delimiter->isVisible());
-        QVERIFY(selector->hasValidConfiguration());
-        QCOMPARE(selector->draft().framing.mode, ReceiveFraming::LengthPrefixU16LE);
+        QVERIFY(selectorWidget.findChildren<QMessageBox *>().isEmpty());
+        QVERIFY(!selector->hasValidConfiguration());
 
         // 截图产物：结束符模式下的组帧行（模式 + 结束符 + 兜底设置 + 说明文字），
         // 供目视检查排版与文案清晰度。
+        delimiter->setText(QStringLiteral("0D 0A"));
         mode->setCurrentIndex(mode->findData(int(ReceiveFraming::Delimiter)));
         QTest::qWait(20);
         const auto artifactDir = qEnvironmentVariable("QQCOM_UI_ARTIFACT_DIR");

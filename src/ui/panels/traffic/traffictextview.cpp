@@ -236,49 +236,6 @@ void applySgr(QTextCharFormat &fmt, const QTextCharFormat &base, const QString &
 // 把一段接收字节切成带格式的分片。carry 是这条流上一次没画完的转义和当前笔色。
 // 包尾的 ESC 或 ESC[36 先放进 carry.pending，不按字面画出来。
 // 参数段超过 32 字符，或明确不是 SGR 的字节，才按普通文本保留。
-// 关掉颜色时，HEX 跟正文走：正文里还看得到的颜色前后缀，对照里也要有对应字节。
-// 换行只用来断行，不进对照。\xNN、\t 还原成那一个控制字节，避免把转义记成四个字符。
-QString visibleCompanionHex(const QString &text)
-{
-    QByteArray bytes;
-    bytes.reserve(text.size());
-    for (int i = 0; i < text.size();) {
-        const QChar c = text.at(i);
-        if (c == QChar::ParagraphSeparator || c == QLatin1Char('\n') || c == QLatin1Char('\r')) {
-            ++i;
-            continue;
-        }
-        if (c == QLatin1Char('\\') && i + 3 < text.size() && text.at(i + 1) == QLatin1Char('x')) {
-            bool ok = false;
-            const int value = text.mid(i + 2, 2).toInt(&ok, 16);
-            if (ok && value >= 0 && value <= 255) {
-                bytes.append(char(value));
-                i += 4;
-                continue;
-            }
-        }
-        if (c == QLatin1Char('\\') && i + 1 < text.size()) {
-            const QChar next = text.at(i + 1);
-            if (next == QLatin1Char('t')) {
-                bytes.append('\t');
-                i += 2;
-                continue;
-            }
-            if (next == QLatin1Char('\\')) {
-                bytes.append('\\');
-                i += 2;
-                continue;
-            }
-        }
-        const ushort u = c.unicode();
-        if (u < 0x80)
-            bytes.append(char(u));
-        else
-            bytes.append(QString(c).toUtf8());
-        ++i;
-    }
-    return QString::fromLatin1(bytes.toHex(' ')).toUpper();
-}
 QList<TextRun> toRuns(const QString &payload, const QTextCharFormat &base, AnsiCarry &carry)
 {
     QString scan;
@@ -523,13 +480,9 @@ void TrafficTextView::appendMessages(
             m_ansiReady = false;
         }
         QList<TextRun> runs;
-        // HEX 对照跟这一行实际画出的字走。着色时藏起来的转义不进对照；
-        // 关掉颜色后前后缀还在正文里，对照里也留下对应字节。
-        QString companion;
         if (!options.showAnsi) {
             m_ansiReady = false;
             runs.append({payload, bodyFormat});
-            companion = payload;
         } else {
             if (!colorThis)
                 m_ansiReady = false;
@@ -543,7 +496,6 @@ void TrafficTextView::appendMessages(
                 m_ansiFormat = carry.fmt;
                 m_ansiPending = carry.pending;
             }
-            for (const auto &run : runs) companion += run.text;
         }
         const int endpoint = r.source.endpointIndex;
         // 一条物理行记一次端口。新建的行追加，接在上一行后面的纯数据只更新混端口标记。
@@ -665,12 +617,15 @@ void TrafficTextView::appendMessages(
         }
         // HEX 对照另起一行：与数据行头尾相接会把两条信息挤在一行，
         // 长报文下根本看不到对照；独占一行才便于上下比对字节。
+        // 对照是这条记录留下的原始字节，不是把屏幕上的字再编码一遍。
+        // 替换字符、分包续接的 ⏎、截断的 … 都是界面记号，不进这一行。
+        // 颜色开着时藏起来的转义字节仍在这里：正文可以不画，字节不能少。
         // 完整展开全部字节——对照的意义就在于看全，内存由文档总预算兜底。
         // 不受前缀开关控制：关掉行号/时间/方向后，对照行仍然单独跟在数据后面。
         // 纯数据不允许 HEX 对照：对照行自己就要占一行，和“接着输出”冲突。
         if (options.prefix && options.alwaysShowHex && format != PayloadCodec::Format::Hex
-            && !companion.isEmpty()) {
-            const auto hex = visibleCompanionHex(companion);
+            && !r.raw.isEmpty()) {
+            const auto hex = QString::fromLatin1(r.raw.toHex(' ')).toUpper();
             if (needSeparator) needSeparator = false; // 载荷以换行收尾：续块此时是空的，标记已经记过
             else {
                 cursor.insertText(QString(QChar::ParagraphSeparator));

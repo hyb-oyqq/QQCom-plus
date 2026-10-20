@@ -46,6 +46,9 @@ public:
     void commitAddressHistory();
     // TCP 服务器显示已连接客户端；UDP 显示本次打开期间观察到的数据报来源。
     void setPeerList(const QStringList &peers);
+    // 组帧改动能不能下发。连接参数仍要断开再连，不经过这里。
+    // 空结束符只存在于正在输入的半截 HEX，运行中的规则不能换成它。
+    bool canApplyFraming() const;
 
 signals:
     void configurationChanged();
@@ -78,6 +81,7 @@ private:
     QWidget *buildFramingRow(); // 接收组帧：与端点类型无关，挂在高级参数区底部
     void syncFramingControls(); // 模式联动：只有结束符模式需要结束符输入
     void applyFramingToDraft(PortDraft &draft) const;
+    void commitFramingChange(); // 连接中的组帧改动：不完整则弹窗并退回，完整才广播
     QComboBox *m_framingMode = nullptr;
     QCheckBox *m_framingEnabled = nullptr;
     QLineEdit *m_framingDelimiter = nullptr;
@@ -92,6 +96,7 @@ private:
     QCheckBox *m_framingLogHints = nullptr;
     QLabel *m_framingHint = nullptr; // 当前组帧方式的一行说明
     ReceiveFraming::Mode m_framingRememberedMode = ReceiveFraming::IdleTimeout;
+    ReceiveFraming m_appliedFraming; // 最近一次能下发的组帧。连接中拒绝空结束符时退回这里。
     PortDraft m_draft;
     bool m_loading = false;
     bool m_initialised = false;

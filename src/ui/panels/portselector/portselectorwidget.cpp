@@ -4,6 +4,7 @@
 #include "ui/common/endpointformat.h"
 #include "ui/common/payloadcodec.h"
 #include "ui/common/apptheme.h"
+#include "ui/common/styledialogs.h"
 #include "ui/common/tintedicon.h"
 
 #include <QCheckBox>
@@ -482,8 +483,7 @@ PortSelectorWidget::PortSelectorWidget(QWidget *parent) : QWidget(parent)
     udpMore->addWidget(m_udpPeerHint);
     udpMore->addStretch();
 
-    // 接收组帧与端点类型无关（数据报端点不经过它），因此作为通用行挂在
-    // 类型专属页之下：串口/TCP 客户端用它把字节流切成协议帧。
+    // 接收组帧是所有端点共用的用户规则，挂在类型专属页之下。
     advancedLayout->addWidget(buildFramingRow());
 
     layout->addWidget(m_advancedPanel);
@@ -905,7 +905,7 @@ QWidget *PortSelectorWidget::buildFramingRow()
 
     m_framingEnabled = new QCheckBox(tr("接收组帧"));
     m_framingEnabled->setObjectName(QStringLiteral("framingEnabled"));
-    m_framingEnabled->setToolTip(tr("串口和 TCP 按组帧方式切分。UDP 数据报自带边界，不经过组帧。"));
+    m_framingEnabled->setToolTip(tr("串口、TCP 和 UDP 均按用户规则组帧，连接中修改即可生效。UDP 按来源 IP 和端口隔离，支持跨数据报拼接；未启用时保留原始数据报边界。"));
     controlsLayout->addWidget(m_framingEnabled);
     m_framingLogHints = new QCheckBox(tr("提示日志"));
     m_framingLogHints->setObjectName(QStringLiteral("framingLogHints"));
@@ -922,7 +922,6 @@ QWidget *PortSelectorWidget::buildFramingRow()
     m_framingMode->addItem(tr("不拆分"), int(ReceiveFraming::Passthrough));
     m_framingMode->addItem(tr("空闲超时"), int(ReceiveFraming::IdleTimeout));
     m_framingMode->addItem(tr("结束符"), int(ReceiveFraming::Delimiter));
-    m_framingMode->addItem(tr("长度前缀"), int(ReceiveFraming::LengthPrefixU16LE));
     m_framingMode->setToolTip(tr("字节流如何切成一条记录"));
     // 非编辑型下拉框一律按内容定宽（AdjustToContents+Fixed），否则 QSS 的箭头内边距
     // 会把最宽项截掉——tests/ui 的 portControlsShowTheirOwnContent 就是这条底线。
@@ -995,8 +994,7 @@ QWidget *PortSelectorWidget::buildFramingRow()
             m_framingRememberedMode = mode;
         const QSignalBlocker blocker(m_framingEnabled);
         m_framingEnabled->setChecked(mode != ReceiveFraming::Passthrough);
-        syncFramingControls();
-        notifyChange();
+        commitFramingChange();
     });
     connect(m_framingEnabled, &QCheckBox::toggled, this, [this](bool enabled) {
         if (!enabled) {
@@ -1010,10 +1008,25 @@ QWidget *PortSelectorWidget::buildFramingRow()
             const QSignalBlocker blocker(m_framingMode);
             m_framingMode->setCurrentIndex(m_framingMode->findData(int(m_framingRememberedMode)));
         }
-        syncFramingControls();
-        notifyChange();
+        commitFramingChange();
     });
-    connect(m_framingDelimiter, &QLineEdit::textChanged, this, changed);
+    // 结束符是唯一"打完才算数"的组帧参数：模式与开关自带事件，空闲超时/阈值/保留
+    // 结束符也都接了 changed，只有这个输入框改完文本没有任何事件——早先这里只在
+    // 不合法时弹窗，合法时什么都不做，于是"连接中改结束符"要断开重连才生效，
+    // 与文档承诺相反。现在回车或离开焦点时按整份规则提交一次。
+    // 打字过程中只刷新红框（textChanged → updateValidation），不弹窗、不下发。
+    // 载入草稿时 setText 也会发 textChanged，那时草稿还没铺完（类型与字段都还是旧的），
+    // 重算出来的错误集没有意义，所以载入期间跳过——末尾本就会统一校验一次。
+    connect(m_framingDelimiter, &QLineEdit::textChanged, this, [this] {
+        if (!m_loading) updateValidation();
+    });
+    connect(m_framingDelimiter, &QLineEdit::editingFinished, this, [this] {
+        if (m_loading) return;
+        // 没改出差别就不重复广播，避免每次离开焦点都白跑一遍配置同步。
+        if (draft().framing == m_appliedFraming) return;
+        // 合法即生效；不合法由 commitFramingChange 弹窗并退回上次生效的规则。
+        commitFramingChange();
+    });
     connect(m_framingIdle, &QSpinBox::valueChanged, this, changed);
     connect(m_framingThreshold, &QSpinBox::valueChanged, this, changed);
     connect(m_framingKeepBoundary, &QCheckBox::toggled, this, changed);
@@ -1022,23 +1035,39 @@ QWidget *PortSelectorWidget::buildFramingRow()
     return row;
 }
 
+void PortSelectorWidget::commitFramingChange()
+{
+    syncFramingControls();
+    // 连接中切到还没写完的结束符：不换正在跑的规则，弹窗说明，方式退回上次生效的值。
+    // 输入框里的半截 HEX 留下，写完后下一次改动再下发。
+    if (!m_loading && (m_open || m_connecting || m_recovering) && !draft().framing.isValid()) {
+        StyleDialogs::warning(this, tr("组帧未生效"),
+            tr("结束符还没写完，这次没有换组帧方式。"));
+        const QSignalBlocker modeBlocker(m_framingMode);
+        const QSignalBlocker enabledBlocker(m_framingEnabled);
+        m_framingMode->setCurrentIndex(m_framingMode->findData(int(m_appliedFraming.mode)));
+        m_framingEnabled->setChecked(m_appliedFraming.mode != ReceiveFraming::Passthrough);
+        syncFramingControls();
+        return;
+    }
+    if (draft().framing.isValid())
+        m_appliedFraming = draft().framing;
+    notifyChange();
+}
+
 void PortSelectorWidget::syncFramingControls()
 {
     const auto mode = ReceiveFraming::Mode(m_framingMode->currentData().toInt());
     const bool enabled = m_framingEnabled->isChecked();
     const bool idleTimeout = mode == ReceiveFraming::IdleTimeout;
     const bool delimiter = mode == ReceiveFraming::Delimiter;
-    const bool length = mode == ReceiveFraming::LengthPrefixU16LE;
-    const bool splitting = enabled && (idleTimeout || delimiter || length); // 只有组帧模式才缓冲
+    const bool splitting = enabled && (idleTimeout || delimiter); // 只有组帧模式才缓冲
     m_framingMode->setEnabled(enabled);
     m_framingMode->setToolTip(enabled
         ? tr("字节流如何切成一条记录")
         : tr("未启用，收到的数据原样输出"));
     m_framingDelimiter->setVisible(enabled && delimiter);
-    // 同一个开关在两种模式下语义不同：结束符模式下是"保留结束符"，
-    // 长度前缀模式下是"保留长度帧头"。
-    m_framingKeepBoundary->setText(delimiter ? tr("保留结束符") : tr("保留长度帧头"));
-    m_framingKeepBoundary->setVisible(enabled && (delimiter || length));
+    m_framingKeepBoundary->setVisible(enabled && delimiter);
     m_framingKeepBoundary->setEnabled(enabled);
     // 不拆分模式收到即输出、不做缓冲：两个兜底设置在该模式下没有作用，置灰避免误解。
     m_framingIdle->setEnabled(splitting);
@@ -1051,13 +1080,11 @@ void PortSelectorWidget::syncFramingControls()
 
     QString hint;
     if (!enabled)
-        hint = tr("收到即输出，不缓冲。启用后按结束符、长度前缀或空闲超时组帧。");
+        hint = tr("收到即输出，不缓冲。启用后按结束符或空闲超时组帧。");
     else if (idleTimeout)
         hint = tr("空闲超时后输出当前缓冲；达到缓冲阈值时提前输出。关闭端口时输出剩余数据。");
     else if (delimiter)
         hint = tr("遇到结束符即输出一帧，其后字节继续缓冲。");
-    else if (length)
-        hint = tr("前 2 字节（小端）表示后续长度，凑满即输出。");
     else
         hint = tr("收到即输出，不缓冲。");
     if (splitting && !idleTimeout)
@@ -1073,7 +1100,6 @@ void PortSelectorWidget::applyFramingToDraft(PortDraft &draft) const
     draft.framing.idleTimeoutMs = m_framingIdle->value();
     draft.framing.bufferThresholdBytes = m_framingThreshold->value();
     draft.framing.includeDelimiter = m_framingKeepBoundary->isChecked();
-    draft.framing.includeLengthPrefix = m_framingKeepBoundary->isChecked();
     draft.framing.logHints = m_framingLogHints->isChecked();
     // 结束符按 HEX 解析；解析失败时留空（校验会拦住结束符模式），不写半个序列。
     const auto parsed = PayloadCodec::parse(m_framingDelimiter->text(), PayloadCodec::Format::Hex, {});
@@ -1098,9 +1124,10 @@ void PortSelectorWidget::setDraft(const PortDraft &draft)
     m_framingDelimiter->setText(QString::fromLatin1(draft.framing.delimiter.toHex(' ').toUpper()));
     m_framingIdle->setValue(draft.framing.idleTimeoutMs);
     m_framingThreshold->setValue(draft.framing.bufferThresholdBytes);
-    m_framingKeepBoundary->setChecked(draft.framing.mode == ReceiveFraming::Delimiter
-        ? draft.framing.includeDelimiter : draft.framing.includeLengthPrefix);
+    m_framingKeepBoundary->setChecked(draft.framing.includeDelimiter);
     m_framingLogHints->setChecked(draft.framing.logHints);
+    if (draft.framing.isValid())
+        m_appliedFraming = draft.framing;
     {
         const QSignalBlocker recoverBlocker(m_autoRecover);
         m_autoRecover->setChecked(draft.kind != PortDraft::TcpServer && draft.autoRecover);
@@ -1148,6 +1175,11 @@ void PortSelectorWidget::setDraft(const PortDraft &draft)
     updateValidation();
     syncAutoRecover();
     m_loading = false;
+}
+
+bool PortSelectorWidget::canApplyFraming() const
+{
+    return draft().framing.isValid();
 }
 
 PortDraft PortSelectorWidget::draft() const

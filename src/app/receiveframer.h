@@ -12,11 +12,10 @@
 // 空闲输出由调用方（EndpointRuntime 的定时器）触发 flush，缓冲阈值输出在 feed 里
 // 就地完成。这样它可以在 core 测试里被完整驱动，不需要线程与事件循环。
 //
-// 四种判定（与 ReceiveFraming::Mode 一一对应）：
-//   Passthrough        收到什么出什么，不缓冲（UDP/数据报也不经过它）；
+// 三种判定（与 ReceiveFraming::Mode 一一对应）：
+//   Passthrough        收到什么出什么，不缓冲（UDP 在运行时直接保留原始数据报）；
 //   IdleTimeout        连续空闲达到配置值时输出缓冲；
-//   Delimiter          遇到结束符即出一帧，其后字节作为下一帧继续缓冲；
-//   LengthPrefixU16LE  帧头 2 字节小端 = 后续字节数，收够即出一帧。
+//   Delimiter          遇到结束符即出一帧，其后字节作为下一帧继续缓冲。
 //
 // 共同兜底：缓冲达到阈值就地输出，空闲超时由调用方 flush 输出——
 // 慢速协议不会无限滞留，缓冲也不会无界增长。
@@ -29,10 +28,11 @@ public:
     // 输出触发原因，只用于提示日志与显示，不参与相等性判定。
     enum Trigger
     {
-        Boundary,  // 按结束符/长度前缀判定收齐
+        Boundary,  // 按结束符判定收齐
         Threshold, // 缓冲达到阈值强制输出
         Idle,      // 空闲超时（调用方 flush）
-        Closed     // 端点关闭时的收尾输出
+        Closed,    // 端点关闭时的收尾输出
+        Reconfigured // 在线换规则时排空旧缓冲，不代表端口断开
     };
 
     struct Frame

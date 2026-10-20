@@ -29,7 +29,7 @@ struct PortDraft
     bool autoRecover = false;
     static constexpr int AutoRecoverRetryMs = 1000;
     // 接收组帧策略。贴在草稿上而不是运行时里：它随端点配置一起编辑、随 open 一起下发，
-    // 且只影响字节流端点（UDP 数据报自带边界，不经过组帧器）。
+    // 也可在连接中热更新；串口、TCP 和 UDP 都按此用户规则组帧。
     ReceiveFraming framing;
 };
 

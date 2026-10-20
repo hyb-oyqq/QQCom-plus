@@ -85,13 +85,17 @@ QVariantMap framingToVariant(const ReceiveFraming &f)
 {
     return {{"mode", int(f.mode)}, {"delimiter", f.delimiter}, {"idle", f.idleTimeoutMs},
         {"threshold", f.bufferThresholdBytes}, {"includeDelimiter", f.includeDelimiter},
-        {"includeLengthPrefix", f.includeLengthPrefix}, {"logHints", f.logHints}};
+        {"logHints", f.logHints}};
 }
 
 ReceiveFraming framingFromVariant(const QVariantMap &m)
 {
     ReceiveFraming f;
-    f.mode = ReceiveFraming::Mode(m.value("mode", int(f.mode)).toInt());
+    // 长度前缀曾经插在结束符和空闲超时之间。去掉之后空闲超时的存盘值
+    // 从 3 变成 2，旧配置读到 3 时收成空闲超时。
+    int mode = m.value("mode", int(f.mode)).toInt();
+    if (mode == 3) mode = int(ReceiveFraming::IdleTimeout);
+    f.mode = ReceiveFraming::Mode(mode);
     f.delimiter = m.value("delimiter").toByteArray();
     f.idleTimeoutMs = m.value("idle", f.idleTimeoutMs).toInt();
     f.bufferThresholdBytes = m.value("threshold", f.bufferThresholdBytes).toInt();
@@ -100,7 +104,6 @@ ReceiveFraming framingFromVariant(const QVariantMap &m)
     if (f.bufferThresholdBytes == 300 || f.bufferThresholdBytes == 2048 * 1024)
         f.bufferThresholdBytes = ReceiveFraming{}.bufferThresholdBytes;
     f.includeDelimiter = m.value("includeDelimiter", f.includeDelimiter).toBool();
-    f.includeLengthPrefix = m.value("includeLengthPrefix", f.includeLengthPrefix).toBool();
     f.logHints = m.value("logHints", f.logHints).toBool();
     return f;
 }
@@ -710,6 +713,15 @@ void MainWindow::refreshEndpoints()
     m_bridge->setEndpoints(m_ports, ready);
     updateEndpointStatus(); // 端点类型变了，状态栏摘要的措辞要跟着换
     saveEndpointDrafts();   // 配置变化即落盘：任何改动都即时记住，无需等退出
+    // 已经连上时，完整的组帧改动直接下发。地址和端口仍要断开再连。
+    // 结束符还没写完时控件自己弹窗并退回，这里不再把半截规则送进运行时。
+    if (!m_runtime) return;
+    for (int index = 0; index < m_selectors.size() && index < EndpointRuntime::EndpointCount; ++index) {
+        if (m_endpointStates[index] == Transport::State::Closed) continue;
+        if (!m_selectors.at(index)->canApplyFraming()) continue;
+        QMetaObject::invokeMethod(m_runtime, &EndpointRuntime::updateFraming, Qt::QueuedConnection,
+            index, m_ports[index].framing);
+    }
 }
 
 void MainWindow::restoreEndpointDrafts(PreferencesStore *preferences)

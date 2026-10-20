@@ -178,7 +178,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         "勾上后，UTF-8、GBK、ASCII 里的颜色标识按颜色显示，标识本身不出现。"
         "例如 ESC[36;22m 后面的字按青色显示，22 只取消加粗。"
         "关掉后，颜色前后缀按原文显示，正文不再上色。"
-        "HEX 对照跟着屏幕上实际出现的字：关掉颜色后，前后缀的字节仍留在 HEX 里。"));
+        "HEX 对照是这条记录的原始字节，不跟着屏幕上的替换字符和续接记号变。"));
     displayMenu->addSeparator();
     m_prefixLineNumberAction = rowToggle("prefixLineNumber", tr("前缀行号"), true);
     m_prefixLineNumberAction->setVisible(false);

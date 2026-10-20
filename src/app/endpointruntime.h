@@ -37,6 +37,9 @@ public:
 
 public slots:
     void openEndpoint(int index, const PortDraft &draft);
+    // 连接中改组帧：换到新规则，不必断开。半包按旧规则先吐出来。
+    // 不完整的结束符直接丢掉。地址、端口这些连接参数不在这里改。
+    void updateFraming(int index, const ReceiveFraming &framing);
     void closeEndpoint(int index);
     // 自动恢复的一拍。GUI 只在「正在等待恢复」时按间隔调用。
     // 串口在 portPresent 为真（扫描到同名设备）时才打开；网络端点忽略该标志。
@@ -71,8 +74,8 @@ private:
     Traffic::Message makeMessage(int index, Traffic::Direction direction, Traffic::Origin origin,
         const QByteArray &raw, Traffic::Framing framing);
     void publish(Traffic::Message message);
-    // 组帧：串口和 TCP 字节流按各自连接缓冲，输出帧再装配成消息；
-    // 数据报（UDP）自带边界，不经过组帧器。
+    // 用户组帧：串口/TCP 按连接、UDP 按发送来源缓冲，输出帧再装配成消息。
+    // 未启用时 UDP 数据报原样发布，不经过此入口。
     void feedFramer(int index, const Traffic::Source &source, const QByteArray &payload);
     void publishFrames(int index, const Traffic::Source &source,
         const QList<ReceiveFramer::Frame> &frames);
@@ -110,9 +113,9 @@ private:
     // UDP 没有握手。这里记录本次打开期间实际发过数据报的来源，首次见到时写一条
     // 「对端已连接」状态日志，并刷新参数区来源列表。绝不把它当成发送目标。
     QSet<QString> m_observedUdpPeers[EndpointCount];
-    // TCP 服务端按连接隔离缓冲和空闲计时；串口/客户端使用空 peerId。
-    // 仅启用组帧并收到非空数据时创建，直通与 UDP 不分配定时器。
-    QHash<QUuid, ReceiveSession> m_receiveSessions[EndpointCount];
+    // TCP 按连接 UUID 隔离，UDP 按来源 IP:端口隔离；串口/客户端使用各自会话。
+    // 仅启用组帧并收到非空数据时创建；UDP 缓冲排空后回收会话，避免来源增长留下定时器。
+    QHash<QString, ReceiveSession> m_receiveSessions[EndpointCount];
     quint64 m_nextMessageId = 1;
     QElapsedTimer m_clock; // 构造即启动；速率与超时都依赖单调时钟
 };
