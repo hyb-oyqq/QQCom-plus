@@ -1211,6 +1211,7 @@ void PortSelectorWidget::notifyChange()
         setOpenFailure({});
         updateActionLabels();
         updateValidation();
+        emit configurationEdited();
         emit configurationChanged();
     }
 }

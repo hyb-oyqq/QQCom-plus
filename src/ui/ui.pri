@@ -21,11 +21,13 @@ SOURCES += \
     $$PWD/panels/sending/filetransferwidget.cpp \
     $$PWD/panels/routing/routeeditorwidget.cpp \
     $$PWD/common/apptheme.cpp \
+    $$PWD/common/endpointalertstate.cpp \
     $$PWD/common/endpointformat.cpp \
     $$PWD/common/styledialogs.cpp
 
 HEADERS += \
     $$PWD/common/apptheme.h \
+    $$PWD/common/endpointalertstate.h \
     $$PWD/common/tintedicon.h \
     $$PWD/common/stayopenmenu.h \
     $$PWD/common/endpointformat.h \

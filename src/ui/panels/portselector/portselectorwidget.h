@@ -52,6 +52,8 @@ public:
 
 signals:
     void configurationChanged();
+    // 用户修改参数；自动设备扫描和载入草稿不代表已查看告警。
+    void configurationEdited();
     void addressCommitted(const QString &address, bool localAddress);
     // 动作按钮被点击：打开/关闭/取消连接都发这一个信号，方向由上层根据
     // 运行状态决定——控件自己不持有通信状态机。

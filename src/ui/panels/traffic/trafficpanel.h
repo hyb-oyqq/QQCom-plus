@@ -13,6 +13,7 @@
 #include <QSet>
 #include <QStringList>
 #include <QWidget>
+#include <optional>
 
 class FilterBar;
 class FilterFlags;
@@ -45,6 +46,7 @@ public:
     void appendMessage(const Traffic::Message &message);
     // 压测探针对账用的会话累计条数（含示例；透传组帧下是"记录条数"，≠ 网络包数）。
     quint64 totalAccepted() const { return m_totalAccepted; }
+    bool isReprojecting() const { return m_projection.has_value(); }
     // 组合根注入的偏好存储；为空时全部显示选项不落盘（示例预览等场景）。
     void setPreferences(PreferencesStore *store);
     // 日志实际写入的目录。未手动指定时是程序目录下的 log 文件夹。
@@ -74,12 +76,13 @@ private:
     //   clearAll → 从模型重放命中项 → 行号从 1 连续重排。
     // 两个维度必须分开（设计稿 §5 决策表）：
     //   · 外观（显示设置/编码格式）= 每行长什么样 → 立刻自动重投影；
-    //   · 关键词和排除词 = 哪些行进来 → 只作用新行，补到历史必须点「应用过滤」。
+    //   · 空闲时关键词和排除词只作用新行，补到历史必须点「应用过滤」。
+    //     已在重建时，修改条件立即取消旧任务并按最新条件重新开始。
     //     端点、方向、转发和事件开关一点就作用到已有行。
     // 所以 applyCurrentConditions 决定这次用哪份条件过滤：
     //   true  —— 用**当前**条件（applyMatcher），并把 m_projectedOptions 记为当前条件。
     //            「应用过滤」按钮与 loadExample 走这条：它们的语义就是"让视图跟上当前条件"。
-    //   false —— 外观路径专用：关键词和排除词仍用上次已应用的条件，
+    //   false —— 空闲的外观路径：关键词和排除词仍用上次已应用的条件，
     //            不会把未应用的内容条件套到历史行上。端点、方向、转发和事件开关
     //            这次投影直接用当前值，并写回已应用条件。
     //            候选项里含"按当前显示格式渲染的文本"（见 TrafficFilter::Matcher）——
@@ -89,14 +92,15 @@ private:
     // announce 与 applyCurrentConditions 是两个独立维度，不要混用：loadExample 只要"不播报"
     // （applyCurrentConditions 仍为 true），外观路径两者都为 false。
     void reprojectView(bool announce = true, bool applyCurrentConditions = true);
+    void advanceProjection();
+    void cancelProjection();
     // 重投影的防抖入口。外观（行前缀、HEX、换行、编码格式）和顶栏显示开关走这里：
-    // 一次点击一个状态，用户期待切了就变。关键词和排除词不走这里，由「应用过滤」触发。
+    // 空闲时关键词和排除词等「应用过滤」；重建进行中则立即替换当前任务。
     void scheduleReproject();
     // 「每行长什么样」（编码格式 + 显示设置）是否与上次投影时不同。
     bool appearanceChanged() const;
-    // 记下"这次投影用的是当前外观/条件"。conditionsApplied 为 false 时只更新外观签名
-    // 和事件开关，关键词等已应用条件不动，未应用的内容条件仍算待应用。
-    void markReprojected(bool conditionsApplied = true);
+    // 首批增量或清空时，以当前外观和条件建立视图基线。
+    void markReprojected();
     // 条件条上「应用过滤」的待办提示：条件改了但还没补到已有记录上，必须说出来。
     void refreshApplyHint();
     // 过滤条的折叠：收起时只隐藏第二行，条件与记忆状态都不动。
@@ -109,6 +113,7 @@ private:
     // 不再各自记"哪项在哪"。
     FilterFlagsState filterFlagsState() const;
     void updatePortVisibility();
+    void syncEventActions();
     void updateSummary();
     // 空数据区的两句说明。打开前缀时是收发记录；纯数据时只说接收，并写明 A、B 的颜色。
     QString waitingPlaceholder() const;
@@ -168,6 +173,9 @@ private:
     QAction *m_showWarningAction = nullptr;
     QAction *m_showErrorAction = nullptr;
     QAction *m_showStateAction = nullptr;
+    // 纯数据下菜单强制取消勾选，仍保存有前缀时的选择供恢复与持久化。
+    bool m_eventChoices[4] = {true, true, true, true}; // info / warning / error / state
+    bool m_eventOptionsActive = true;
     // 指令面板切换按钮
     QPushButton *m_commandPanelToggle = nullptr;
     // 折叠状态用显式标志而不是 isVisible()：窗口整体隐藏时 isVisible() 恒为假，
@@ -226,10 +234,29 @@ private:
     TrafficFilter::Options m_projectedOptions;
     PayloadCodec::Format m_projectedFormat = PayloadCodec::Format::Hex;
     TrafficTextView::DisplayOptions m_projectedDisplay;
+    bool m_projectedDark = false;
     bool m_everProjected = false; // 一次投影都没做过时视图是空的，没有"跟不上"这回事
     // 防抖窗口内按当前条件先画上的行。签名若被拨回上次投影的值，仍要重放一次。
     bool m_incrementalDiverged = false;
+    // 新数据曾按不同条件处理；即使条件改回基线，也不能把混合历史当成已应用。
+    // 与外观偏离分开：空闲编辑关键词不应自动触发全量重建。
+    bool m_filterHistoryDiverged = false;
     QTimer *m_reprojectTimer = nullptr;
+    // 仅持有当前任务；条件变化立即替换，历史和新到达数据统一使用本轮快照。
+    struct Projection {
+        TrafficFilter::Options options;
+        TrafficFilter::Matcher matcher;
+        PayloadCodec::Format format = PayloadCodec::Format::Hex;
+        TrafficTextView::DisplayOptions display;
+        int row = 0;
+        quint64 accepted = 0;
+        quint64 filtered = 0;
+        double scrollFraction = 0;
+        bool announce = false;
+        bool dark = false;
+    };
+    std::optional<Projection> m_projection;
+    QTimer *m_projectionTimer = nullptr;
     PreferencesStore *m_preferences = nullptr;
     bool m_loading = false; // 加载偏好期间联动触发的保存要抑制，否则半成品状态会覆盖已存值
     QFile *m_logFile = nullptr;   // 打开期间持续写入；关闭开关、重开或析构时收口

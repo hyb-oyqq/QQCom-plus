@@ -36,6 +36,17 @@ enum class Direction
     State
 };
 
+// 告警按影响分类，独立于日志的 E/W 级别。客户端离开不代表监听器故障。
+enum class Issue
+{
+    None,
+    EndpointFailure,
+    ReadFailure,
+    DataLoss,
+    PeerDisconnected,
+    CapacityRejected
+};
+
 // 消息从哪来。与 SendRequest::origin 对齐：转发产生的 TX 不该和用户手动
 // 发送的 TX 在界面上无法区分，Sample 用来标识界面预览数据（不计入统计）。
 enum class Origin
@@ -99,6 +110,7 @@ struct Message
     Direction direction = Direction::Receive;
     Origin origin = Origin::Automatic;
     State state = State::None;
+    Issue issue = Issue::None;
 
     // ---- 来源 ----
     Source source;
@@ -149,5 +161,6 @@ Message makeSampleMessage(quint64 id, const QDateTime &timestamp, const Source &
 
 Q_DECLARE_METATYPE(Traffic::Message)
 Q_DECLARE_METATYPE(Traffic::Source)
+Q_DECLARE_METATYPE(Traffic::Issue)
 
 #endif

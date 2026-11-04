@@ -57,9 +57,9 @@ public:
     // 模型里有没有可回溯的记录：没有就没什么可"重新过滤"的，按钮置灰。
     void setRebuildAvailable(bool available);
 
-    // "条件已改、但还没补到已有记录上"：按钮上要留个记号。
+    // 显示「重建中」或"条件已改、但还没补到已有记录上"的记号。
     // 不记的话，用户改完条件发现屏幕没动，只会以为过滤坏了。
-    void setApplyPending(bool pending);
+    void setApplyPending(bool pending, bool rebuilding = false);
 
     // 键盘入口：Ctrl+F 聚焦关键词输入并全选，替换掉原顶栏搜索框的快捷键位。
     void focusKeywords();
@@ -92,6 +92,7 @@ private:
     bool m_resetAvailable = false;   // 外部（方向开关 / 事件开关）是否还有生效条件
     bool m_rebuildAvailable = false; // 模型里还有记录可回溯
     bool m_applyPending = false;     // 条件改了但还没补到已有记录上
+    bool m_rebuilding = false;
     bool m_restoring = false;        // 恢复期间抑制 changed
     // 「清除过滤」按下后为真：条件**停用**但**输入框内容保留**。它让 state() 返回空条件
     // （于是显示全部），而 storedState() 照旧拿到用户敲的内容。用户一改输入框或点

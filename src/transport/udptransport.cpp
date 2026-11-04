@@ -151,11 +151,13 @@ void UdpTransport::drainPendingDatagrams()
         if (size < 0) {
             // 尺寸都拿不到：读走这一报，避免它一直占着队首。字节数未知，只记错误。
             if (m_socket->readDatagram(nullptr, 0) < 0) {
-                emit errorOccurred(m_generation, tr("读取数据报失败：%1").arg(m_socket->errorString()));
+                emit errorOccurred(m_generation, tr("读取数据报失败：%1").arg(m_socket->errorString()),
+                    0, Traffic::Issue::ReadFailure);
                 break;
             }
             consumed = true;
-            emit errorOccurred(m_generation, tr("丢弃 1 个无法读取的数据报"));
+            emit errorOccurred(m_generation, tr("丢弃 1 个无法读取的数据报"),
+                0, Traffic::Issue::DataLoss);
             continue;
         }
         QByteArray payload(qsizetype(size), Qt::Uninitialized);
@@ -167,7 +169,7 @@ void UdpTransport::drainPendingDatagrams()
             const qint64 dropped = qMax<qint64>(0, size);
             emit errorOccurred(m_generation, tr("丢弃 1 个数据报（%1 字节）：%2")
                 .arg(dropped)
-                .arg(m_socket->errorString()), dropped);
+                .arg(m_socket->errorString()), dropped, Traffic::Issue::ReadFailure);
             break;
         }
         consumed = true;

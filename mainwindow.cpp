@@ -9,12 +9,14 @@
 #include "ui/common/payloadcodec.h"
 #include "ui/common/bytesformat.h"
 #include "ui/common/apptheme.h"
+#include "ui/common/endpointalertstate.h"
 #include "ui/common/tintedicon.h"
 #include "discovery/portdiscoveryservice.h"
 #include "persistence/preferencesstore.h"
 
 #include <QAction>
 #include <QActionGroup>
+#include <QApplication>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QEvent>
@@ -23,6 +25,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
+#include <QImage>
 #include <QResizeEvent>
 #include <QSplitter>
 #include <QStatusBar>
@@ -77,6 +80,31 @@ QFrame *makeStatusSeparator()
     line->setFrameShape(QFrame::NoFrame);
     line->setFixedSize(1, 14);
     return line;
+}
+
+// 整张图统一换成告警色，保留原图的透明轮廓、明暗和白色图案。
+// 常用尺寸单独生成并缓存；正常时直接恢复原始 QIcon。
+QIcon alertWindowIcon(const QIcon &base, const QColor &color)
+{
+    QIcon result;
+    for (const int size : {16, 24, 32, 48, 64, 128, 256}) {
+        QImage image = base.pixmap(QSize(size, size), 1.0).toImage().convertToFormat(QImage::Format_ARGB32);
+        if (image.isNull()) continue;
+        for (int y = 0; y < image.height(); ++y) {
+            auto *pixels = reinterpret_cast<QRgb *>(image.scanLine(y));
+            for (int x = 0; x < image.width(); ++x) {
+                const QColor original = QColor::fromRgba(pixels[x]);
+                const float saturation = original.hsvSaturationF();
+                const QColor tinted = QColor::fromHsvF(color.hsvHueF(),
+                    saturation * color.hsvSaturationF(),
+                    original.valueF() * (1.0f - saturation * (1.0f - color.valueF())),
+                    original.alphaF());
+                pixels[x] = tinted.rgba();
+            }
+        }
+        result.addPixmap(QPixmap::fromImage(image));
+    }
+    return result;
 }
 
 // 端点草稿 ↔ QVariantMap：preferences.ini 的存取都吃 QVariantMap，
@@ -134,6 +162,15 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
     setWindowTitle(QStringLiteral(QQCOM_APP_TITLE));
+    m_normalWindowIcon = windowIcon().isNull() ? QIcon(QStringLiteral(":/icons/app.ico")) : windowIcon();
+    setWindowIcon(m_normalWindowIcon);
+    for (int level = 0; level < 2; ++level) {
+        for (int bright = 0; bright < 2; ++bright) {
+            QColor color(level == 0 ? QStringLiteral("#d97706") : QStringLiteral("#dc2626"));
+            if (!bright) color = color.darker(155);
+            m_alertWindowIcons[level][bright] = alertWindowIcon(m_normalWindowIcon, color);
+        }
+    }
     // 不设最小尺寸。默认布局约束会把内容的 minimumSizeHint 写回窗口，边框就拖不下去。
     releaseWindowSizeFloor();
     resize(1280, 860);
@@ -175,6 +212,11 @@ MainWindow::MainWindow(QWidget *parent)
         selector->setDraft(draft);
         m_selectors.append(selector);
         m_ports.append(selector->draft());
+        auto *alerts = new EndpointAlertState(this);
+        alerts->setObjectName(QStringLiteral("endpointAlerts") + label);
+        m_endpointAlerts[index] = alerts;
+        connect(alerts, &EndpointAlertState::changed, this, &MainWindow::updateEndpointAlerts);
+        connect(alerts, &EndpointAlertState::attentionRequested, this, &MainWindow::requestAlertAttention);
         if (m_selectors.size() > 1) {
             auto *line = new QFrame;
             line->setObjectName("EndpointDivider");
@@ -183,6 +225,7 @@ MainWindow::MainWindow(QWidget *parent)
         }
         endpointLayout->addWidget(selector);
         connect(selector, &PortSelectorWidget::configurationChanged, this, &MainWindow::refreshEndpoints);
+        connect(selector, &PortSelectorWidget::configurationEdited, alerts, &EndpointAlertState::acknowledge);
         connect(selector, &PortSelectorWidget::addressCommitted, preferences, &PreferencesStore::rememberAddress);
         connect(discovery, &PortDiscoveryService::portsChanged, selector, &PortSelectorWidget::setSerialPorts);
     }
@@ -609,6 +652,11 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_runtime, &EndpointRuntime::rawDataReceived, m_sender,
         &SendPanel::handleRawDataReceived);
     connect(m_runtime, &EndpointRuntime::messageReceived, this, &MainWindow::handleMessage);
+    connect(m_runtime, &EndpointRuntime::endpointIssueReported, this,
+        [this](int index, int issue, const QString &reason) {
+            if (index < 0 || index >= EndpointRuntime::EndpointCount || m_alertsSuppressed[index]) return;
+            m_endpointAlerts[index]->report(Traffic::Issue(issue), reason);
+        });
 
     for (int index = 0; index < m_selectors.size(); ++index) {
         connect(m_selectors.at(index), &PortSelectorWidget::actionRequested, this,
@@ -693,6 +741,7 @@ MainWindow::~MainWindow()
         // I/O 已停止，处理关闭前排队的尾帧，再让监视面板结束日志记录。
         QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
     }
+    if (m_alertInputFilterInstalled) qApp->removeEventFilter(this);
     delete ui;
 }
 
@@ -749,11 +798,15 @@ void MainWindow::saveEndpointDrafts()
 void MainWindow::toggleEndpoint(int index)
 {
     if (index < 0 || index >= m_selectors.size()) return;
+    m_endpointAlerts[index]->acknowledge();
     // Closed → 打开；Opening/Open → 关闭（Opening 时即为取消连接）。
     // 正在等待自动恢复时按钮是「等待中」：取消本次恢复，勾选本身保留。
     // 取消必须立刻挡住已经排队的重试，不能等队列槽；否则占用中的重试失败
     // 会把「等待中」马上又点亮。
     if (m_endpointStates[index] != Transport::State::Closed || m_recoverArmed[index]) {
+        m_alertsSuppressed[index] = true;
+        m_endpointAlerts[index]->stopByUser();
+        m_selectors.at(index)->setOpenFailure({});
         m_recoverArmed[index] = false;
         if (m_recoverTimer && !m_recoverArmed[0] && !m_recoverArmed[1])
             m_recoverTimer->stop();
@@ -774,6 +827,8 @@ void MainWindow::toggleEndpoint(int index)
     m_recoverCancelled[index] = false;
     const auto draft = m_selectors.at(index)->draft();
     if (!m_selectors.at(index)->hasValidConfiguration()) return;
+    m_endpointAlerts[index]->beginUserAttempt();
+    m_alertsSuppressed[index] = false;
     QMetaObject::invokeMethod(m_runtime, "openEndpoint", Qt::QueuedConnection,
         Q_ARG(int, index), Q_ARG(PortDraft, draft));
 }
@@ -836,6 +891,7 @@ void MainWindow::handleEndpointState(int index, int state, const QString &detail
     m_endpointStates[index] = Transport::State(state);
     const bool opened = state == int(Transport::State::Open);
     const bool opening = state == int(Transport::State::Opening);
+    m_endpointAlerts[index]->setConnectionOpen(opened);
     if (opened) {
         m_recoverArmed[index] = false;
         m_recoverCancelled[index] = false;
@@ -909,11 +965,86 @@ void MainWindow::handleMessage(const Traffic::Message &message)
         const int index = message.source.endpointIndex;
         // 监听/连接失败时状态仍是关闭，按钮文字不变。纯数据也不画错误行。
         // 已经处于打开中的运行时错误（例如客户端断开）不写到端口行上，避免把正在听的那一行盖住。
-        if (index >= 0 && index < m_selectors.size()
+        if (message.issue == Traffic::Issue::EndpointFailure
+            && index >= 0 && index < m_selectors.size() && !m_alertsSuppressed[index]
             && m_endpointStates[index] != Transport::State::Open)
             m_selectors.at(index)->setOpenFailure(message.statusText);
     }
     m_traffic->appendMessage(message);
+}
+
+void MainWindow::updateEndpointAlerts()
+{
+    int level = EndpointAlertState::Normal;
+    bool bright = true;
+    bool blinking = false;
+    for (int index = 0; index < EndpointRuntime::EndpointCount; ++index) {
+        const auto *alerts = m_endpointAlerts[index];
+        if (!alerts) continue;
+        if (alerts->level() > level) {
+            level = alerts->level();
+            bright = alerts->bright();
+            blinking = alerts->blinking();
+        } else if (alerts->level() == level) {
+            // 同级别的新告警仍能闪烁，另一个端点的常亮告警不盖住它。
+            if (alerts->blinking()) {
+                bright = alerts->bright();
+                blinking = true;
+            } else if (!blinking) {
+                bright = true;
+            }
+        }
+    }
+    if (level != m_windowAlertLevel || bright != m_windowAlertBright) {
+        setWindowIcon(level == EndpointAlertState::Normal ? m_normalWindowIcon
+            : m_alertWindowIcons[level - 1][bright ? 1 : 0]);
+        m_windowAlertLevel = level;
+        m_windowAlertBright = bright;
+    }
+    if (level == EndpointAlertState::Normal) stopAlertAttention();
+    const bool needsInput = level != EndpointAlertState::Normal;
+    if (needsInput != m_alertInputFilterInstalled) {
+        m_alertInputFilterInstalled = needsInput;
+        if (needsInput) qApp->installEventFilter(this);
+        else qApp->removeEventFilter(this);
+    }
+    updateEndpointStatus();
+}
+
+void MainWindow::acknowledgeEndpointAlerts()
+{
+    for (auto *alerts : m_endpointAlerts)
+        if (alerts && alerts->level() != EndpointAlertState::Normal)
+            alerts->acknowledge();
+    stopAlertAttention();
+}
+
+void MainWindow::requestAlertAttention()
+{
+    if (isActiveWindow() || !isVisible() || testAttribute(Qt::WA_DontShowOnScreen)) return;
+#if defined(Q_OS_WIN)
+    FLASHWINFO info = {};
+    info.cbSize = sizeof(info);
+    info.hwnd = reinterpret_cast<HWND>(winId());
+    info.dwFlags = FLASHW_TRAY;
+    info.uCount = 3;
+    info.dwTimeout = 500;
+    FlashWindowEx(&info);
+#else
+    QApplication::alert(this, 5000);
+#endif
+}
+
+void MainWindow::stopAlertAttention()
+{
+#if defined(Q_OS_WIN)
+    if (!internalWinId()) return;
+    FLASHWINFO info = {};
+    info.cbSize = sizeof(info);
+    info.hwnd = reinterpret_cast<HWND>(internalWinId());
+    info.dwFlags = FLASHW_STOP;
+    FlashWindowEx(&info);
+#endif
 }
 
 void MainWindow::syncExtensionPanel(bool expanded)
@@ -968,6 +1099,7 @@ QSize MainWindow::minimumSizeHint() const
 bool MainWindow::event(QEvent *event)
 {
     const bool handled = QMainWindow::event(event);
+    if (event->type() == QEvent::WindowActivate) acknowledgeEndpointAlerts();
     // activate() 在 LayoutRequest 里跑。默认约束会在那里把内容下限写回窗口，
     // 写完这一下边框就又拖不动了。这里在它返回后把下限清掉。
     if (event->type() == QEvent::LayoutRequest || event->type() == QEvent::Show) {
@@ -977,6 +1109,16 @@ bool MainWindow::event(QEvent *event)
             releaseWindowSizeFloor();
     }
     return handled;
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::KeyPress) {
+        const auto *widget = qobject_cast<QWidget *>(watched);
+        if (widget && (widget == this || isAncestorOf(widget)))
+            acknowledgeEndpointAlerts();
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::releaseWindowSizeFloor()
@@ -1077,6 +1219,10 @@ void MainWindow::updateEndpointStatus()
         const char *dot = "closed";
         if (m_endpointStates[index] == Transport::State::Opening) dot = "opening";
         else if (m_endpointStates[index] == Transport::State::Open) dot = "open";
+        if (m_endpointAlerts[index] && m_endpointAlerts[index]->level() != EndpointAlertState::Normal) {
+            dot = m_endpointAlerts[index]->hasFault() ? "error" : "warning";
+            m_endpointState[index]->setToolTip(m_endpointAlerts[index]->summary());
+        }
         restyleProperty(m_endpointDot[index], "state", QString::fromLatin1(dot));
     }
     // 临时提示自己占一格。计时没结束时不能清掉它——打开失败时，error 播出的原因

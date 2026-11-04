@@ -92,6 +92,29 @@ class TransportTest : public QObject
     Q_OBJECT
 
 private slots:
+    void recoveryCountsIssuesWithoutRepeatingErrorLogs()
+    {
+        EndpointRuntime runtime;
+        QSignalSpy issues(&runtime, &EndpointRuntime::endpointIssueReported);
+        QList<Traffic::Message> errors;
+        connect(&runtime, &EndpointRuntime::messageReceived, this, [&](const Traffic::Message &message) {
+            if (message.direction == Traffic::Direction::Error) errors.append(message);
+        });
+        auto draft = makeDraft(PortDraft::Serial,
+            {{"serial.port", "COM_ALERT_TEST_MISSING"}, {"serial.baud", 115200}});
+        draft.autoRecover = true;
+        runtime.openEndpoint(0, draft);
+        runtime.recoverEndpoint(0, draft, true);
+        runtime.recoverEndpoint(0, draft, true);
+        QCOMPARE(issues.size(), 3);
+        QCOMPARE(issues.first().at(1).toInt(), int(Traffic::Issue::EndpointFailure));
+        QCOMPARE(errors.size(), 1);
+        QCOMPARE(errors.first().issue, Traffic::Issue::EndpointFailure);
+        runtime.suppressRecover(0);
+        runtime.recoverEndpoint(0, draft, true);
+        QCOMPARE(issues.size(), 3);
+    }
+
     void preferencesMigrationPreservesBothFiles()
     {
         QTemporaryDir dir;

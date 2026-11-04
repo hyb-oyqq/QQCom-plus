@@ -242,15 +242,17 @@ void FilterBar::setRebuildAvailable(bool available)
     m_rebuild->setEnabled(available);
 }
 
-void FilterBar::setApplyPending(bool pending)
+void FilterBar::setApplyPending(bool pending, bool rebuilding)
 {
     // 同 setRebuildAvailable：这是每次入模都会被问到的路径，值没变就直接返回。
-    if (m_applyPending == pending) return;
+    if (m_applyPending == pending && m_rebuilding == rebuilding) return;
     m_applyPending = pending;
-    // 只在按钮文字末尾加一个记号，不改文字本身：按钮的位置与宽度基本不动，
-    // 而"有件事还没做"这件事一眼就能看见。文字长度变化由关键词输入的弹性吸收。
-    m_rebuild->setText(pending ? tr("应用过滤 •") : tr("应用过滤"));
-    m_rebuild->setToolTip(pending
+    m_rebuilding = rebuilding;
+    // 运行状态优先于待应用标记；条件输入和按钮仍可用，相同请求由面板去重。
+    m_rebuild->setText(rebuilding ? tr("重建中…") : pending ? tr("应用过滤 •") : tr("应用过滤"));
+    m_rebuild->setToolTip(rebuilding
+            ? tr("正在按最新条件重建历史；修改条件会立即停止本轮并重新开始。")
+            : pending
             ? tr("过滤条件已改，还没作用于已收到的记录。点这里应用到缓冲内的记录。纯数据时仍只显示其中的接收数据。")
             : tr("把当前过滤条件应用到缓冲内已经收到的记录，不设条数上限。纯数据时仍只显示其中的接收数据。"));
 }

@@ -3,6 +3,7 @@
 #include "domain/commandset.h"
 #include "domain/receiveframing.h"
 #include "ui/common/apptheme.h"
+#include "ui/common/endpointalertstate.h"
 #include "ui/common/endpointformat.h"
 #include "ui/common/payloadcodec.h"
 #include "ui/panels/commands/commandpanel.h"
@@ -16,7 +17,6 @@
 
 #include <QAbstractItemView>
 #include <QAction>
-#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -24,6 +24,7 @@
 #include <QComboBox>
 #include <QDir>
 #include <QDirIterator>
+#include <QEvent>
 #include <QFile>
 #include <QFrame>
 #include <QFileInfo>
@@ -51,8 +52,6 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
-#include <QStatusBar>
-#include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QStyleOptionSpinBox>
 #include <QTableWidget>
@@ -190,6 +189,728 @@ class UiSmokeTest : public QObject
 {
     Q_OBJECT
 private slots:
+    void historyProjectionRestartsImmediatelyWithLatestConditions()
+    {
+        TrafficPanel panel;
+        PortDraft port;
+        panel.setPorts({port});
+        auto *model = panel.findChild<TrafficModel *>();
+        auto *text = panel.findChild<TrafficTextView *>();
+        auto *format = panel.findChild<QComboBox *>("trafficFormat");
+        auto *keywords = panel.findChild<QLineEdit *>("filterKeywords");
+        auto *apply = panel.findChild<QPushButton *>("filterRebuild");
+        auto *timestamp = panel.findChild<QAction *>("prefixTimestamp");
+        QVERIFY(model && text && format && keywords && apply && timestamp);
+        format->setCurrentText(QStringLiteral("UTF-8"));
+        const auto message = [port](int id) {
+            Traffic::Message m;
+            m.id = id;
+            m.timestamp = QDateTime::currentDateTime();
+            m.source.endpointId = port.id;
+            m.source.endpointIndex = 0;
+            m.direction = Traffic::Direction::Receive;
+            m.raw = id % 2 ? "alpha" : "beta";
+            m.rawLength = m.raw.size();
+            return m;
+        };
+        QList<Traffic::Message> history;
+        for (int i = 1; i <= 12000; ++i) history.append(message(i));
+        model->appendRecords(history);
+        apply->setEnabled(true);
+        QSignalSpy summaries(&panel, &TrafficPanel::summaryChanged);
+        apply->click();
+        QVERIFY(panel.isReprojecting());
+        QCOMPARE(apply->text(), QStringLiteral("重建中…"));
+        keywords->setText(QStringLiteral("beta")); // 不用再点应用，正在运行的任务立即替换。
+        QVERIFY(panel.isReprojecting());
+        QVERIFY(text->toPlainText().contains(QStringLiteral("beta")));
+        QVERIFY(!text->toPlainText().contains(QStringLiteral("alpha")));
+        format->setCurrentText(QStringLiteral("HEX"));
+        timestamp->setChecked(false);
+        keywords->setText(QStringLiteral("alpha"));
+        QVERIFY(panel.isReprojecting());
+        QVERIFY(text->toPlainText().contains(QStringLiteral("61 6C 70 68 61")));
+        QVERIFY(!text->toPlainText().contains(QStringLiteral("62 65 74 61")));
+        for (int i = 12001; i <= 12100; ++i) panel.appendMessage(message(i));
+        QTRY_COMPARE(model->rowCount(), 12100);
+        QTRY_VERIFY_WITH_TIMEOUT(!panel.isReprojecting(), 10000);
+        QTest::qWait(AppearanceReprojectWaitMs);
+        QCOMPARE(text->lineCount(), 6050);
+        const auto visible = text->toPlainText();
+        QVERIFY(visible.contains(QStringLiteral("61 6C 70 68 61")));
+        QVERIFY(!visible.contains(QStringLiteral("62 65 74 61")));
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+        int completions = 0;
+        for (const auto &args : summaries)
+            if (args.first().toString().contains(QStringLiteral("历史重建完成"))) ++completions;
+        QCOMPARE(completions, 1); // 取消的任务不能继续写入或播报完成。
+    }
+
+    void historyProjectionRefiltersArrivalsWithLatestConditions()
+    {
+        TrafficPanel panel;
+        PortDraft port;
+        panel.setPorts({port});
+        auto *model = panel.findChild<TrafficModel *>();
+        auto *text = panel.findChild<TrafficTextView *>();
+        auto *apply = panel.findChild<QPushButton *>("filterRebuild");
+        auto *keywords = panel.findChild<QLineEdit *>("filterKeywords");
+        auto *format = panel.findChild<QComboBox *>("trafficFormat");
+        format->setCurrentText(QStringLiteral("UTF-8"));
+        QList<Traffic::Message> history;
+        Traffic::Message message;
+        message.source.endpointId = port.id;
+        message.direction = Traffic::Direction::Receive;
+        message.raw = "history-beta";
+        for (int i = 0; i < 60000; ++i) history.append(message);
+        model->appendRecords(history);
+        apply->setEnabled(true);
+        apply->click();
+        QVERIFY(panel.isReprojecting());
+        keywords->setText(QStringLiteral("beta"));
+        message.raw = "arrival-beta";
+        panel.appendMessage(message);
+        message.raw = "arrival-alpha";
+        panel.appendMessage(message);
+        QTimer *flush = nullptr;
+        for (auto *timer : panel.findChildren<QTimer *>(QString(), Qt::FindDirectChildrenOnly))
+            if (timer->interval() == 16) flush = timer;
+        QVERIFY(flush);
+        flush->stop();
+        QVERIFY(QMetaObject::invokeMethod(flush, "timeout", Qt::DirectConnection));
+        QCOMPARE(model->rowCount(), 60002);
+        QVERIFY(panel.isReprojecting());
+        keywords->setText(QStringLiteral("alpha"));
+        QTRY_VERIFY_WITH_TIMEOUT(!panel.isReprojecting(), 10000);
+        QCOMPARE(text->lineCount(), 1);
+        QVERIFY(text->toPlainText().contains(QStringLiteral("arrival-alpha")));
+        QVERIFY(!text->toPlainText().contains(QStringLiteral("beta")));
+        QCOMPARE(panel.totalAccepted(), quint64(1));
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+    }
+
+    void repeatedIdenticalProjectionDoesNotRestart()
+    {
+        TrafficPanel panel;
+        PortDraft port;
+        panel.setPorts({port});
+        auto *model = panel.findChild<TrafficModel *>();
+        auto *text = panel.findChild<TrafficTextView *>();
+        auto *apply = panel.findChild<QPushButton *>("filterRebuild");
+        Traffic::Message message;
+        message.source.endpointId = port.id;
+        message.direction = Traffic::Direction::Receive;
+        message.raw = "data";
+        QList<Traffic::Message> history;
+        for (int i = 0; i < 12000; ++i) history.append(message);
+        model->appendRecords(history);
+        apply->setEnabled(true);
+        apply->click();
+        QVERIFY(panel.isReprojecting());
+        const int written = text->lineCount();
+        QSignalSpy blocks(text, &QPlainTextEdit::blockCountChanged);
+        apply->click();
+        apply->click();
+        QCOMPARE(text->lineCount(), written);
+        QCOMPARE(blocks.size(), 0); // 同一请求不能清空已经写入的批次。
+        QTRY_VERIFY_WITH_TIMEOUT(!panel.isReprojecting(), 10000);
+        for (const auto &args : blocks) QVERIFY(args.first().toInt() != 1);
+        QCOMPARE(text->lineCount(), 12000);
+
+        blocks.clear();
+        apply->click(); // 完成后相同请求也应复用结果。
+        QVERIFY(!panel.isReprojecting());
+        QCOMPARE(blocks.size(), 0);
+        QCOMPARE(text->lineCount(), 12000);
+
+        panel.appendMessage(message); // 同条件的新数据已增量显示，无需再扫描历史。
+        QTRY_COMPARE(model->rowCount(), 12001);
+        QTRY_COMPARE(text->lineCount(), 12001);
+        blocks.clear();
+        apply->click();
+        QVERIFY(!panel.isReprojecting());
+        QCOMPARE(blocks.size(), 0);
+        QCOMPARE(text->lineCount(), 12001);
+    }
+
+    void identicalProjectionRefiltersTemporaryConditionArrivals_data()
+    {
+        QTest::addColumn<bool>("acceptedDuringChange");
+        QTest::newRow("temporarily-rejected") << false;
+        QTest::newRow("temporarily-accepted") << true;
+    }
+
+    void identicalProjectionRefiltersTemporaryConditionArrivals()
+    {
+        QFETCH(bool, acceptedDuringChange);
+        TrafficPanel panel;
+        PortDraft port;
+        panel.setPorts({port});
+        auto *model = panel.findChild<TrafficModel *>();
+        auto *text = panel.findChild<TrafficTextView *>();
+        auto *apply = panel.findChild<QPushButton *>("filterRebuild");
+        auto *keywords = panel.findChild<QLineEdit *>("filterKeywords");
+        auto *format = panel.findChild<QComboBox *>("trafficFormat");
+        QVERIFY(model && text && apply && keywords && format);
+        format->setCurrentText(QStringLiteral("UTF-8"));
+        Traffic::Message message;
+        message.source.endpointId = port.id;
+        message.direction = Traffic::Direction::Receive;
+        message.raw = "alpha-history";
+        panel.appendMessage(message);
+        QTRY_COMPARE(model->rowCount(), 1);
+        keywords->setText(QStringLiteral("alpha"));
+        apply->click();
+        QCOMPARE(text->lineCount(), 1);
+
+        keywords->setText(QStringLiteral("beta"));
+        message.raw = acceptedDuringChange ? "beta-arrival" : "alpha-arrival";
+        panel.appendMessage(message);
+        QTRY_COMPARE(model->rowCount(), 2);
+        QCOMPARE(text->lineCount(), acceptedDuringChange ? 2 : 1);
+        keywords->setText(QStringLiteral("alpha")); // 回到已完成快照，但历史已不一致。
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤 •"));
+        apply->click();
+        QCOMPARE(text->lineCount(), acceptedDuringChange ? 1 : 2);
+        QVERIFY(!text->toPlainText().contains(QStringLiteral("beta-arrival")));
+        QCOMPARE(text->toPlainText().contains(QStringLiteral("alpha-arrival")), !acceptedDuringChange);
+        QCOMPARE(apply->text(), QStringLiteral("应用过滤"));
+    }
+
+    void reloadExampleRebuildsWithUnchangedConditions()
+    {
+        TrafficPanel panel;
+        PortDraft port;
+        panel.setPorts({port});
+        auto *text = panel.findChild<TrafficTextView *>();
+        auto *model = panel.findChild<TrafficModel *>();
+        QVERIFY(text && model);
+        panel.loadExample({port});
+        const int exampleLines = text->lineCount();
+        Traffic::Message message;
+        message.source.endpointId = port.id;
+        message.direction = Traffic::Direction::Receive;
+        message.raw = "extra-record";
+        panel.appendMessage(message);
+        QTRY_COMPARE(model->rowCount(), 13);
+        QTRY_COMPARE(text->lineCount(), exampleLines + 1);
+        panel.loadExample({port}); // 数据源整体替换，不受相同过滤快照的去重影响。
+        QCOMPARE(model->rowCount(), 12);
+        QCOMPARE(text->lineCount(), exampleLines);
+    }
+
+    void completedProjectionTracksThemeChanges()
+    {
+        AppTheme::setMode(AppTheme::Mode::Light);
+        TrafficPanel panel;
+        PortDraft port;
+        panel.setPorts({port});
+        auto *text = panel.findChild<TrafficTextView *>();
+        auto *model = panel.findChild<TrafficModel *>();
+        auto *apply = panel.findChild<QPushButton *>("filterRebuild");
+        QVERIFY(text && model && apply);
+        Traffic::Message message;
+        message.source.endpointId = port.id;
+        message.direction = Traffic::Direction::Receive;
+        message.raw = "data";
+        panel.appendMessage(message);
+        QTRY_COMPARE(model->rowCount(), 1);
+        apply->click();
+        const QColor light = lastFragmentColor(text->document()->firstBlock());
+        AppTheme::setMode(AppTheme::Mode::Dark);
+        const QColor dark = lastFragmentColor(text->document()->firstBlock());
+        AppTheme::setMode(AppTheme::Mode::Light);
+        QVERIFY(dark != light);
+        QCOMPARE(lastFragmentColor(text->document()->firstBlock()), light);
+        QSignalSpy blocks(text, &QPlainTextEdit::blockCountChanged);
+        apply->click();
+        QCOMPARE(blocks.size(), 0);
+    }
+
+    void receiveBatchingRestoresIntervalAfterBacklog()
+    {
+        TrafficPanel panel;
+        PortDraft port;
+        panel.setPorts({port});
+        auto *model = panel.findChild<TrafficModel *>();
+        QTimer *flush = nullptr;
+        for (auto *timer : panel.findChildren<QTimer *>(QString(), Qt::FindDirectChildrenOnly))
+            if (timer->interval() == 16) flush = timer;
+        QVERIFY(flush);
+        Traffic::Message message;
+        message.source.endpointId = port.id;
+        message.direction = Traffic::Direction::Receive;
+        message.raw = "data";
+        QList<Traffic::Message> batch;
+        for (int i = 0; i < 600; ++i) batch.append(message);
+        panel.appendMessages(batch);
+        QTRY_COMPARE(model->rowCount(), 600);
+        panel.appendMessage(message);
+        QCOMPARE(flush->interval(), 16);
+        QVERIFY(flush->remainingTime() > 0);
+        QCOMPARE(model->rowCount(), 600); // 新到达先攒批，不能被上一轮的 0 ms 续批永久改变。
+        QTRY_COMPARE(model->rowCount(), 601);
+    }
+
+    void clearCancelsHistoryProjection()
+    {
+        TrafficPanel panel;
+        PortDraft port;
+        panel.setPorts({port});
+        auto *model = panel.findChild<TrafficModel *>();
+        auto *text = panel.findChild<TrafficTextView *>();
+        auto *apply = panel.findChild<QPushButton *>("filterRebuild");
+        auto *clear = panel.findChild<QPushButton *>("clearTraffic");
+        QList<Traffic::Message> history;
+        Traffic::Message old;
+        old.source.endpointId = port.id;
+        old.direction = Traffic::Direction::Receive;
+        old.raw = "old-session";
+        for (int i = 0; i < 12000; ++i) history.append(old);
+        model->appendRecords(history);
+        apply->setEnabled(true);
+        apply->click();
+        QVERIFY(panel.isReprojecting());
+        apply->click();
+        clear->click();
+        QVERIFY(!panel.isReprojecting());
+        Traffic::Message fresh = old;
+        fresh.raw = "new-session";
+        panel.appendMessage(fresh);
+        QTRY_COMPARE(model->rowCount(), 1);
+        QTest::qWait(AppearanceReprojectWaitMs);
+        QCOMPARE(text->lineCount(), 1);
+        QVERIFY(!text->toPlainText().contains(QStringLiteral("old-session")));
+        QVERIFY(text->toPlainText().contains(QStringLiteral("new-session")));
+    }
+
+    void alertAcknowledgementAndRecoveryHaveSeparateLifetimes()
+    {
+        EndpointAlertState alerts;
+        QCOMPARE(alerts.level(), EndpointAlertState::Normal);
+        alerts.setConnectionOpen(true);
+        QCOMPARE(alerts.level(), EndpointAlertState::Normal);
+        alerts.report(Traffic::Issue::EndpointFailure, QStringLiteral("连接断开"));
+        alerts.setConnectionOpen(false);
+        QCOMPARE(alerts.level(), EndpointAlertState::Error);
+        alerts.acknowledge();
+        QCOMPARE(alerts.level(), EndpointAlertState::Normal);
+        QVERIFY(alerts.hasFault()); // 已查看只消除提醒，连接仍未恢复。
+        QVERIFY(!alerts.blinking());
+        alerts.report(Traffic::Issue::EndpointFailure, QStringLiteral("连接断开"));
+        QCOMPARE(alerts.entries().last().count, quint64(2));
+        QCOMPARE(alerts.level(), EndpointAlertState::Normal);
+        QVERIFY(!alerts.blinking());
+        QSignalSpy attention(&alerts, &EndpointAlertState::attentionRequested);
+        alerts.report(Traffic::Issue::EndpointFailure, QStringLiteral("重试时连接被拒绝"));
+        QCOMPARE(alerts.level(), EndpointAlertState::Normal);
+        QVERIFY(!alerts.entries().last().unread);
+        QVERIFY(!alerts.blinking());
+        QCOMPARE(attention.size(), 0);
+        alerts.setConnectionOpen(true);
+        QTest::qWait(1100);
+        alerts.setConnectionOpen(false); // 短暂连上不足以消除故障。
+        QTest::qWait(1100);
+        QCOMPARE(alerts.level(), EndpointAlertState::Normal);
+        QVERIFY(alerts.hasFault());
+        alerts.setConnectionOpen(true);
+        QTRY_VERIFY_WITH_TIMEOUT(!alerts.hasFault(), 3500);
+        QCOMPARE(alerts.level(), EndpointAlertState::Normal);
+        QVERIFY(alerts.entries().last().resolved);
+
+        alerts.report(Traffic::Issue::EndpointFailure, QStringLiteral("再次断开"));
+        alerts.setConnectionOpen(false);
+        alerts.setConnectionOpen(true);
+        QTRY_COMPARE_WITH_TIMEOUT(alerts.level(), EndpointAlertState::Warning, 3500);
+        QVERIFY(alerts.summary().contains(QStringLiteral("已恢复")));
+        QVERIFY(!alerts.blinking());
+        alerts.stopByUser();
+        QCOMPARE(alerts.level(), EndpointAlertState::Normal);
+    }
+
+    void repeatedAlertsDoNotExtendBlinkingOrDowngradeFaults()
+    {
+        EndpointAlertState alerts;
+        QSignalSpy attention(&alerts, &EndpointAlertState::attentionRequested);
+        alerts.report(Traffic::Issue::EndpointFailure, QStringLiteral("打开失败"));
+        QVERIFY(alerts.blinking());
+        QTest::qWait(700);
+        QVERIFY(!alerts.bright());
+        alerts.report(Traffic::Issue::DataLoss, QStringLiteral("丢弃数据"));
+        QCOMPARE(alerts.level(), EndpointAlertState::Error);
+        const int started = attention.size();
+        for (int n = 0; n < 6; ++n) {
+            QTest::qWait(900);
+            alerts.report(Traffic::Issue::EndpointFailure, QStringLiteral("打开失败"));
+        }
+        QCOMPARE(attention.size(), started);
+        QVERIFY(!alerts.blinking());
+        QVERIFY(alerts.bright());
+        QCOMPARE(alerts.entries().last().count, quint64(7));
+        alerts.stopByUser();
+        QCOMPARE(alerts.level(), EndpointAlertState::Normal);
+        QVERIFY(!alerts.blinking());
+    }
+
+    void endpointIconsRecoverAndManualStopRestoresOriginal()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.show();
+        const auto original = window.windowIcon().cacheKey();
+        const auto saveShot = [&](const QString &name) {
+            const auto dir = qEnvironmentVariable("QQCOM_UI_ARTIFACT_DIR");
+            if (dir.isEmpty()) return true;
+            return QDir().mkpath(dir) && window.grab().save(dir + QLatin1Char('/') + name);
+        };
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(b);
+        b->findChild<QComboBox *>(QStringLiteral("portType"))->setCurrentIndex(PortDraft::TcpClient);
+        b->findChild<QComboBox *>(QStringLiteral("client.host"))->setCurrentText(QStringLiteral("127.0.0.1"));
+        b->findChild<QCheckBox *>(QStringLiteral("autoRecover"))->setChecked(true);
+        QTcpServer listener;
+        QVERIFY(listener.listen(QHostAddress::LocalHost, 0));
+        b->findChild<QSpinBox *>(QStringLiteral("client.port"))->setValue(listener.serverPort());
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        auto *alerts = window.findChild<EndpointAlertState *>(QStringLiteral("endpointAlertsB"));
+        QVERIFY(action && alerts);
+        QVERIFY(!b->findChild<QToolButton *>(QStringLiteral("endpointAlert")));
+        QCOMPARE(window.windowIcon().cacheKey(), original);
+        action->click();
+        QTRY_VERIFY(listener.hasPendingConnections());
+        auto *peer = listener.nextPendingConnection();
+        QVERIFY(peer);
+        QTRY_COMPARE(action->text(), QStringLiteral("断  开"));
+        QCOMPARE(window.windowIcon().cacheKey(), original);
+        peer->abort();
+        QTRY_COMPARE(alerts->level(), EndpointAlertState::Error);
+        QVERIFY(window.windowIcon().cacheKey() != original);
+        QVERIFY(saveShot(QStringLiteral("alert-fault.png")));
+        AppTheme::setMode(AppTheme::Mode::Dark);
+        QVERIFY(saveShot(QStringLiteral("alert-fault-dark.png")));
+        AppTheme::setMode(AppTheme::Mode::Light);
+        QTRY_VERIFY(listener.hasPendingConnections());
+        QTRY_COMPARE_WITH_TIMEOUT(alerts->level(), EndpointAlertState::Warning, 3500);
+        auto *status = window.findChildren<QLabel *>(QStringLiteral("EndpointState")).value(1);
+        QVERIFY(status && status->toolTip().contains(QStringLiteral("已恢复")));
+        QVERIFY(saveShot(QStringLiteral("alert-recovered.png")));
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        QVERIFY(text);
+        QTest::mouseClick(text->viewport(), Qt::LeftButton);
+        QTRY_COMPARE(alerts->level(), EndpointAlertState::Normal);
+        QCOMPARE(window.windowIcon().cacheKey(), original);
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("连  接"));
+        QCOMPARE(window.windowIcon().cacheKey(), original);
+        QVERIFY(saveShot(QStringLiteral("alert-normal.png")));
+    }
+
+    void clientLeavingWarnsWithoutMarkingListenerFaulty()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.show();
+        auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(b);
+        b->findChild<QComboBox *>(QStringLiteral("portType"))->setCurrentIndex(PortDraft::TcpServer);
+        auto *address = b->findChild<QComboBox *>(QStringLiteral("server.address"));
+        address->setCurrentIndex(address->findData(QStringLiteral("0.0.0.0")));
+        QTcpServer reservation;
+        QVERIFY(reservation.listen(QHostAddress::LocalHost, 0));
+        const auto port = reservation.serverPort();
+        reservation.close();
+        b->findChild<QSpinBox *>(QStringLiteral("server.port"))->setValue(port);
+        auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        auto *alerts = window.findChild<EndpointAlertState *>(QStringLiteral("endpointAlertsB"));
+        action->click();
+        QTRY_COMPARE(action->text(), QStringLiteral("停  止"));
+        QCOMPARE(alerts->level(), EndpointAlertState::Normal); // 无客户端不是故障。
+        QTcpSocket peer;
+        peer.connectToHost(QHostAddress::LocalHost, port);
+        QTRY_COMPARE(peer.state(), QAbstractSocket::ConnectedState);
+        QTest::qWait(50);
+        peer.abort();
+        QTRY_COMPARE(alerts->level(), EndpointAlertState::Warning);
+        QVERIFY(!alerts->hasFault());
+        QCOMPARE(alerts->entries().last().issue, Traffic::Issue::PeerDisconnected);
+        QCOMPARE(action->text(), QStringLiteral("停  止"));
+        action->click();
+        QTRY_COMPARE(alerts->level(), EndpointAlertState::Normal);
+    }
+
+    void endpointAlertsKeepIdentityAndAggregateIndependently()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        const auto original = window.windowIcon().cacheKey();
+        auto *a = window.findChild<EndpointAlertState *>(QStringLiteral("endpointAlertsA"));
+        auto *b = window.findChild<EndpointAlertState *>(QStringLiteral("endpointAlertsB"));
+        QVERIFY(a && b);
+        const QIcon normalIcon = window.windowIcon();
+        b->report(Traffic::Issue::DataLoss, QStringLiteral("B 单次发送失败"));
+        QCOMPARE(a->level(), EndpointAlertState::Normal);
+        const auto warning = window.windowIcon().cacheKey();
+        const QIcon warningIcon = window.windowIcon();
+        QVERIFY(warning != original);
+        a->report(Traffic::Issue::EndpointFailure, QStringLiteral("A 串口拔出"));
+        const auto error = window.windowIcon().cacheKey();
+        QVERIFY(error != warning);
+        const QIcon errorIcon = window.windowIcon();
+        const auto artifactDir = qEnvironmentVariable("QQCOM_UI_ARTIFACT_DIR");
+        if (!artifactDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(artifactDir));
+            QVERIFY(normalIcon.pixmap(128, 128).save(artifactDir + QStringLiteral("/icon-normal.png")));
+            QVERIFY(warningIcon.pixmap(128, 128).save(artifactDir + QStringLiteral("/icon-warning.png")));
+            QVERIFY(errorIcon.pixmap(128, 128).save(artifactDir + QStringLiteral("/icon-error.png")));
+        }
+        for (const int size : {16, 32, 64, 256}) {
+            const auto normalImage = normalIcon.pixmap(QSize(size, size), 1.0).toImage();
+            const auto errorImage = errorIcon.pixmap(QSize(size, size), 1.0).toImage();
+            const auto warningImage = warningIcon.pixmap(QSize(size, size), 1.0).toImage();
+            QCOMPARE(errorImage.size(), normalImage.size());
+            QCOMPARE(warningImage.size(), normalImage.size());
+            int recolored = 0;
+            for (int y = 0; y < normalImage.height(); ++y)
+                for (int x = 0; x < normalImage.width(); ++x) {
+                    QCOMPARE(errorImage.pixelColor(x, y).alpha(), normalImage.pixelColor(x, y).alpha());
+                    const auto pixel = normalImage.pixelColor(x, y);
+                    if (pixel.red() > 245 && pixel.red() == pixel.green() && pixel.green() == pixel.blue())
+                        QCOMPARE(errorImage.pixelColor(x, y), pixel); // 白色图案保持可辨。
+                    if (pixel.alpha() > 128 && pixel.hsvSaturation() > 120) {
+                        // 原图全部有色区域都必须换色，避免只在局部叠一块告警色。
+                        const auto red = errorImage.pixelColor(x, y);
+                        QVERIFY(red.red() > red.green() && red.red() > red.blue());
+                        const auto yellow = warningImage.pixelColor(x, y);
+                        QVERIFY(yellow.red() > yellow.green() && yellow.green() > yellow.blue());
+                        ++recolored;
+                    }
+                }
+            QVERIFY(recolored > size * size / 5);
+        }
+        b->acknowledge();
+        QCOMPARE(window.windowIcon().cacheKey(), error);
+        a->acknowledge();
+        QCOMPARE(a->level(), EndpointAlertState::Normal);
+        QCOMPARE(window.windowIcon().cacheKey(), original);
+        for (const auto *badge : window.findChildren<QLabel *>(QStringLiteral("EndpointBadge")))
+            QCOMPARE(badge->text(), badge->property("port").toString());
+        a->stopByUser();
+        QCOMPARE(window.windowIcon().cacheKey(), original);
+    }
+
+    void endpointEditsAcknowledgeOnlyTheirEndpoint()
+    {
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.show();
+        const auto original = window.windowIcon().cacheKey();
+        auto *a = window.findChild<EndpointAlertState *>(QStringLiteral("endpointAlertsA"));
+        auto *b = window.findChild<EndpointAlertState *>(QStringLiteral("endpointAlertsB"));
+        auto *selectorA = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointA"));
+        auto *selectorB = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(a && b && selectorA && selectorB);
+        auto *port = selectorB->findChild<QSpinBox *>(QStringLiteral("server.port"));
+        auto *action = selectorB->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(port && action);
+        QTcpServer blocker;
+        QVERIFY(blocker.listen(QHostAddress::AnyIPv4, 0));
+        port->setValue(blocker.serverPort());
+        action->click();
+        QTRY_COMPARE(b->level(), EndpointAlertState::Error);
+        a->report(Traffic::Issue::EndpointFailure, QStringLiteral("A 设备拔出"));
+
+        // 自动扫描以及草稿载入都不表示用户看过了，不能消掉提醒。
+        selectorA->setSerialPorts({});
+        selectorB->setSerialPorts({});
+        selectorB->setDraft(selectorB->draft());
+        QCOMPARE(a->level(), EndpointAlertState::Error);
+        QCOMPARE(b->level(), EndpointAlertState::Error);
+        auto *baud = selectorA->findChild<QComboBox *>(QStringLiteral("serial.baud"));
+        QVERIFY(baud);
+        baud->setCurrentText(baud->currentText() == QStringLiteral("9600")
+            ? QStringLiteral("115200") : QStringLiteral("9600"));
+        QCOMPARE(a->level(), EndpointAlertState::Normal);
+        QCOMPARE(b->level(), EndpointAlertState::Error);
+        port->setValue(port->value() == 65535 ? 65534 : port->value() + 1);
+        QCOMPARE(b->level(), EndpointAlertState::Normal);
+        QVERIFY(b->hasFault());
+        QCOMPARE(window.windowIcon().cacheKey(), original);
+        port->setValue(blocker.serverPort());
+
+        // 用户手动再试一次：先消旧提醒，再次失败才重新提醒。
+        QSignalSpy attention(b, &EndpointAlertState::attentionRequested);
+        action->click();
+        QCOMPARE(b->level(), EndpointAlertState::Normal);
+        QTRY_COMPARE(b->level(), EndpointAlertState::Error);
+        QCOMPARE(attention.size(), 1);
+        a->beginUserAttempt();
+        a->report(Traffic::Issue::EndpointFailure, QStringLiteral("A 仍未打开"));
+        port->setValue(port->value() == 65535 ? 65534 : port->value() + 1);
+        QCOMPARE(b->level(), EndpointAlertState::Normal);
+        QCOMPARE(a->level(), EndpointAlertState::Error);
+    }
+
+    void windowInteractionAcknowledgesAlertsWithoutChangingConnection_data()
+    {
+        QTest::addColumn<QString>("interaction");
+        QTest::newRow("click") << QStringLiteral("click");
+        QTest::newRow("activate") << QStringLiteral("activate");
+        QTest::newRow("key") << QStringLiteral("key");
+    }
+
+    void windowInteractionAcknowledgesAlertsWithoutChangingConnection()
+    {
+        QFETCH(QString, interaction);
+        clearEndpointDrafts();
+        MainWindow window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.show();
+        QTest::qWait(30);
+        const auto original = window.windowIcon().cacheKey();
+        auto *a = window.findChild<EndpointAlertState *>(QStringLiteral("endpointAlertsA"));
+        auto *b = window.findChild<EndpointAlertState *>(QStringLiteral("endpointAlertsB"));
+        auto *selector = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        auto *model = window.findChild<TrafficModel *>();
+        QVERIFY(a && b && selector && model);
+        QVERIFY(!window.findChild<QToolButton *>(QStringLiteral("endpointAlert")));
+        selector->findChild<QComboBox *>(QStringLiteral("portType"))->setCurrentIndex(PortDraft::TcpClient);
+        selector->findChild<QCheckBox *>(QStringLiteral("autoRecover"))->setChecked(false);
+        QTcpServer listener;
+        QVERIFY(listener.listen(QHostAddress::LocalHost, 0));
+        selector->findChild<QComboBox *>(QStringLiteral("client.host"))->setCurrentText(QStringLiteral("127.0.0.1"));
+        selector->findChild<QSpinBox *>(QStringLiteral("client.port"))->setValue(listener.serverPort());
+        auto *action = selector->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        action->click();
+        QTRY_VERIFY(listener.hasPendingConnections());
+        auto *peer = listener.nextPendingConnection();
+        QVERIFY(peer);
+        QTRY_COMPARE(action->text(), QStringLiteral("断  开"));
+        peer->abort();
+        QTRY_COMPARE(b->level(), EndpointAlertState::Error);
+        QTRY_COMPARE(action->text(), QStringLiteral("连  接"));
+        QTRY_VERIFY(model->rowCount() > 0
+            && model->record(model->rowCount() - 1).direction == Traffic::Direction::Error);
+        a->report(Traffic::Issue::DataLoss, QStringLiteral("A 发送失败"));
+        QVERIFY(window.windowIcon().cacheKey() != original);
+
+        // 刷新、悬停和其他窗口的输入都不确认本窗口的告警。
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        QVERIFY(text);
+        QTest::mouseMove(text->viewport(), QPoint(10, 10));
+        QLineEdit unrelated;
+        QTest::keyClicks(&unrelated, QStringLiteral("x"));
+        QCOMPARE(unrelated.text(), QStringLiteral("x"));
+        QCOMPARE(b->level(), EndpointAlertState::Error);
+        QCOMPARE(a->level(), EndpointAlertState::Warning);
+        const int rows = model->rowCount();
+        const QString reason = model->record(rows - 1).statusText;
+        auto *note = window.findChild<QLabel *>(QStringLiteral("StatusNote"));
+        QVERIFY(note && note->text().contains(QStringLiteral("断开")));
+        const QString noteText = note->text();
+
+        if (interaction == QLatin1String("click")) {
+            auto *wrap = window.findChild<QPushButton *>(QStringLiteral("viewAutoWrap"));
+            QVERIFY(wrap);
+            const bool before = wrap->isChecked();
+            QTest::mouseClick(wrap, Qt::LeftButton);
+            QCOMPARE(wrap->isChecked(), !before); // 确认提醒不吞掉原有点击。
+        } else if (interaction == QLatin1String("activate")) {
+            QEvent activate(QEvent::WindowActivate);
+            QCoreApplication::sendEvent(&window, &activate);
+        } else {
+            auto *editor = window.findChild<QPlainTextEdit *>(QStringLiteral("sendEditor"));
+            QVERIFY(editor);
+            editor->clear();
+            QTest::keyClicks(editor, QStringLiteral("x"));
+            QCOMPARE(editor->toPlainText(), QStringLiteral("x"));
+        }
+        QCOMPARE(a->level(), EndpointAlertState::Normal);
+        QCOMPARE(b->level(), EndpointAlertState::Normal);
+        QVERIFY(!a->blinking() && !b->blinking());
+        QCOMPARE(window.windowIcon().cacheKey(), original);
+        QVERIFY(b->hasFault()); // 消色不冒充重连成功，也不启动自动恢复。
+        QCOMPARE(action->text(), QStringLiteral("连  接"));
+        QVERIFY(!action->property("recovering").toBool());
+        QCOMPARE(model->rowCount(), rows);
+        QCOMPARE(model->record(rows - 1).statusText, reason);
+        QCOMPARE(note->text(), noteText);
+        b->report(Traffic::Issue::EndpointFailure, QStringLiteral("同次故障的后续结果"));
+        QCOMPARE(b->level(), EndpointAlertState::Normal);
+        QVERIFY(!b->blinking());
+        b->beginUserAttempt();
+        b->report(Traffic::Issue::EndpointFailure, QStringLiteral("新的手动连接失败"));
+        QCOMPARE(b->level(), EndpointAlertState::Error); // 新故障仍可重新提醒。
+    }
+
+    void eventOptionsFollowPrefixAndRememberChoices()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        PreferencesStore store(nullptr, dir.filePath(QStringLiteral("preferences.ini")));
+        const QStringList names{QStringLiteral("showInfo"), QStringLiteral("showWarning"),
+            QStringLiteral("showError"), QStringLiteral("showState")};
+        const QStringList keys{QStringLiteral("filter/info"), QStringLiteral("filter/warning"),
+            QStringLiteral("filter/error"), QStringLiteral("filter/state")};
+        const QList<bool> choices{false, true, true, false};
+        {
+            TrafficPanel panel;
+            panel.setPreferences(&store);
+            auto *prefix = panel.findChild<QAction *>(QStringLiteral("prefix"));
+            QVERIFY(prefix && prefix->isChecked());
+            for (int i = 0; i < names.size(); ++i) {
+                auto *event = panel.findChild<QAction *>(names.at(i));
+                QVERIFY(event && event->isEnabled());
+                event->setChecked(choices.at(i));
+            }
+            for (int n = 0; n < 2; ++n) {
+                prefix->setChecked(false);
+                for (int i = 0; i < names.size(); ++i) {
+                    auto *event = panel.findChild<QAction *>(names.at(i));
+                    QVERIFY(!event->isChecked());
+                    QVERIFY(!event->isEnabled());
+                    QCOMPARE(store.value(keys.at(i)).toBool(), choices.at(i));
+                }
+                prefix->setChecked(true);
+                for (int i = 0; i < names.size(); ++i) {
+                    auto *event = panel.findChild<QAction *>(names.at(i));
+                    QVERIFY(event->isEnabled());
+                    QCOMPARE(event->isChecked(), choices.at(i));
+                }
+            }
+            prefix->setChecked(false);
+        }
+        // 纯数据下退出重进，仍置灰但不能丢掉原来的分类选择。
+        TrafficPanel restored;
+        restored.setPreferences(&store);
+        restored.setPreferences(&store); // 已是纯数据时再次载入同样有效。
+        auto *prefix = restored.findChild<QAction *>(QStringLiteral("prefix"));
+        QVERIFY(prefix && !prefix->isChecked());
+        for (const auto &name : names) {
+            auto *event = restored.findChild<QAction *>(name);
+            QVERIFY(event && !event->isEnabled() && !event->isChecked());
+        }
+        prefix->setChecked(true);
+        for (int i = 0; i < names.size(); ++i)
+            QCOMPARE(restored.findChild<QAction *>(names.at(i))->isChecked(), choices.at(i));
+        prefix->setChecked(false);
+        auto *reset = restored.findChild<QPushButton *>(QStringLiteral("filterReset"));
+        QVERIFY(reset && reset->isEnabled());
+        reset->click();
+        for (int i = 0; i < names.size(); ++i) {
+            auto *event = restored.findChild<QAction *>(names.at(i));
+            QVERIFY(!event->isEnabled() && !event->isChecked());
+            QVERIFY(store.value(keys.at(i)).toBool());
+        }
+        prefix->setChecked(true);
+        for (const auto &name : names) {
+            auto *event = restored.findChild<QAction *>(name);
+            QVERIFY(event->isEnabled() && event->isChecked());
+        }
+    }
+
     void initTestCase()
     {
         QApplication::setStyle("Fusion");
@@ -336,7 +1057,7 @@ private slots:
 
         model.replaceRecords({sample(1, portA, 0, Traffic::Direction::Receive, QByteArray::fromHex("007fff")),
             sample(2, portB, 1, Traffic::Direction::Transmit, "hello")});
-        // 用例统一按 HEX 格式判定（面板默认格式），断言走静态 accepts。
+        // 用例统一按 HEX 格式判定，断言走静态 accepts。
         const auto accepted = [&model](const TrafficFilter::Options &options) {
             int count = 0;
             for (int i = 0; i < model.rowCount(); ++i)
@@ -1934,7 +2655,7 @@ private slots:
         auto *panel = forwardWindow.findChild<TrafficPanel *>();
         QVERIFY(panel);
         panel->setPreferences(nullptr);
-        // 默认格式是 HEX，正文不会出现 "bridged" 这几个字母。
+        // 显式使用文本格式，避免已有偏好影响正文断言。
         forwardWindow.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
             ->setCurrentText(QStringLiteral("UTF-8"));
         auto *portA = forwardWindow.findChild<QPushButton *>(QStringLiteral("showPortA"));
@@ -2291,7 +3012,7 @@ private slots:
             QVERIFY(wrap && rx && format && sendFormat && enterToSend && clearOnEnter && editor);
             wrap->setChecked(false);
             rx->setChecked(false);
-            format->setCurrentText(QStringLiteral("UTF-8"));
+            format->setCurrentText(QStringLiteral("HEX"));
             sendFormat->setCurrentText(QStringLiteral("GBK"));
             enterToSend->setChecked(true);
             clearOnEnter->setChecked(true);
@@ -2307,7 +3028,7 @@ private slots:
             QCOMPARE(secondTraffic.findChild<QAction *>(QStringLiteral("autoWrap"))->isChecked(), false);
             QCOMPARE(secondTraffic.findChild<QPushButton *>(QStringLiteral("filterRx"))->isChecked(), false);
             QCOMPARE(secondTraffic.findChild<QComboBox *>(QStringLiteral("trafficFormat"))->currentText(),
-                     QStringLiteral("UTF-8"));
+                     QStringLiteral("HEX"));
             QCOMPARE(secondSender.findChild<QComboBox *>(QStringLiteral("sendFormat"))->currentText(),
                      QStringLiteral("GBK"));
             QCOMPARE(secondSender.findChild<QPushButton *>(QStringLiteral("enterToSend"))->isChecked(), true);
@@ -2365,7 +3086,8 @@ private slots:
         auto *record = panel.findChild<QAction *>(QStringLiteral("recordTraffic"));
         auto *format = panel.findChild<QComboBox *>(QStringLiteral("trafficFormat"));
         QVERIFY(record && format);
-        QCOMPARE(format->currentText(), QStringLiteral("HEX"));
+        QCOMPARE(format->currentText(), QStringLiteral("UTF-8"));
+        format->setCurrentText(QStringLiteral("HEX")); // 先验证 HEX 日志，再切回文本。
 
         // 本次实际写入的文件 = 模板基名 + 时间戳 + 扩展名，落在同一目录。
         const auto currentLogFile = [&directory]() -> QString {
@@ -2559,11 +3281,11 @@ private slots:
         QCOMPARE(secondLines.at(1), QStringLiteral("# Time\tPort\tPeer\tDirection\tData"));
 
         // ---- C5：切换显示格式 → 当前文件追加一行 # 格式切换 → ... ----
-        format->setCurrentText(QStringLiteral("UTF-8"));
+        format->setCurrentText(QStringLiteral("HEX"));
         const QStringList afterSwitch = readLines(secondLog);
         QCOMPARE(afterSwitch.size(), 3); // 元信息 + 列名 + 格式切换
         QVERIFY2(afterSwitch.last().startsWith(QStringLiteral("# 格式切换 → ")), qPrintable(afterSwitch.last()));
-        QVERIFY(afterSwitch.last().contains(QStringLiteral("UTF-8")));
+        QVERIFY(afterSwitch.last().contains(QStringLiteral("HEX")));
 
         // ================= D：独立反证（不重跑工程师走过的路径） =================
         // D②：同一秒内重开撞名 → 基名-stamp-2.后缀，而不是覆盖。系统时钟无法冻结，
@@ -4252,8 +4974,16 @@ private slots:
     // 成对路径，必须合并成一条，且留下的那条读得出是什么错。走 TCP 客户端真实路径：
     // 连上本地监听、再让对端 abort，客户端应只多出一条 Error 行（含"断开"），且不多出 State 行。
     // 若把合并判断改回"从不合并"，State 行会多出 1 条 → 变红。
+    void endpointRuntimeDisconnectAlsoCollapsesToOneLogLine_data()
+    {
+        QTest::addColumn<bool>("graceful");
+        QTest::newRow("server-closes") << true;
+        QTest::newRow("server-aborts") << false;
+    }
+
     void endpointRuntimeDisconnectAlsoCollapsesToOneLogLine()
     {
+        QFETCH(bool, graceful);
         clearEndpointDrafts();
         MainWindow window;
         window.setAttribute(Qt::WA_DontShowOnScreen);
@@ -4264,6 +4994,14 @@ private slots:
         auto *model = window.findChild<TrafficModel *>();
         auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
         QVERIFY(model && b);
+        auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
+        auto *prefix = window.findChild<QAction *>(QStringLiteral("prefix"));
+        QVERIFY(text && prefix);
+        prefix->setChecked(false);
+        for (const auto *name : {"showInfo", "showWarning", "showError", "showState"}) {
+            auto *event = window.findChild<QAction *>(QString::fromLatin1(name));
+            QVERIFY(event && !event->isChecked() && !event->isEnabled());
+        }
         auto *type = b->findChild<QComboBox *>(QStringLiteral("portType"));
         QVERIFY(type);
         type->setCurrentIndex(PortDraft::TcpClient); // 0 串口 / 1 TCP 客户端 / 2 TCP 服务器 / 3 UDP
@@ -4294,7 +5032,8 @@ private slots:
         const int errorsBefore = countRows(Traffic::Direction::Error);
         const int statesBefore = countRows(Traffic::Direction::State);
 
-        peer->abort(); // 模拟对端异常掉线（运行中出错关闭）
+        if (graceful) peer->disconnectFromHost();
+        else peer->abort();
 
         QTRY_COMPARE(countRows(Traffic::Direction::Error), errorsBefore + 1);
         // ★ 成对的 Closed 被并进那条 Error：不得再多出一条 State 行。
@@ -4308,6 +5047,15 @@ private slots:
             qPrintable(QStringLiteral("错误行应读出断开原因：") + lastError));
         // 端点回到 Closed：动作按钮可再次"连接"。
         QTRY_COMPARE(action->text(), QStringLiteral("连  接"));
+        QCOMPARE(text->toPlainText(), QString()); // 纯数据隐藏事件，但模型记录必须还在。
+        prefix->setChecked(true);
+        QTRY_VERIFY(text->toPlainText().contains(lastError));
+        QCOMPARE(countRows(Traffic::Direction::Error), errorsBefore + 1);
+        auto *showError = window.findChild<QAction *>(QStringLiteral("showError"));
+        showError->setChecked(false);
+        QTRY_VERIFY(!text->toPlainText().contains(lastError));
+        showError->setChecked(true);
+        QTRY_VERIFY(text->toPlainText().contains(lastError));
         for (auto *box : window.findChildren<QMessageBox *>())
             box->close();
     }
@@ -4360,17 +5108,26 @@ private slots:
         };
         QTRY_VERIFY(countErrors() >= 1);
         const int errorsWhileWaiting = countErrors();
+        auto *alerts = window.findChild<EndpointAlertState *>(QStringLiteral("endpointAlertsB"));
+        QVERIFY(alerts);
+        QCOMPARE(alerts->level(), EndpointAlertState::Error);
+        alerts->acknowledge();
+        QCOMPARE(alerts->level(), EndpointAlertState::Normal);
         QTest::qWait(1500);
         QCOMPARE(action->text(), QStringLiteral("等待中"));
         QCOMPARE(statusB->text(), QStringLiteral("等待恢复"));
         // 第一次失败已经说明原因，后续每拍不再追加错误行。
         QCOMPARE(countErrors(), errorsWhileWaiting);
+        QCOMPARE(alerts->level(), EndpointAlertState::Normal);
+        QVERIFY(!alerts->blinking());
 
         QVERIFY2(listener.listen(QHostAddress::LocalHost, port),
             qPrintable(listener.errorString()));
         QTRY_VERIFY_WITH_TIMEOUT(listener.hasPendingConnections(), 4000);
         QTRY_COMPARE(action->text(), QStringLiteral("断  开"));
         QVERIFY(b->draft().autoRecover);
+        QTRY_VERIFY_WITH_TIMEOUT(!alerts->hasFault(), 3500);
+        QCOMPARE(alerts->level(), EndpointAlertState::Normal);
 
         action->click();
         QTRY_COMPARE(action->text(), QStringLiteral("连  接"));
@@ -4800,7 +5557,7 @@ private slots:
         QCOMPARE(trafficFormat->count(), formats.size());
         for (int i = 0; i < formats.size(); ++i)
             QCOMPARE(trafficFormat->itemText(i), PayloadCodec::formatName(formats.at(i)));
-        QCOMPARE(trafficFormat->currentText(), QStringLiteral("HEX"));
+        QCOMPARE(trafficFormat->currentText(), QStringLiteral("UTF-8"));
         auto *splitterProbe = window.findChild<QSplitter *>("dataSplitter");
         QVERIFY(splitterProbe);
         qInfo("SPLITPROBE sizes=%d/%d mins=%d/%d hints=%d/%d",
@@ -5201,6 +5958,8 @@ private slots:
         window.resize(1280, 720);
         window.show();
         window.findChild<TrafficPanel *>()->setPreferences(nullptr);
+        window.findChild<QComboBox *>(QStringLiteral("trafficFormat"))
+            ->setCurrentText(QStringLiteral("HEX")); // 本用例按固定字节内容核对首行。
         auto *text = window.findChild<TrafficTextView *>(QStringLiteral("trafficText"));
         auto *model = window.findChild<TrafficModel *>();
         auto *follow = window.findChild<QPushButton *>(QStringLiteral("followTraffic"));
@@ -7017,6 +7776,10 @@ private slots:
         window.show();
         QTest::qWait(30);
 
+        const auto originalIcon = window.windowIcon().cacheKey();
+        auto *alerts = window.findChild<EndpointAlertState *>(QStringLiteral("endpointAlertsB"));
+        QVERIFY(alerts);
+
         auto *b = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
         QVERIFY(b);
         b->findChild<QComboBox *>(QStringLiteral("portType"))->setCurrentIndex(PortDraft::Udp);
@@ -7045,7 +7808,27 @@ private slots:
         auto *statusB = window.findChildren<QLabel *>(QStringLiteral("EndpointState")).value(1);
         QVERIFY(statusB);
         QTRY_COMPARE(statusB->text(), QStringLiteral("等待恢复"));
+        QCOMPARE(alerts->level(), EndpointAlertState::Error);
 
+        // 真正渲染两套主题，避免属性正确却仍画成蓝色或橙色。
+        for (const auto mode : {AppTheme::Mode::Light, AppTheme::Mode::Dark}) {
+            AppTheme::setMode(mode);
+            const QImage shot = action->grab().toImage();
+            int yellow = 0;
+            for (int y = 0; y < shot.height(); ++y)
+                for (int x = 0; x < shot.width(); ++x) {
+                    const auto c = shot.pixelColor(x, y);
+                    if (c.red() > 200 && c.green() > 180 && c.blue() < 90) ++yellow;
+                }
+            QVERIFY2(yellow > shot.width() * shot.height() / 4, "等待中按钮应为黄色");
+            const auto dir = qEnvironmentVariable("QQCOM_UI_ARTIFACT_DIR");
+            if (!dir.isEmpty()) {
+                QVERIFY(QDir().mkpath(dir));
+                QVERIFY(window.grab().save(dir + (mode == AppTheme::Mode::Dark
+                    ? QStringLiteral("/waiting-dark.png") : QStringLiteral("/waiting-light.png"))));
+            }
+        }
+        AppTheme::setMode(AppTheme::Mode::Light);
         action->click();
         QTRY_COMPARE(action->text(), QStringLiteral("绑  定"));
         QCOMPARE(action->property("recovering").toBool(), false);
@@ -7055,6 +7838,8 @@ private slots:
         QCOMPARE(action->text(), QStringLiteral("绑  定"));
         QCOMPARE(statusB->text(), QStringLiteral("未连接"));
         QVERIFY(b->draft().autoRecover);
+        QCOMPARE(alerts->level(), EndpointAlertState::Normal);
+        QCOMPARE(window.windowIcon().cacheKey(), originalIcon);
     }
 
     // 桥接转发的日志必须先记本端收到，再记对端转发写出。

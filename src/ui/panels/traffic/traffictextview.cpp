@@ -733,7 +733,7 @@ void TrafficTextView::enforceCharBudget()
     syncGutter();
 }
 
-void TrafficTextView::clearAll()
+void TrafficTextView::clearAll(int expectedRecords)
 {
     const GutterFreeze freeze(this, true);
     document()->clear(); // maximumBlockCount 是文档属性，clear() 不重置它
@@ -741,6 +741,7 @@ void TrafficTextView::clearAll()
     m_markBegin = 0;
     m_nextNumber = 1;
     m_entryNumber = 1;
+    m_expectedRecords = qMax(0, expectedRecords);
     m_releasedBlocks = 0; // 清空是新会话：释放计数跟着归零
     m_ansiPending.clear();
     m_ansiReady = false;
@@ -761,10 +762,10 @@ void TrafficTextView::syncGutter()
 {
     // 追加还没把行号表收口时不刷。外层解开时会再进来一次。
     if (m_gutterFreeze > 0) return;
-    // 宽度只看还在屏幕上的最大行号位数，不看已经淘汰掉的累计。
+    // 重建预留预计位数，随后随实际最大号增长；不为每个新增位数重排整份大文档。
     // 续行不占号，最大号是下一条将要写的号减一。最少两位。
     // 位数变多时按这个号加宽，9 进 10、99 进 100 时正文跟着让一列。
-    const quint64 last = qMax(quint64(1), m_entryNumber - 1);
+    const quint64 last = qMax(qMax(quint64(1), m_entryNumber - 1), m_expectedRecords);
     int digits = 1;
     for (quint64 value = last; value >= 10 && digits < 20; value /= 10)
         ++digits;

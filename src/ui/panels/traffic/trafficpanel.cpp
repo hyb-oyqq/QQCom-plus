@@ -59,13 +59,13 @@ QString defaultLogTemplate()
 // "卡一下"，又足够把同一轮操作里的多次变化合成一次。
 constexpr int ReprojectDebounceMs = 50;
 
-// 超过这个条数才值得亮等待光标：更少的量重投影只要几十毫秒，
-// 闪一下光标反而比等待更烦人。
-constexpr int ReprojectWaitCursorRows = 8000;
-
 // 真实消息到达的攒批窗口：一帧左右的时间足够把同一次 readyRead 的多条消息
 // 合成一个插入通知；再长会让人感觉记录"迟一拍"。
 constexpr int FlushIntervalMs = 16;
+constexpr qsizetype AppendBatchRows = 512;
+constexpr qsizetype AppendBatchBytes = 64 * 1024;
+constexpr int ProjectionBatchRows = 256;
+constexpr int ProjectionSliceMs = 6;
 
 // 性能心跳：250 ms 一拍、8 拍一个窗口（2 秒）。这个频率下心跳自身几乎不占成本，
 // 而"界面线程被长任务占住"会直接表现为心跳迟到——迟滞因此是用户感知卡顿的直接代理量。
@@ -104,6 +104,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 显示格式与发送区共用 PayloadCodec 的同一套解析/渲染规则。
     for (const auto format : PayloadCodec::formats())
         m_format->addItem(PayloadCodec::formatName(format));
+    m_format->setCurrentIndex(PayloadCodec::formats().indexOf(PayloadCodec::Format::Utf8));
     fitComboToItems(m_format);
     top->addWidget(m_format);
 
@@ -170,6 +171,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
         "信息、警告、错误、状态写成 I、W、E、S。\n"
         "关掉后是纯数据：接收字节连续接在上一包后面，换行只来自数据自身。"
         "发送、信息、警告、错误、状态和 HEX 都不显示。打开失败会写在端口行上。\n"
+        "信息、警告、错误、状态四项会取消勾选并置灰，重新打开前缀后恢复之前的选择。\n"
         "行号在左侧，浅灰色。端口用行号旁的短色标区分，A 为琥珀色，B 为青色。"
         "正文保留数据自己的颜色。"
         "再次勾上后，纯数据期间没显示的行会重新出现。"));
@@ -209,19 +211,19 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_showInfoAction = rowToggle("showInfo", tr("显示信息"), true);
     m_showInfoAction->setToolTip(tr(
         "显示信息，前缀为 I。例如首次出现的 UDP 来源、接入的客户端，以及打开「提示日志」后的组帧说明。"
-        "纯数据时不出现在数据区。勾上「显示前缀」后按本项显示。"));
+        "关闭「显示前缀」时取消勾选且不可选；打开前缀后恢复之前的选择。"));
     m_showWarningAction = rowToggle("showWarning", tr("显示警告"), true);
     m_showWarningAction->setToolTip(tr(
         "显示警告，前缀为 W。例如串口消失后等待它重新出现再自动打开。"
-        "纯数据时不出现在数据区。勾上「显示前缀」后按本项显示。"));
+        "关闭「显示前缀」时取消勾选且不可选；打开前缀后恢复之前的选择。"));
     m_showErrorAction = rowToggle("showError", tr("显示错误"), true);
     m_showErrorAction->setToolTip(tr(
         "显示错误，前缀为 E。例如打开失败、设备错误、连接断开和丢弃未写出的数据。"
-        "纯数据时不出现在数据区。打开失败写在该端口行上，直到打开成功或改了参数；底部状态栏也会短时用红色提示。勾上「显示前缀」后按本项显示。"));
+        "关闭「显示前缀」时取消勾选且不可选；打开前缀后恢复之前的选择。端口告警和日志文件仍保留错误原因。"));
     m_showStateAction = rowToggle("showState", tr("显示状态"), true);
     m_showStateAction->setToolTip(tr(
         "显示状态，前缀为 S。例如端口打开、关闭，以及桥接建立、停止。"
-        "纯数据时不出现在数据区。勾上「显示前缀」后按本项显示。"));
+        "关闭「显示前缀」时取消勾选且不可选；打开前缀后恢复之前的选择。"));
 
     // 显示开关（前缀 / 颜色 / HEX / 换行）常驻顶栏，紧跟方向开关之后：
     // 都是"随手切一下"的外观项目，频次高到不该藏在菜单里两步。顶上的是同一批
@@ -354,12 +356,15 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     m_reprojectTimer = new QTimer(this);
     m_reprojectTimer->setSingleShot(true);
     m_reprojectTimer->setInterval(ReprojectDebounceMs);
+    m_projectionTimer = new QTimer(this);
+    m_projectionTimer->setSingleShot(true);
+    connect(m_projectionTimer, &QTimer::timeout, this, &TrafficPanel::advanceProjection);
     // 排上队之后外观又被改回去的情况很常见（连点两下开关），落定时再确认一次，
     // 避免做一次结果与当前外观无关的白工。
     connect(m_reprojectTimer, &QTimer::timeout, this, [this] {
         // 外观路径：关键词仍用上次已应用的条件。事件开关和行前缀一样，落定时时用当前值。
         // 也不播报"已按当前条件重投影"那句（会撒谎）。
-        if (appearanceChanged() || m_incrementalDiverged
+        if (isReprojecting() || appearanceChanged() || m_incrementalDiverged
             || m_projectedOptions.liveVisibilityDiffers(m_filterOptions))
             reprojectView(/*announce=*/false, /*applyCurrentConditions=*/false);
     });
@@ -394,9 +399,10 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(m_filterBar, &FilterBar::resetRequested, this, [this] {
         m_flags->restore(DirectionFlags());
         // 事件类型开关也要一并复位：条件分散在两个控件里，"回到不过滤"必须是整套动作。
+        for (auto &choice : m_eventChoices) choice = true;
         for (auto *action : {m_showInfoAction, m_showWarningAction, m_showErrorAction, m_showStateAction}) {
             const QSignalBlocker blocker(action);
-            action->setChecked(true);
+            action->setChecked(m_prefixAction->isChecked());
         }
         updateFilter();
         // **必须显式重投影**：updateFilter() 末尾的 scheduleReproject() 只在"外观变了"
@@ -442,6 +448,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     connect(toggleFilter, &QShortcut::activated, this,
         [this] { m_filterToggle->setChecked(!m_filterToggle->isChecked()); });
     connect(clear, &QPushButton::clicked, this, [this] {
+        cancelProjection();
         m_pending.clear();
         m_model->replaceRecords({});
         m_text->clearAll();
@@ -499,6 +506,7 @@ void TrafficPanel::setPorts(const QList<PortDraft> &ports)
 void TrafficPanel::loadExample(const QList<PortDraft> &ports)
 {
     if (ports.isEmpty()) return;
+    cancelProjection();
     // 构造真实形状的消息，而不是"看起来像"的占位数据：示例走的是与真实数据
     // 完全相同的筛选、格式化与导出路径，将来换了字段不会只有示例数据对不上。
     const auto start = QDateTime::currentDateTime().addSecs(-2);
@@ -527,6 +535,7 @@ void TrafficPanel::loadExample(const QList<PortDraft> &ports)
         records.append(message);
     }
     m_model->replaceRecords(records);
+    m_everProjected = false; // 整体替换数据后，旧视图的快照不能用于去重。
     // 示例也走同一条投影路径。视图是模型的投影，示例不该是例外：
     // 否则"切了显示设置有一批行不跟着变"、过滤条件对示例失效，两处都会让人以为坏了。
     // 载入示例的语义 = "让视图跟上当前条件"（applyCurrentConditions 为真）；
@@ -541,35 +550,49 @@ void TrafficPanel::appendMessages(const QList<Traffic::Message> &messages)
     // 逐条入模 + 滚动的事件开销与消息速率成正比；
     // 先攒进缓冲，16ms 一拍整批入模，插入通知次数与消息速率解耦。
     m_pending += messages;
-    if (!m_flushTimer->isActive()) m_flushTimer->start();
+    if (!m_flushTimer->isActive()) m_flushTimer->start(FlushIntervalMs);
 }
 
 void TrafficPanel::appendMessage(const Traffic::Message &message)
 {
     m_pending.append(message);
-    if (!m_flushTimer->isActive()) m_flushTimer->start();
+    if (!m_flushTimer->isActive()) m_flushTimer->start(FlushIntervalMs);
 }
 
 void TrafficPanel::flushPending()
 {
     if (m_pending.isEmpty()) return;
-    auto batch = std::move(m_pending);
-    m_pending.clear();
+    // 突发到达时限制单轮工作量；剩余批次交还事件循环后继续，保持原顺序且不丢消息。
+    qsizetype count = 0;
+    qsizetype bytes = 0;
+    while (count < m_pending.size() && count < AppendBatchRows
+           && (count == 0 || bytes < AppendBatchBytes))
+        bytes += m_pending.at(count++).raw.size();
+    auto batch = m_pending.first(count);
+    m_pending.remove(0, count);
+    if (!m_pending.isEmpty()) m_flushTimer->start(0);
     // 这一批在界面线程上花了多久：心跳把它当"下一拍可能迟到多少"的预告量上报。
     // 只记窗口内最大值（见 updatePerformance），单批的瞬时值没有意义。
     QElapsedTimer work;
     work.start();
     // 模型从头部释放的条数要累加播报：安全阀触顶是"历史被裁了"的唯一证据，
     // 缓冲区裁剪必须提示，避免用户把显示遗漏误认为设备丢数据。
-    m_releasedRecords += static_cast<quint64>(m_model->appendRecords(batch));
+    const int released = m_model->appendRecords(batch);
+    m_releasedRecords += static_cast<quint64>(released);
+    if (m_projection) m_projection->row = qMax(0, m_projection->row - released);
     writeLog(batch); // 记录与显示同流：进模型的批次才落日志
     // 日志大小在写完这批后读一次（O(1)）：摘要里的"日志 X MB"由此刷新，
     // 不记录时 m_logBytes 保持 0，摘要自然不出现这段（只报状态，不做写满盘预警）。
     if (m_logFile) m_logBytes = m_logFile->size();
+    if (m_projection) {
+        // 重建期间只入模、记日志；重建游标会顺序读到新增记录，避免插入到历史中间。
+        m_lastBatchWorkMs = qMax(m_lastBatchWorkMs, work.elapsed());
+        return;
+    }
     // 文本视图按当前过滤条件逐条判定（TrafficFilter::Matcher 的唯一显示出口）。
     // 这是**增量路径**：只处理这一批新行，判定器是 updateFilter 里预编译好的，
     // 每条消息都不重新解释条件、也不重新编译正则。
-    // 增量路径让到达速率与文档规模完全解耦（实测每条 ~6 µs 渲染 + 一次 match）；
+    // 增量路径避免为每批消息重新遍历历史；实际布局耗时仍受文档规模影响。
     // 想改条件/外观后再看过去收到的内容，走的是 reprojectView 那条全量路径。
     const auto format = currentDisplayFormat();
     QList<Traffic::Message> accepted;
@@ -594,9 +617,13 @@ void TrafficPanel::flushPending()
     // 防抖还没把已有行收成当前外观时，这批已经按当前条件画上去了。
     // 若随后开关被拨回上次投影的值，scheduleReproject() 会看成"没变化"直接返回，
     // 定时器回调也一样，这批行就留在屏幕上。记下偏离，让那次排队仍然落地。
-    if (!accepted.isEmpty() && m_everProjected
-        && (appearanceChanged() || m_projectedOptions.liveVisibilityDiffers(m_filterOptions)))
-        m_incrementalDiverged = true;
+    if (m_everProjected) {
+        // 全部被临时条件挡住的批次也会造成偏离，恢复原条件后必须能补回。
+        if (m_projectedOptions != m_filterOptions) m_filterHistoryDiverged = true;
+        if (m_projectedOptions.liveVisibilityDiffers(m_filterOptions)
+            || (!accepted.isEmpty() && appearanceChanged()))
+            m_incrementalDiverged = true;
+    }
     m_lastBatchWorkMs = qMax(m_lastBatchWorkMs, work.elapsed());
     // 第一批数据按当前条件进了屏幕。此刻还没有「已应用」基线时，把当前条件记下来，
     // 后面改前缀、HEX、换行才不会把还没点「应用过滤」的关键词套到这些行上。
@@ -605,10 +632,10 @@ void TrafficPanel::flushPending()
 }
 
 // m_format 下标 → 格式枚举的唯一换算点：格式切换的过滤联动与日志落盘都从这里取，
-// 换算规则（越界退回 HEX）只维护这一份。
+// 换算规则（越界退回 UTF-8）只维护这一份。
 PayloadCodec::Format TrafficPanel::currentDisplayFormat() const
 {
-    return PayloadCodec::formats().value(m_format->currentIndex(), PayloadCodec::Format::Hex);
+    return PayloadCodec::formats().value(m_format->currentIndex(), PayloadCodec::Format::Utf8);
 }
 
 void TrafficPanel::toggleLogRecording(bool enabled)
@@ -880,6 +907,12 @@ void TrafficPanel::loadPreferences()
             m_preferences->value("filter/warnings", legacyEvents)).toBool());
         m_showErrorAction->setChecked(m_preferences->value("filter/error",
             m_preferences->value("filter/errors", legacyEvents)).toBool());
+        // 即使当前已是纯数据，也先读回用户在有前缀时的选择。
+        m_eventChoices[0] = m_showInfoAction->isChecked();
+        m_eventChoices[1] = m_showWarningAction->isChecked();
+        m_eventChoices[2] = m_showErrorAction->isChecked();
+        m_eventChoices[3] = m_showStateAction->isChecked();
+        m_eventOptionsActive = true;
     }
     FilterBarState filter;
     filter.caseSensitive = m_preferences->value("filter/caseSensitive", false).toBool();
@@ -904,6 +937,7 @@ void TrafficPanel::loadPreferences()
         ? m_preferences->value("traffic/prefix").toBool()
         : !m_preferences->value("traffic/pure", false).toBool();
     m_prefixAction->setChecked(prefixOn);
+    syncEventActions();
     // toggled 在值没变时不发。启动时前缀已是关掉的，要在这里把时间和长度、HEX 置灰。
     for (auto *action : {m_prefixTimestampAction, m_prefixLengthAction, m_alwaysShowHexAction})
         action->setEnabled(prefixOn);
@@ -1003,10 +1037,10 @@ FilterFlagsState TrafficPanel::filterFlagsState() const
     flags.rx = directions.rx;
     flags.tx = directions.tx;
     flags.forward = directions.forward;
-    if (m_showInfoAction) flags.infos = m_showInfoAction->isChecked();
-    if (m_showStateAction) flags.states = m_showStateAction->isChecked();
-    if (m_showWarningAction) flags.warnings = m_showWarningAction->isChecked();
-    if (m_showErrorAction) flags.errors = m_showErrorAction->isChecked();
+    if (m_showInfoAction) flags.infos = m_eventOptionsActive ? m_showInfoAction->isChecked() : m_eventChoices[0];
+    if (m_showWarningAction) flags.warnings = m_eventOptionsActive ? m_showWarningAction->isChecked() : m_eventChoices[1];
+    if (m_showErrorAction) flags.errors = m_eventOptionsActive ? m_showErrorAction->isChecked() : m_eventChoices[2];
+    if (m_showStateAction) flags.states = m_eventOptionsActive ? m_showStateAction->isChecked() : m_eventChoices[3];
     return flags;
 }
 
@@ -1022,6 +1056,7 @@ int TrafficPanel::activeFlagCount() const
 
 void TrafficPanel::updateFilter()
 {
+    syncEventActions();
     // 条件只有三个来源：顶栏的端点范围、方向开关（顶栏）+ 事件开关（显示设置）、
     // 第二行的条件条。三者都只是"收集条件"，判定在 Matcher 一处。端点不重复设条件——
     // A/B 按钮就是端点维度本身（设计稿 §3.1）。
@@ -1060,6 +1095,21 @@ void TrafficPanel::updateFilter()
     savePreferences(); // 过滤条件的汇聚点：任一条件变化即落盘
 }
 
+void TrafficPanel::syncEventActions()
+{
+    if (!m_showStateAction) return; // 构造期菜单尚未建完。
+    const bool enabled = m_prefixAction->isChecked();
+    const QList<QAction *> actions{m_showInfoAction, m_showWarningAction, m_showErrorAction, m_showStateAction};
+    for (int i = 0; i < actions.size(); ++i) {
+        auto *action = actions.at(i);
+        if (m_eventOptionsActive) m_eventChoices[i] = action->isChecked();
+        const QSignalBlocker blocker(action);
+        action->setEnabled(enabled);
+        action->setChecked(enabled && m_eventChoices[i]);
+    }
+    m_eventOptionsActive = enabled;
+}
+
 void TrafficPanel::setFilterExpanded(bool expanded)
 {
     m_filterExpanded = expanded;
@@ -1085,99 +1135,110 @@ void TrafficPanel::refreshFilterToggle()
 
 void TrafficPanel::reprojectView(bool announce, bool applyCurrentConditions)
 {
-    // 视图与条件取得一致的唯一入口。它同时承担两件事：
-    //   ① 外观（显示设置 / 编码格式）变化 —— 改"每行长什么样"。它只用**上次已应用的条件**
-    //      （m_projectedOptions），因此**不会把未应用的条件套到历史上**；但候选项里含
-    //      "按当前显示格式渲染的文本"（见 TrafficFilter::Matcher），所以**只在某格式专属
-    //      渲染里命中的条件**（DEC / BASE64 / 转义字节等）会随编码格式移动命中的行。这是
-    //      "同一条件在新渲染下的重新求值"，不是条件被换掉——判别依据：此时
-    //      m_projectedOptions == m_filterOptions、「应用过滤」提示保持干净。
-    //   ② 过滤条件变化 —— 换"哪些行进来"，只有「应用过滤」/载入示例才走这条（用户钦定）
-    // 数据源是模型的完整缓冲，所以它覆盖的是**全部已到达的数据**，而不是"此后的新行"。
-    //
-    // 投影成本实测约 6.9 µs/条（见 tests/perf/traffic_perf.cpp）：
-    // 关掉那个编辑块优化会让它退回 360 µs/条，5 万条就是 18 秒——这里的每一次调用
-    // 都建立在 TrafficTextView::appendMessages 那个 beginEditBlock 之上。
-    const int rows = m_model->rowCount();
-
-    // 这次用哪份条件过滤，是唯一的分歧点：
-    //   · applyCurrentConditions —— 用**当前**条件（m_matcher）：行集可变，代表"让视图跟上当前条件"。
-    //   · 否则（外观路径）—— 用**上次已应用**的条件（见上①：不套未应用条件；但格式专属命中的
-    //     条件会随格式重新求值，行集可能移动）。
-    // ⚠️ 边界：一次投影都没做过时 m_projectedOptions 还是默认构造值（endpoints 为空 →
-    //    Matcher::accepts 全 false，会把屏幕清空）。此时没有"已应用条件"可用，回退用当前
-    //    条件，并把它记为已应用（见下方 conditionsApplied）；这条兜底只在外观路径上可能触发。
-    const bool useAppliedConditions = !applyCurrentConditions && m_everProjected;
-    TrafficFilter::Matcher appliedMatcher;
-    const TrafficFilter::Matcher *matcher = &m_matcher;
-    if (useAppliedConditions) {
-        // 已应用条件是不含 format 的值类型，按**当前**编码格式现场预编译一份判定器：
-        // HEX 候选视图依赖 format，不能直接复用绑了当前条件的 m_matcher。
-        // 端点、方向、转发和事件开关跟行号一样立刻生效，盖到已应用条件上。
-        // 关键词和排除词仍用上次点「应用过滤」时的那份。
-        auto options = m_projectedOptions;
-        options.copyLiveVisibilityFrom(m_filterOptions);
-        appliedMatcher = TrafficFilter::Matcher(options, currentDisplayFormat());
-        matcher = &appliedMatcher;
+    m_reprojectTimer->stop();
+    Projection request;
+    // 重建进行中，任何条件变化都以最新条件重启。空闲时外观变化仍沿用已应用的关键词。
+    request.options = applyCurrentConditions || isReprojecting() || !m_everProjected
+        ? m_filterOptions : m_projectedOptions;
+    request.options.copyLiveVisibilityFrom(m_filterOptions);
+    request.format = currentDisplayFormat();
+    request.display = m_displayOptions;
+    request.dark = AppTheme::isDark();
+    if (m_projection && m_projection->options == request.options
+        && m_projection->format == request.format && m_projection->display == request.display
+        && m_projection->dark == request.dark) {
+        m_projection->announce |= announce;
+        return; // 同一条件已在处理，不重复清空、也不再排一轮。
     }
-
-    // 翻阅历史时切开关不该被弹回顶部：记下滚动位置的比例，重投影后按比例放回去。
-    // 跟随模式下无所谓（反正要钉到底部），所以只在没跟随时记。
+    if (!m_projection && m_everProjected && !m_incrementalDiverged && !m_filterHistoryDiverged
+        && m_projectedOptions == request.options && m_projectedFormat == request.format
+        && m_projectedDisplay == request.display && m_projectedDark == request.dark)
+        return; // 已完成且后续增量仍与快照一致，直接复用结果，不遍历历史。
+    request.matcher = TrafficFilter::Matcher(request.options, request.format);
+    request.announce = announce || (m_projection && m_projection->announce);
     auto *scroll = m_text->verticalScrollBar();
-    const bool follow = m_follow->isChecked();
-    const double scrollFraction = (!follow && scroll->maximum() > 0)
-        ? double(scroll->value()) / double(scroll->maximum())
-        : 0.0;
-
-    const bool showWait = rows >= ReprojectWaitCursorRows;
-    if (showWait) QApplication::setOverrideCursor(Qt::WaitCursor);
-
-    QList<Traffic::Message> accepted;
-    accepted.reserve(rows);
-    int filtered = 0;
-    for (int row = 0; row < rows; ++row) {
-        const auto &message = m_model->record(row);
-        if (!matcher->accepts(message)) {
-            ++filtered;
-            continue;
-        }
-        if (!m_displayOptions.prefix && message.direction != Traffic::Direction::Receive)
-            continue;
-        accepted.append(message);
-    }
-    // 行号按投影结果从 1 重新排：清空与重放是同一个动作的两半，中间不能让旧行号
-    // 留在文档里，否则"第 3 行"会指向两条不同的记录。
-    m_text->clearAll();
-    m_text->appendMessages(accepted, currentDisplayFormat(), m_displayOptions);
-
-    if (showWait) QApplication::restoreOverrideCursor();
-
-    // 投影之后屏幕上的条数就是摘要该说的条数：会话累计口径在这里失效了，
-    // 因为更早的行已经被这一次投影丢掉（缓冲之外的历史无法追溯）。
-    m_totalAccepted = static_cast<quint64>(accepted.size());
-    m_filteredOut = static_cast<quint64>(filtered);
-    // conditionsApplied：这次到底有没有"让视图跟上当前条件"。外观路径走已应用条件 → false，
-    // 未应用的条件必须仍被判为待应用；回退用当前条件的那次（还没投影过）算真，因为确实用上了。
-    markReprojected(applyCurrentConditions || !useAppliedConditions);
-    if (follow) m_text->scrollToBottom();
-    else if (scrollFraction > 0.0)
-        scroll->setValue(qRound(scrollFraction * scroll->maximum()));
+    request.scrollFraction = m_projection ? m_projection->scrollFraction
+        : !m_follow->isChecked() && scroll->maximum() > 0
+        ? double(scroll->value()) / scroll->maximum() : 0.0;
+    // 全部在 GUI 线程串行执行。停止下一次回调后替换任务，无需等待旧历史扫描结束。
+    m_projectionTimer->stop();
+    m_projection = std::move(request);
+    m_text->clearAll(m_model->rowCount());
     updateSummary();
-    // 只有"跟上当前条件"的这次才播报：那句文案说的是"当前条件"，用在外观路径上会撒谎；
-    // 而外观变化本来就立刻可见，不必再报。
-    if (announce && applyCurrentConditions && rows > 0)
-        reportSummary(tr("已按当前条件重投影：显示 %1 条（缓冲 %2 条内匹配）")
-                          .arg(accepted.size())
-                          .arg(rows));
+    // 小历史仍在本次调用中完成；大历史通过定时器让出事件循环，不调用 processEvents。
+    advanceProjection();
+}
+
+void TrafficPanel::advanceProjection()
+{
+    if (!m_projection) return;
+    auto &job = *m_projection;
+    QElapsedTimer work;
+    work.start();
+    do {
+        QList<Traffic::Message> accepted;
+        const int end = qMin(job.row + ProjectionBatchRows, m_model->rowCount());
+        accepted.reserve(end - job.row);
+        for (; job.row < end; ++job.row) {
+            const auto &message = m_model->record(job.row);
+            if (!job.matcher.accepts(message)) {
+                ++job.filtered;
+                continue;
+            }
+            if (!job.display.prefix && message.direction != Traffic::Direction::Receive) continue;
+            accepted.append(message);
+        }
+        job.accepted += accepted.size();
+        m_text->appendMessages(accepted, job.format, job.display);
+    } while (job.row < m_model->rowCount() && work.elapsed() < ProjectionSliceMs);
+    m_lastBatchWorkMs = qMax(m_lastBatchWorkMs, work.elapsed());
+    if (m_follow->isChecked()) m_text->scrollToBottom();
+    if (job.row < m_model->rowCount()) {
+        m_projectionTimer->start(0);
+        return;
+    }
+
+    m_totalAccepted = job.accepted;
+    m_filteredOut = job.filtered;
+    m_projectedOptions = job.options;
+    m_projectedFormat = job.format;
+    m_projectedDisplay = job.display;
+    m_projectedDark = job.dark;
+    m_everProjected = true;
+    m_incrementalDiverged = false;
+    m_filterHistoryDiverged = false;
+    if (!m_follow->isChecked()) {
+        auto *scroll = m_text->verticalScrollBar();
+        scroll->setValue(qRound(job.scrollFraction * scroll->maximum()));
+    }
+    const bool announce = job.announce;
+    const quint64 accepted = job.accepted;
+    m_projection.reset();
+    updateSummary();
+    if (announce)
+        reportSummary(tr("历史重建完成：显示 %1 条").arg(accepted));
+}
+
+void TrafficPanel::cancelProjection()
+{
+    m_reprojectTimer->stop();
+    m_projectionTimer->stop();
+    m_projection.reset();
 }
 
 void TrafficPanel::scheduleReproject()
 {
+    if (isReprojecting()) {
+        // 编辑关键词/排除词也立即替换正在执行的任务，不等「应用过滤」或旧任务结束。
+        reprojectView(/*announce=*/false, /*applyCurrentConditions=*/true);
+        return;
+    }
     if (m_model->rowCount() == 0) {
         // 缓冲是空的：没有已收到的内容需要追平，当前外观就已经是"视图的样子"。
         // 只记外观签名。事件开关留在默认值上，第一批数据进来后再关掉，才能被认成变化。
         m_projectedFormat = currentDisplayFormat();
         m_projectedDisplay = m_displayOptions;
+        m_projectedDark = AppTheme::isDark();
         return;
     }
     // 端点、方向、转发和事件开关决定哪些行进来，不在外观签名里，所以这里单独比。
@@ -1189,28 +1250,20 @@ void TrafficPanel::scheduleReproject()
 
 bool TrafficPanel::appearanceChanged() const
 {
-    return m_projectedFormat != currentDisplayFormat() || m_projectedDisplay != m_displayOptions;
+    return m_projectedFormat != currentDisplayFormat() || m_projectedDisplay != m_displayOptions
+        || m_projectedDark != AppTheme::isDark();
 }
 
-void TrafficPanel::markReprojected(bool conditionsApplied)
+void TrafficPanel::markReprojected()
 {
-    // 外观签名无论哪条路径都要更新：否则 appearanceChanged() 会一直为真，
-    // 防抖定时器每拍都会再做一次同样的重投影。
+    // 首批增量或清空建立当前基线；分批重建完成时直接提交任务自己的快照。
     m_projectedFormat = currentDisplayFormat();
     m_projectedDisplay = m_displayOptions;
+    m_projectedDark = AppTheme::isDark();
+    m_projectedOptions = m_filterOptions;
     m_incrementalDiverged = false;
+    m_filterHistoryDiverged = false;
     m_everProjected = true;
-    // 只有真正"让视图跟上当前条件"的这次投影才更新已应用条件（外观路径不动它）：
-    // 这一条正是「应用过滤 •」待应用提示能被正确保持/清除的根据。
-    if (conditionsApplied) m_projectedOptions = m_filterOptions;
-    // 端点、方向、转发和事件开关已经在这次投影里生效。已应用条件同步这些项，
-    // 「应用过滤」才不会把一次显示切换误报成还有关键词没应用。
-    m_projectedOptions.copyLiveVisibilityFrom(m_filterOptions);
-    // 已知残余（所选模型的固有代价，不是 bug）：视图 = 上次投影 + 此后按**当前**条件到达的
-    // 新行。若用户改了条件却没点「应用过滤」，随后到达的、只命中新条件的行会先显示出来；
-    // 此时一次外观重投影（按已应用基线重放）会把它们**收回**，屏幕会变少。这不可怕——
-    // 只要「应用过滤 •」在 m_projectedOptions != m_filterOptions 期间一直可见，用户就知道
-    // 屏幕还没有跟上他刚改的条件、点一下即可落定。所以外观路径绝不写 m_projectedOptions。
 }
 
 void TrafficPanel::refreshApplyHint()
@@ -1218,8 +1271,9 @@ void TrafficPanel::refreshApplyHint()
     // "条件改了但还没补到已有记录上"是一个必须显式说出来的状态：
     // 不说，用户只会看到"我改了条件，屏幕没变"，然后判断成坏了。
     const bool pending = m_model->rowCount() > 0
-        && (!m_everProjected || m_projectedOptions != m_filterOptions || appearanceChanged());
-    m_filterBar->setApplyPending(pending);
+        && (isReprojecting() || !m_everProjected || m_incrementalDiverged || m_filterHistoryDiverged
+            || m_projectedOptions != m_filterOptions || appearanceChanged());
+    m_filterBar->setApplyPending(pending, isReprojecting());
 }
 
 QString TrafficPanel::waitingPlaceholder() const
@@ -1247,8 +1301,8 @@ void TrafficPanel::updateSummary()
                       .arg(m_filteredOut)
                 : waitingPlaceholder());
     }
-    m_stack->setCurrentWidget(m_totalAccepted == 0 ? static_cast<QWidget *>(m_empty)
-                                                   : static_cast<QWidget *>(m_text));
+    m_stack->setCurrentWidget(isReprojecting() || m_totalAccepted > 0 ? static_cast<QWidget *>(m_text)
+                                                                   : static_cast<QWidget *>(m_empty));
     reportSummary([this] {
         // 摘要 = 会话累计 + 挡住多少 + 安全阀释放了多少。三段都是事实，缺一段就会让人
         // 误判："看到的少"到底是没收到、被条件挡了，还是最早的被裁掉了。
@@ -1258,6 +1312,7 @@ void TrafficPanel::updateSummary()
             ? (pureData ? tr("接收 %1 条 · 过滤掉 %2 条") : tr("共 %1 条 · 过滤掉 %2 条"))
                   .arg(m_totalAccepted).arg(m_filteredOut)
             : (pureData ? tr("接收 %1 条") : tr("共 %1 条")).arg(m_totalAccepted);
+        if (isReprojecting()) summary = tr("正在重建历史…");
         // 缓冲已满是一个事实，不是一个计数：无论触顶发生在模型侧（释放最旧记录）
         // 还是文本侧（裁掉最早的行），对用户的含义都是"最早的那段已经不在屏幕上了"。
         // 只报这一句，不再摊开两串对不上号的条数/行数——用户要的是判断，不是算术。

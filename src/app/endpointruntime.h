@@ -58,6 +58,8 @@ signals:
     // 每次底层收到的原始片段。文件传输等协议消费者使用它，不经过组帧器改写边界。
     void rawDataReceived(int index, const Traffic::Source &source, const QByteArray &payload);
     void messageReceived(const Traffic::Message &message);
+    // 日志合并不丢告警次数：自动恢复重复失败只发布这个轻量事件。
+    void endpointIssueReported(int index, int issue, const QString &reason);
 
 private:
     struct ReceiveSession

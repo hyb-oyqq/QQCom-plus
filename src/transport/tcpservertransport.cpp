@@ -124,7 +124,8 @@ void TcpServerTransport::acceptPending()
             // 超出上限立即拒绝；连接里的待处理字节随断开丢弃，不假装收下了。
             socket->abort();
             socket->deleteLater();
-            emit errorOccurred(m_generation, tr("客户端数达到上限 %1，已拒绝新连接").arg(m_maxClients));
+            emit errorOccurred(m_generation, tr("客户端数达到上限 %1，已拒绝新连接").arg(m_maxClients),
+                0, Traffic::Issue::CapacityRejected);
             continue;
         }
         Peer peer;
@@ -175,7 +176,8 @@ void TcpServerTransport::detachPeer(QTcpSocket *socket)
     const QString address = m_peers.value(socket).address;
     m_peers.remove(socket);
     socket->deleteLater();
-    emit errorOccurred(m_generation, tr("客户端 %1 已断开").arg(address));
+    emit errorOccurred(m_generation, tr("客户端 %1 已断开").arg(address),
+        0, Traffic::Issue::PeerDisconnected);
     publishPeers();
 }
 

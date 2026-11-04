@@ -208,23 +208,31 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
             publish(std::move(notice));
         });
     connect(transport, &AbstractTransport::errorOccurred, this,
-        [this, index, generation](quint64 gen, const QString &text, qint64 droppedBytes) {
+        [this, index, generation](quint64 gen, const QString &text, qint64 droppedBytes, Traffic::Issue issue) {
             if (gen != m_generations[index]) return;
+            const QString reason = QStringLiteral("%1 · %2")
+                .arg(endpointIdentity(index, m_drafts[index]), text);
             // 自动恢复已经记过一次等待说明后，后续每拍失败不再写日志。
-            if (m_drafts[index].autoRecover && m_recoverNoticeSent[index]) return;
+            if (issue == Traffic::Issue::EndpointFailure
+                && m_drafts[index].autoRecover && m_recoverNoticeSent[index]) {
+                emit endpointIssueReported(index, int(issue), reason);
+                return;
+            }
             // 失败的唯一一条日志：错误行正文就是完整原因。传输层随后若紧跟一条同代次
             // Closed（打开失败 / 设备错误 / 连接断开都会），状态处理器会把它并进这里，
             // 不再单独成行——但"端点已回到 Closed"仍会照常上报给界面。
-            m_pendingFailureGeneration[index] = generation;
+            if (issue == Traffic::Issue::EndpointFailure)
+                m_pendingFailureGeneration[index] = generation;
             auto message = makeMessage(index, Traffic::Direction::Error, Traffic::Origin::Automatic,
                 {}, Traffic::Framing::Message);
+            message.issue = issue;
             // 读出失败的字节数留在这条错误上。写出失败另有丢弃行，这里保持 0。
             message.rawLength = qMax<qint64>(0, droppedBytes);
-            message.statusText = QStringLiteral("%1 · %2")
-                .arg(endpointIdentity(index, m_drafts[index]), text);
+            message.statusText = reason;
             publish(std::move(message));
             // 自动恢复的打开失败不再每拍写一条错误：第一次失败已经说明原因。
-            if (m_drafts[index].autoRecover && !m_recoverNoticeSent[index]) {
+            if (issue == Traffic::Issue::EndpointFailure
+                && m_drafts[index].autoRecover && !m_recoverNoticeSent[index]) {
                 m_recoverNoticeSent[index] = true;
                 auto notice = makeMessage(index, Traffic::Direction::Warning, Traffic::Origin::Automatic,
                     {}, Traffic::Framing::Message);
@@ -323,6 +331,7 @@ void EndpointRuntime::publishDrop(int index, qint64 bytes, const QString &reason
     message.rawLength = bytes;
     message.statusText = reason;
     message.statusBrief = brief;
+    message.issue = Traffic::Issue::DataLoss;
     publish(std::move(message));
 }
 
@@ -564,5 +573,7 @@ Traffic::Message EndpointRuntime::makeMessage(int index, Traffic::Direction dire
 
 void EndpointRuntime::publish(Traffic::Message message)
 {
+    if (message.issue != Traffic::Issue::None)
+        emit endpointIssueReported(message.source.endpointIndex, int(message.issue), message.statusText);
     emit messageReceived(std::move(message));
 }

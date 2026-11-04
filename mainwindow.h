@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QIcon>
 #include <QSet>
 #include "domain/trafficmessage.h"
 #include "ui/panels/portselector/portselectorwidget.h"
@@ -19,6 +20,7 @@ class QAction;
 class QToolButton;
 class QThread;
 class EndpointRuntime;
+class EndpointAlertState;
 class PortDiscoveryService;
 class PreferencesStore;
 class RouteEditorWidget;
@@ -72,6 +74,8 @@ protected:
     QSize minimumSizeHint() const override;
     // 布局请求之后若下限被写回，立刻清掉。拖边框看的是这一刻的 minimumSize。
     bool event(QEvent *event) override;
+    // 仅在有未确认提醒时监听本窗口内的点击/按键，输入照常交给原控件。
+    bool eventFilter(QObject *watched, QEvent *event) override;
     // 退出时把窗口几何（大小 + 位置 + 最大化状态）落盘，下次启动恢复。
     void closeEvent(QCloseEvent *event) override;
 
@@ -88,6 +92,10 @@ private:
     void handleEndpointState(int index, int state, const QString &detail);
     void handleEndpointPeers(int index, const QStringList &peers);
     void handleMessage(const Traffic::Message &message);
+    void updateEndpointAlerts();
+    void acknowledgeEndpointAlerts();
+    void requestAlertAttention();
+    void stopAlertAttention();
     void updateEndpointStatus();
     // 清掉窗口最小尺寸，并禁止布局把内容下限写回去。
     void releaseWindowSizeFloor();
@@ -151,6 +159,13 @@ private:
     QThread *m_ioThread = nullptr;
     EndpointRuntime *m_runtime = nullptr;
     Transport::State m_endpointStates[2] = {Transport::State::Closed, Transport::State::Closed};
+    EndpointAlertState *m_endpointAlerts[2] = {};
+    bool m_alertsSuppressed[2] = {};
+    QIcon m_normalWindowIcon;
+    QIcon m_alertWindowIcons[2][2]; // warning/error × dim/bright
+    int m_windowAlertLevel = 0;
+    bool m_windowAlertBright = true;
+    bool m_alertInputFilterInstalled = false;
     // 异常断开后置位，用户取消等待或重新打开后清掉。只在这一位为真时才按秒重试。
     bool m_recoverArmed[2] = {};
     // 用户取消了本次等待。在途的重试失败不能再把等待重新打开，直到用户再次点打开。

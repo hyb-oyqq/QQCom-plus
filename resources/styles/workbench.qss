@@ -118,9 +118,9 @@ QPushButton#endpointAction:hover { background: #163fb3; border-color: #163fb3; }
 QPushButton#endpointAction:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }
 QPushButton#endpointAction[open="true"] { background: #c0392b; border-color: #a7301f; }
 QPushButton#endpointAction[open="true"]:hover { background: #a7301f; border-color: #a7301f; }
-/* 等待自动恢复：还没连上，用与「扩展」收起态同一套琥珀。 */
-QPushButton#endpointAction[recovering="true"] { background: #fbbf24; border-color: #b45309; color: #7a3f00; }
-QPushButton#endpointAction[recovering="true"]:hover { background: #f5b016; border-color: #92400e; color: #5c2f00; }
+/* 等待自动恢复：黄色，点击取消本次等待。 */
+QPushButton#endpointAction[recovering="true"] { background: #facc15; border-color: #a16207; color: #713f12; }
+QPushButton#endpointAction[recovering="true"]:hover { background: #fde047; border-color: #854d0e; color: #713f12; }
 QPushButton#bridgeButton:disabled { background: #b7c5e6; border-color: #a8b8dd; color: #f0f3fa; }
 QToolButton::menu-indicator { width: 0px; }
 QToolButton#advancedToggle { border: none; background: transparent; color: #647590; padding: 1px 2px; }
@@ -180,6 +180,8 @@ QFrame#StatusDot { background: #94a2b8; border: none; border-radius: 3px; }
 QFrame#StatusDot[state="open"] { background: #047857; }
 QFrame#StatusDot[state="opening"] { background: #d97706; }
 QFrame#StatusDot[state="closed"] { background: #94a2b8; }
+QFrame#StatusDot[state="error"] { background: #c0392b; }
+QFrame#StatusDot[state="warning"] { background: #b45309; }
 /* 检查更新、外观和置顶各一块浅底，和端点状态同一套。按钮本身透明，悬停只点亮按钮。 */
 QWidget#StatusActions, QWidget#StatusPin, QWidget#StatusScheme { background: #f4f6fa; border: 1px solid #e1e7f0; border-radius: 4px; }
 QStatusBar QToolButton#checkUpdate, QStatusBar QToolButton#stayOnTop, QStatusBar QToolButton#colorScheme {

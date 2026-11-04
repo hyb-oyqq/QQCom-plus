@@ -90,7 +90,8 @@ public:
     // 重投影 = clearAll() + 对新一批 appendMessages()，没有第二套渲染逻辑。
     void appendMessages(const QList<Traffic::Message> &messages, PayloadCodec::Format format,
         const DisplayOptions &options);
-    void clearAll();
+    // 重建前预留行号位数，避免跨十进制位数时让百万行文档重新布局。
+    void clearAll(int expectedRecords = 0);
     // 测试用：这条接收流上还没接完的 ANSI 转义。正常显示不读它。
     QString pendingAnsi() const;
     int lineCount() const { return document()->blockCount(); }
@@ -138,6 +139,7 @@ private:
     quint64 m_nextNumber = 1; // 还在的第一条前缀行的绝对行号。头部淘汰往后加，不回退
     // 有前缀时，下一条记录要写进槽的号。续行不消耗它。
     quint64 m_entryNumber = 1;
+    quint64 m_expectedRecords = 0;
     int m_releasedBlocks = 0; // 见 releasedBlocks()
     int m_blockBudget = kSafetyBlockBudget;
     qint64 m_charBudget = kSafetyCharBudget;

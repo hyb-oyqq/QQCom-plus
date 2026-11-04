@@ -61,7 +61,8 @@ signals:
     void peerConnected(quint64 generation, const QUuid &peerId, const QString &address);
     // 离散错误：打开失败、意外断开、设备拔出、读出失败等。状态变化仍走 stateChanged。
     // droppedBytes 大于 0 表示这次错误扔掉了这么多字节，界面据此累计。
-    void errorOccurred(quint64 generation, const QString &message, qint64 droppedBytes = 0);
+    void errorOccurred(quint64 generation, const QString &message, qint64 droppedBytes = 0,
+        Traffic::Issue issue = Traffic::Issue::EndpointFailure);
 
 protected:
     // 组装消息来源：草稿身份 + 本会话代次 + peer 信息（如有）。
