@@ -65,18 +65,32 @@ powershell.exe -File qqcom-updater.ps1 \
 
 发布前先清理 `docs/`：删掉已经过时的说明，把还在用的文档改成和当前程序一致。版本记录仍写仓库根目录的 `更新记录.md`，不在 `docs/` 另写一份。
 
-1. 版本号直接改 `version/version.h` 里的主/次/修订号，构建只刷新时间戳。按 `更新记录.md` 文首格式写本版记录，提交并打 tag `v<version>`。
-2. 使用固定 Qt Kit 构建 Release，并运行 core/UI 测试。
-3. 使用 `scripts/package_release.ps1` 生成 `QQCom-<version>-win64.zip`、`manifest.json` 和版本说明文件。说明原样来自 `更新记录.md`，最新版本排在最前，并同时放进 zip 根目录和 `build/ota`。
-4. 创建 Gitee Release，上传 zip；把脚本输出的 SHA-256 填入清单。
+最终交付按根目录 [AGENTS.md](../AGENTS.md) 执行，直接平铺在 `build/releases/`：
+
+```text
+build/releases/
+  QQCom-<version>-win64.zip
+  固件更新记录.md
+```
+
+构建运行目录、暂存目录和 `manifest.json` 放在其他 `build/` 子目录。用户在交付目录修订更新记录后，先同步回根目录源文件，再打包。
+
+1. 版本号直接改 `version/version.h` 里的主/次/修订号，构建只刷新时间戳。本版更新记录标题用 `# QQCom-<version>-win64`，最新记录置顶，保留原有历史标题和 `1.内容`、条目间空行的格式。
+2. 使用固定 Qt Kit 构建 Release，并运行 core/UI 测试。检查工作区并 `git fetch origin master` 核对分支差异，提交源码、规则、文档和更新记录，创建并推送 `v<version>` 标签及 `master`。不提交构建产物，不强制推送，不移动已有发布标签。
+3. 准备仅含运行文件的目录，包含程序、Qt/MSVC 运行库、插件、更新器及 CLI 入口和说明，排除 obj/moc 等构建产物。使用 `scripts/package_release.ps1` 先在 `build/ota` 生成 ZIP、`manifest.json` 和版本说明；包内外说明使用根目录 `更新记录.md` 的同一定稿。校验后将 ZIP 和 `固件更新记录.md` 复制到 `build/releases/`，不套版本号目录。
+4. 创建 Gitee Release 并上传 ZIP；如果用户已上传，直接复用已有 Release，不重复上传或要求令牌。核对版本、标签、名称和说明，从附件链接重新下载 ZIP，检查完整性，并与用户定稿的本地 ZIP 核对大小和 SHA-256。清单数据以验证后的线上附件为准。
 5. 在干净机器安装旧版本，验证清单检查、下载、文件覆盖、配置保留和重新启动。
-6. 把校验后的 manifest 发布到 `ota/stable.json`；灰度时先把 `channel` 设为 `beta`，验证后再切到 `stable`。
+6. 将实际附件的版本、Release 日期、HTTPS 下载地址、字节数、SHA-256 和说明页地址写入 `ota/stable.json`，提交并推送到 `origin/master`；灰度时先使用 `beta` 通道，验证后再切到 `stable`。源码及稳定清单可以分次提交，已发布标签仍指向原构建源码。
+7. 推送后核对远端分支提交和标签，读取客户端使用的 Gitee Contents API，确认 `ota/stable.json` 的版本、链接、大小和哈希已更新。生成包和本地提交本身不代表线上发布完成。
+
+远端固定为 `origin`（`https://gitee.com/qinjmin/qqcom.git`），发布分支为 `master`。源码推送、Release 附件和稳定清单分别验收：前者供代码同步，附件供下载，稳定清单决定客户端是否提示升级。
 
 本地打包和校验：
 
 ```powershell
+# 先把完整运行文件整理到 build/release-runtime/<version>，不含编译中间产物。
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 `
-  -BinaryDir build/release/release `
+  -BinaryDir build/release-runtime/<version> `
   -Version <version> `
   -BaseUrl https://gitee.com/qinjmin/qqcom/releases/download/v<version>
 
@@ -84,11 +98,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate_ota_manifes
   -ManifestPath build/ota/manifest.json `
   -PackagePath build/ota/QQCom-<version>-win64.zip
 
+New-Item -ItemType Directory -Force -Path build/releases | Out-Null
+Copy-Item -LiteralPath build/ota/QQCom-<version>-win64.zip, build/ota/固件更新记录.md -Destination build/releases
+
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_ota.ps1
 
 # 用当前 Release 跑真实检查、下载、覆盖和重启。不访问 Gitee，也不改用户配置。
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/local_update_test.ps1 `
-  -BinaryDir build/release/release
+  -BinaryDir build/release-runtime/<version>
 ```
 
 ## 还没做的部分

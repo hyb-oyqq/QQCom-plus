@@ -40,6 +40,8 @@ Windows 11 x64，Qt 6.10.1 MSVC 2022，Release，Fusion 浅色样式，windows �
 
 日志：`build/release-review-core-final.txt`、`build/release-review-ui-final.txt`、`build/release-review-update-tests.txt`、`build/release-review-ota-tests.txt`、`build/release-review-local-update.txt`。中间一次核心运行的固定候选端口不可用；随后单独、全套信号跟踪和普通全套均通过。未改变传输实现。
 
-1.2.0 完整运行目录：`build/releases/1.2.0/QQCom`；发布包和清单：`build/releases/1.2.0/QQCom-1.2.0-win64.zip`、`manifest.json`。目录仅包含运行文件，附带 Qt、MSVC 运行库、CLI 入口与说明，不包含 obj/moc 中间产物。稳定版清单应在 Gitee 附件上传并验证后更新。
+1.2.0 最终交付经用户整理为 `build/releases/QQCom-1.2.0-win64.zip` 和 `build/releases/固件更新记录.md`，更新记录最新标题为 `# QQCom-1.2.0-win64`。ZIP 附带 Qt、MSVC 运行库、CLI 入口与说明，不包含 obj/moc 中间产物。后续打包按根目录 `AGENTS.md` 维护平铺交付目录和包内外更新记录。稳定版清单应在 Gitee 附件上传并验证后更新。
+
+2026-11-06 已核验用户上传的 Gitee `v1.2.0` Release：标签指向构建源码 `32efbe5`，说明与定稿一致；从附件链接重新下载的 ZIP 完整，大小为 32,565,841 字节，SHA-256 为 `d74862b07b513f40e1291de94eb059b350d8c95d3c146895c127dd5bcc07b305`，与本地交付一致。程序 SHA-256 与前述 OTA 回环验证一致，`ota/stable.json` 按实际附件更新到 1.2.0；校验记录保存在 `build/release-verification/1.2.0/verification.json`。
 
 仍使用 QTableWidget 和常驻行控件，首次加载及真实结构变化仍随行数增长。当前没有做 QAbstractTableModel/委托虚拟化迁移；若实际需要频繁管理数千到数万条指令，应单独测量并规划此项。分组管理器仍为单工作区单例，未来多工作区需要实例化服务。配置序列化仍在 GUI 线程执行，缓存减少无关组的工作，未把单个超大分组的序列化改为异步。

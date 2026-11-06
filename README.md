@@ -81,16 +81,16 @@ git diff --check
 
 版本号改 `version/version.h` 里的 `QQCOM_VERSION_MAJOR`、`QQCOM_VERSION_MINOR`、`QQCOM_VERSION_PATCH`。构建只刷新同一区块里的时间戳和标题字符串，不会改这三个数字。要在每次点「构建」时刷新构建时间，把 `version/stamp_version.bat` 加到 Qt Creator 的 Make 步骤之前。
 
-发布目录必须包含完整的 `QQCom.exe`、Qt DLL 和 `plugins` 子目录。打包脚本还会写入版本说明文件。生成 OTA 包和清单：
+打包输入需整理为完整运行目录，包含 `QQCom.exe`、Qt/MSVC 运行库和插件，排除编译中间产物。最终交付直接平铺在 `build/releases/`，只放 `QQCom-<version>-win64.zip` 和 `固件更新记录.md`；更新记录最新标题为 `# QQCom-<version>-win64`，历史保留，详见 [项目规则](AGENTS.md)。先在 `build/ota/` 生成 OTA 包和清单：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 `
-  -BinaryDir build/release/release `
+  -BinaryDir build/release-runtime/<version> `
   -Version <version> `
   -BaseUrl https://gitee.com/qinjmin/qqcom/releases/download/v<version>
 ```
 
-发布流程、清单校验、安全要求和更新策略见 [OTA 方案](docs/OTA.md)。
+校验后仅将 ZIP 和更新记录复制到 `build/releases/`。运行目录整理、完整发布流程、清单校验和更新策略见 [OTA 方案](docs/OTA.md)。
 
 ## AI 直接操作
 

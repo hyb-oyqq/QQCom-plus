@@ -62,4 +62,4 @@ powershell -NoProfile -File scripts/deploy_qt_windows.ps1 -Binary build/ui-tests
 # 其他 Kit 使用 -QtBin 指定对应 bin；Debug 构建加 -Configuration Debug
 ```
 
-发布时复制整个运行目录并保留 DLL/plugins，不只复制 exe；MSVC 运行库另按目标机器环境准备。交付目录可使用 `release/QQCom.exe`。版本清单、源码和文档入 Git，生成头、二进制、日志和截图不入 Git。提交前运行 `git diff --check`，检查文件列表和残留旧品牌；旧配置迁移路径及历史说明中的旧名称属于兼容依据。
+发布时整理完整运行文件并保留 DLL 和插件目录，准备匹配的 MSVC 运行库，排除编译中间产物。最终交付按 [AGENTS.md](../AGENTS.md)：`build/releases/` 直接平铺 `QQCom-<version>-win64.zip` 与 `固件更新记录.md`，暂存目录、解压后的程序和 manifest 放在其他构建目录。更新记录最新标题为 `# QQCom-<version>-win64`，与 ZIP 名称一致，历史保留。打包及校验步骤见 [OTA 发布流程](OTA.md#发布流程)。版本清单、源码和文档入 Git，生成头、二进制、日志和截图不入 Git。提交前运行 `git diff --check`，检查文件列表和残留旧品牌；旧配置迁移路径及历史说明中的旧名称属于兼容依据。
