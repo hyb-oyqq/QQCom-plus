@@ -1,4 +1,7 @@
 #include "mainwindow.h"
+#include "automation/capabilitycatalog.h"
+#include "automation/clirunner.h"
+#include "automation/localcontrol.h"
 #include "app/commandmanager.h"
 #include "domain/commandset.h"
 #include "domain/receiveframing.h"
@@ -37,14 +40,19 @@
 #include <QLineEdit>
 #include <QLabel>
 #include <QMenu>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPoint>
 #include <QProgressBar>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QScrollBar>
+#include <QScopeGuard>
 #include <QSet>
 #include <QStyle>
 #include <QStyleHints>
@@ -183,12 +191,393 @@ QColor lastFragmentColor(const QTextBlock &block)
 // 90 = 50ms 防抖窗口 + 40ms 余量。
 constexpr int AppearanceReprojectWaitMs = 90;
 
+QString productCli()
+{
+    const auto override = qEnvironmentVariable("QQCOM_CLI_TEST_EXECUTABLE");
+    if (!override.isEmpty()) return override;
+    return QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../../release/release/QQCom.exe");
+}
+
+struct CliReply {
+    int code = -1;
+    QJsonObject body;
+    QByteArray diagnostic;
+};
+
+CliReply cliProcess(const QStringList &arguments, const QString &directory,
+                    const QString &executable = productCli(), bool startupFixture = false)
+{
+    QProcess process;
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert("QQCOM_CONTROL_DIR", directory);
+    if (startupFixture) environment.insert("QQCOM_CLI_STARTUP_FIXTURE", "1");
+    else environment.insert("QT_QPA_PLATFORM", "not-installed-cli-must-not-need-gui");
+    process.setProcessEnvironment(environment);
+    process.start(executable, QStringList{"--cli"} + arguments);
+    if (!process.waitForStarted(3000)) return {-1, {}, process.errorString().toUtf8()};
+    // Keep the test window's event loop running while the CLI uses its pipe.
+    QSignalSpy finished(&process, &QProcess::finished);
+    if (process.state() != QProcess::NotRunning && !finished.wait(15000)) {
+        process.kill();
+        process.waitForFinished(1000);
+        return {-1, {}, "CLI process timed out"};
+    }
+    const auto bytes = process.readAllStandardOutput();
+    return {process.exitStatus() == QProcess::NormalExit ? process.exitCode() : -1,
+        QJsonDocument::fromJson(bytes).object(), bytes + process.readAllStandardError()};
+}
+
 } // namespace
 
 class UiSmokeTest : public QObject
 {
     Q_OBJECT
 private slots:
+    void cliCommandGroupsEditGuiAndSurviveReload()
+    {
+        if (!QFileInfo::exists(productCli())) QSKIP("Build QQCom first or set QQCOM_CLI_TEST_EXECUTABLE");
+        QTemporaryDir directory;
+        QString groupId, firstId, secondId;
+        {
+            MainWindow window;
+            auto *control = window.findChild<LocalControlServer *>();
+            QVERIFY(control);
+            control->stop();
+            QVERIFY(control->start(directory.path()));
+            const auto call = [&](const QStringList &arguments) { return cliProcess(arguments, directory.path()); };
+            const auto created = call({"commands", "create-group", "--name", QStringLiteral("设备调试"), "--notes", "CLI notes"});
+            QVERIFY2(created.code == 0, created.diagnostic.constData());
+            QVERIFY(created.body.value("persisted").toBool());
+            groupId = created.body.value("groupId").toString();
+            auto *selector = window.findChild<QComboBox *>("commandSetSelector");
+            QVERIFY(selector);
+            const int index = selector->findText(QStringLiteral("设备调试"));
+            QVERIFY(index >= 0);
+            selector->setCurrentIndex(index);
+            auto *table = window.findChild<CommandTableWidget *>();
+            QVERIFY(table);
+            auto *panel = window.findChild<CommandPanel *>();
+            QSignalSpy sends(panel, &CommandPanel::sendCommand);
+            const auto first = call({"commands", "add", groupId, "--content", "AA 55", "--format", "hex",
+                "--line-ending", "crlf", "--delay", "250", "--description", QStringLiteral("查询"), "--enabled", "false", "--packed", "true"});
+            QVERIFY2(first.code == 0, first.diagnostic.constData());
+            firstId = first.body.value("commandId").toString();
+            QCOMPARE(table->rowCount(), 1);
+            QCOMPARE(table->commandSet().commands.first().id, QUuid(firstId));
+            QVERIFY(table->commandSet().commands.first().isHex);
+            QCOMPARE(table->commandSet().commands.first().tailBytes(), QByteArray("\r\n"));
+            QCOMPARE(table->commandSet().commands.first().packMode, QStringLiteral("组包"));
+            const auto second = call({"commands", "add", groupId, "--content", "AT+VERSION?", "--position", "0"});
+            QCOMPARE(second.code, 0);
+            secondId = second.body.value("commandId").toString();
+            QCOMPARE(table->commandSet().commands.first().id, QUuid(secondId));
+            QCOMPARE(call({"commands", "update", groupId, firstId, "--description", QStringLiteral("查询版本"), "--position", "0"}).code, 0);
+            QCOMPARE(table->commandSet().commands.first().content, QString("AA 55"));
+            QCOMPARE(table->commandSet().commands.first().delayMs, 250);
+            QCOMPARE(table->commandSet().commands.first().description, QStringLiteral("查询版本"));
+            QVERIFY(!table->commandSet().commands.first().enabled);
+            QCOMPARE(call({"commands", "update-group", groupId, "--name", "renamed"}).code, 0);
+            QCOMPARE(selector->currentText(), QString("renamed"));
+            const auto page = call({"commands", "get", groupId, "--limit", "1"});
+            QCOMPARE(page.code, 0);
+            QVERIFY(page.body.value("hasMore").toBool());
+            QCOMPARE(page.body.value("commands").toArray().first().toObject().value("id").toString(), firstId);
+            QCOMPARE(call({"commands", "get", groupId, "--offset", "1"}).body.value("commands").toArray().first()
+                .toObject().value("id").toString(), secondId);
+            const auto before = table->commandSet().toJson();
+            QCOMPARE(call({"commands", "update", groupId, firstId, "--position", "50", "--content", "must not apply"}).code, 5);
+            QCOMPARE(table->commandSet().toJson(), before);
+            // A GUI edit after a CLI change must retain fields with no table editor.
+            const auto delays = table->findChildren<QSpinBox *>();
+            QVERIFY(!delays.isEmpty());
+            delays.first()->setValue(300);
+            QCOMPARE(table->commandSet().commands.first().packMode, QStringLiteral("组包"));
+            QCOMPARE(table->commandSet().commands.last().description, QString());
+            QCOMPARE(sends.size(), 0);
+        }
+        {
+            MainWindow reloaded;
+            const auto group = CommandManager::instance()->getSet(QUuid(groupId));
+            QCOMPARE(group.name, QString("renamed"));
+            QCOMPARE(group.notes, QString("CLI notes"));
+            QCOMPARE(group.commands.size(), 2);
+            QCOMPARE(group.commands.first().id, QUuid(firstId));
+            QCOMPARE(group.commands.first().content, QString("AA 55"));
+            QCOMPARE(group.commands.first().packMode, QStringLiteral("组包"));
+            QCOMPARE(group.commands.last().id, QUuid(secondId));
+            auto *control = reloaded.findChild<LocalControlServer *>();
+            control->stop();
+            QVERIFY(control->start(directory.path()));
+            QCOMPARE(cliProcess({"commands", "delete", groupId, firstId}, directory.path()).code, 0);
+            QCOMPARE(CommandManager::instance()->getSet(QUuid(groupId)).commands.size(), 1);
+            QCOMPARE(cliProcess({"commands", "delete-group", groupId}, directory.path()).code, 0);
+            QCOMPARE(reloaded.findChild<QComboBox *>("commandSetSelector")->findText("renamed"), -1);
+        }
+    }
+
+    void commandEditingWaitsForPendingSendsAndGuiEditor()
+    {
+        MainWindow window;
+        auto *panel = window.findChild<CommandPanel *>();
+        auto *table = window.findChild<CommandTableWidget *>();
+        auto *manager = CommandManager::instance();
+        const auto groupId = manager->allSets().first().id.toString();
+        const auto first = window.executeAutomationTool("qqcom_add_command", {{"groupId", groupId}, {"content", "draft"}, {"delayMs", 200}});
+        QVERIFY(first.value("created").toBool());
+        const auto before = manager->getSet(QUuid(groupId)).toJson();
+        const QJsonObject edit{{"groupId", groupId}, {"name", "edited"}};
+        CommandItem command;
+        command.content = "pending";
+        command.delayMs = 100;
+        QSignalSpy sends(panel, &CommandPanel::sendCommand);
+        QVERIFY(QMetaObject::invokeMethod(panel, "onSendCommand", Qt::DirectConnection, Q_ARG(CommandItem, command)));
+        QCOMPARE(window.executeAutomationTool("qqcom_update_command_group", edit).value("error").toObject().value("code").toString(), QString("commands_busy"));
+        QTRY_COMPARE(sends.size(), 1);
+        QCOMPARE(manager->getSet(QUuid(groupId)).toJson(), before);
+        QVERIFY(QMetaObject::invokeMethod(panel, "onBatchSendRequested", Qt::DirectConnection,
+            Q_ARG(QList<int>, QList<int>{0}), Q_ARG(QList<CommandItem>, QList<CommandItem>{command}), Q_ARG(bool, true)));
+        QVERIFY(panel->hasPendingSends());
+        QVERIFY(window.executeAutomationTool("qqcom_update_command_group", edit).contains("error"));
+        QVERIFY(QMetaObject::invokeMethod(panel, "onBatchSendStopRequested", Qt::DirectConnection));
+        QVERIFY(!panel->hasPendingSends());
+        // Opening a delegate editor must not let an external patch destroy its draft.
+        panel->setExpanded(true);
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.show();
+        auto *grid = table->findChild<QTableWidget *>();
+        QVERIFY(grid);
+        grid->editItem(grid->item(0, 2));
+        QVERIFY(table->hasActiveEditor());
+        QCOMPARE(window.executeAutomationTool("qqcom_update_command_group", edit).value("error").toObject().value("code").toString(), QString("commands_busy"));
+    }
+
+    void cliOfflineDiscoveryAndInstanceSelection()
+    {
+        if (!QFileInfo::exists(productCli())) QSKIP("Build QQCom first or set QQCOM_CLI_TEST_EXECUTABLE");
+        QTemporaryDir directory;
+        const auto describe = cliProcess({"describe"}, directory.path());
+        QCOMPARE(describe.code, 0);
+        QCOMPARE(describe.body.value("tools").toArray().size(), CapabilityCatalog::tools().size());
+        QVERIFY(!describe.body.value("cli").toObject().value("clientConfigurationRequired").toBool(true));
+        QCOMPARE(describe.body.value("cli").toObject().value("transport").toString(), QString("local-pipe"));
+        QCOMPARE(cliProcess({"instances"}, directory.path()).body.value("instances").toArray().size(), 0);
+        QCOMPARE(cliProcess({"state", "--no-start"}, directory.path()).code, 3);
+        QCOMPARE(cliProcess({"state", "--data", "invalid"}, directory.path()).code, 2);
+
+        MainWindow window;
+        auto *control = window.findChild<LocalControlServer *>();
+        QVERIFY(control);
+        auto *access = window.findChild<QToolButton *>("aiAccessButton");
+        QVERIFY(access && access->menu());
+        QCOMPARE(access->menu()->actions().size(), 3); // copy entry, separator, help
+        QCOMPARE(window.findChildren<QLocalServer *>().size(), 1);
+        QVERIFY(window.findChildren<QTcpServer *>().isEmpty());
+        control->stop();
+        QVERIFY(control->start(directory.path()));
+        const auto id = control->descriptor().value("instanceId").toString();
+        const auto state = cliProcess({"state", "--no-start"}, directory.path());
+        QVERIFY2(state.code == 0, state.diagnostic.constData());
+        QCOMPARE(state.body.value("instanceId").toString(), id);
+        QCOMPARE(state.body.value("endpoints").toArray().size(), 2);
+
+        LocalControlServer second("test");
+        second.setHandler([](const QString &, const QJsonObject &) { return QJsonObject{{"selected", true}}; });
+        QVERIFY(second.start(directory.path()));
+        QCOMPARE(cliProcess({"state"}, directory.path()).code, 4);
+        const auto selected = cliProcess({"state", "--instance", second.descriptor().value("instanceId").toString()}, directory.path());
+        QCOMPARE(selected.code, 0);
+        QVERIFY(selected.body.value("selected").toBool());
+        const auto stale = second.descriptor();
+        second.stop();
+        QFile staleFile(directory.filePath("control-stale.json"));
+        QVERIFY(staleFile.open(QIODevice::WriteOnly));
+        staleFile.write(QJsonDocument(stale).toJson());
+        staleFile.close();
+        QCOMPARE(cliProcess({"instances"}, directory.path()).body.value("instances").toArray().size(), 1);
+        QCOMPARE(cliProcess({"state", "--instance", "not-a-live-instance"}, directory.path()).code, 3);
+        control->stop();
+        QVERIFY(!QFileInfo::exists(directory.filePath("control-" + id + ".json")));
+    }
+
+    void cliTcpAndUdpRoundTrip()
+    {
+        if (!QFileInfo::exists(productCli())) QSKIP("Build QQCom first or set QQCOM_CLI_TEST_EXECUTABLE");
+        QTemporaryDir directory;
+        MainWindow window;
+        auto *control = window.findChild<LocalControlServer *>();
+        QVERIFY(control);
+        control->stop();
+        QVERIFY(control->start(directory.path()));
+        QTcpServer listener;
+        QVERIFY(listener.listen(QHostAddress::LocalHost, 0));
+        const auto call = [&](const QStringList &arguments) { return cliProcess(arguments, directory.path()); };
+        const auto endpoint = [&](int index) {
+            return window.executeAutomationTool("qqcom_get_state", {}).value("endpoints").toArray().at(index).toObject();
+        };
+        QCOMPARE(call({"configure", "A", "--type", "tcp-client", "--param", "client.host=127.0.0.1",
+            "--param", "client.port=" + QString::number(listener.serverPort()), "--auto-recover", "false"}).code, 0);
+        QVERIFY(call({"open", "A"}).body.value("submitted").toBool());
+        QTRY_COMPARE(endpoint(0).value("state").toString(), QString("open"));
+        QTRY_VERIFY(listener.hasPendingConnections());
+        auto *peer = listener.nextPendingConnection();
+        QCOMPARE(call({"send", "A", "--format", "hex", "--data", "41 00 FF", "--line-ending", "crlf"}).code, 0);
+        QTRY_VERIFY(peer->bytesAvailable() >= 5);
+        QCOMPARE(peer->readAll(), QByteArray::fromHex("4100ff0d0a"));
+        peer->write("CLI-device-response\r\n");
+        QTRY_VERIFY(window.sessionRxBytes() >= 21);
+        auto *traffic = window.findChild<TrafficPanel *>();
+        QTRY_VERIFY(!traffic->queryTraffic({{"direction", "TX"}}).value("records").toArray().isEmpty());
+        const auto tx = call({"traffic", "--endpoint", "A", "--direction", "TX"}).body.value("records").toArray();
+        QVERIFY(!tx.isEmpty());
+        QCOMPARE(tx.last().toObject().value("origin").toString(), QString("AI"));
+        QCOMPARE(call({"ui-text", "--max-chars", "2048"}).code, 0);
+        QVERIFY(!call({"ui-text"}).body.value("text").toString().isEmpty());
+        QCOMPARE(call({"close", "A"}).code, 0);
+        QTRY_COMPARE(endpoint(0).value("state").toString(), QString("closed"));
+        QCOMPARE(call({"send", "A", "--format", "ascii", "--data", "closed"}).code, 5);
+
+        QUdpSocket udp;
+        QVERIFY(udp.bind(QHostAddress::LocalHost, 0));
+        QCOMPARE(call({"configure", "B", "--type", "udp", "--param", "udp.address=127.0.0.1",
+            "--param", "udp.port=0", "--param", "udp.target=127.0.0.1",
+            "--param", "udp.targetPort=" + QString::number(udp.localPort()), "--auto-recover", "false"}).code, 0);
+        QCOMPARE(call({"open", "B"}).code, 0);
+        QTRY_COMPARE(endpoint(1).value("state").toString(), QString("open"));
+        QCOMPARE(call({"send", "B", "--format", "ascii", "--data", "udp-cli"}).code, 0);
+        QTRY_VERIFY(udp.hasPendingDatagrams());
+        QByteArray data(64, '\0');
+        QHostAddress sender;
+        quint16 senderPort = 0;
+        const auto length = udp.readDatagram(data.data(), data.size(), &sender, &senderPort);
+        QCOMPARE(data.left(length), QByteArray("udp-cli"));
+        const auto before = window.sessionRxBytes();
+        QCOMPARE(udp.writeDatagram("udp-reply", sender, senderPort), qint64(9));
+        QTRY_VERIFY(window.sessionRxBytes() >= before + 9);
+        QCOMPARE(call({"traffic", "--endpoint", "B", "--direction", "RX"}).code, 0);
+        QCOMPARE(call({"close", "B"}).code, 0);
+        QTRY_COMPARE(endpoint(1).value("state").toString(), QString("closed"));
+    }
+
+    void cliStartsAbsentWindow()
+    {
+        QTemporaryDir directory;
+        // Use the test executable as a bounded, isolated GUI fixture. Cli::run
+        // launches its own executable, exactly as in the installed product.
+        const auto state = cliProcess({"state"}, directory.path(), QCoreApplication::applicationFilePath(), true);
+        QVERIFY2(state.code == 0, state.diagnostic.constData());
+        QCOMPARE(state.body.value("application").toString(), QString("QQCom"));
+        QVERIFY(state.body.value("pid").toInteger() != QCoreApplication::applicationPid());
+        QTRY_VERIFY_WITH_TIMEOUT(LocalControl::instances(directory.path()).isEmpty(), 6000);
+    }
+
+    void automationTcpClientRoundTripAndUiState()
+    {
+        MainWindow window;
+        QTcpServer peerServer;
+        QVERIFY(peerServer.listen(QHostAddress::LocalHost, 0));
+        const auto call = [&](const QString &name, const QJsonObject &arguments = {}) {
+            return window.executeAutomationTool(name, arguments);
+        };
+        const auto state = [&] {
+            return window.executeAutomationTool("qqcom_get_state", {}).value("endpoints").toArray().at(0).toObject();
+        };
+        QVERIFY(!call("qqcom_configure_endpoint", {{"endpoint", "A"}, {"type", "tcp-client"}, {"autoRecover", false},
+            {"parameters", QJsonObject{{"client.host", "127.0.0.1"}, {"client.port", peerServer.serverPort()}}}}).contains("error"));
+        const auto firstOpen = window.executeAutomationTool("qqcom_open_endpoint", {{"endpoint", "A"}});
+        QVERIFY(firstOpen.value("submitted").toBool());
+        QVERIFY(window.executeAutomationTool("qqcom_configure_endpoint", {{"endpoint", "A"}}).contains("error"));
+        // A repeated command before the worker processes the first must never toggle the endpoint closed.
+        window.executeAutomationTool("qqcom_open_endpoint", {{"endpoint", "A"}});
+        QTRY_COMPARE(state().value("state").toString(), QString("open"));
+        QTRY_VERIFY(!state().value("operationPending").toBool());
+        QTRY_VERIFY(peerServer.hasPendingConnections());
+        auto *peer = peerServer.nextPendingConnection();
+        QVERIFY(peer);
+        const auto selectors = window.findChildren<PortSelectorWidget *>();
+        QCOMPARE(selectors.at(0)->draft().kind, int(PortDraft::TcpClient));
+        const auto before = window.executeAutomationTool("qqcom_get_state", {}).value("send").toObject();
+        const auto sent = call("qqcom_send", {{"endpoint", "A"}, {"data", "41 00 FF"}, {"format", "hex"}, {"lineEnding", "crlf"}});
+        QVERIFY(!sent.contains("error"));
+        QCOMPARE(sent.value("bytes").toInt(), 5);
+        QTRY_VERIFY(peer->bytesAvailable() >= 5);
+        QCOMPARE(peer->readAll(), QByteArray::fromHex("4100ff0d0a"));
+        peer->write("device-response\r\n");
+        QTRY_VERIFY(window.sessionRxBytes() >= 17);
+        auto *panel = window.findChild<TrafficPanel *>();
+        QVERIFY(panel);
+        QTRY_VERIFY(panel->queryTraffic({{"direction", "RX"}}).value("records").toArray().size() > 0);
+        const auto history = call("qqcom_query_traffic", {{"direction", "TX"}});
+        const auto tx = history.value("records").toArray();
+        QVERIFY(!tx.isEmpty());
+        QCOMPARE(tx.last().toObject().value("origin").toString(), QString("AI"));
+        QCOMPARE(window.executeAutomationTool("qqcom_get_state", {}).value("send").toObject(), before);
+        QVERIFY(!call("qqcom_read_ui_text", {{"maxChars", 1024}}).value("text").toString().isEmpty());
+        QVERIFY(!call("qqcom_close_endpoint", {{"endpoint", "A"}}).contains("error"));
+        QTRY_COMPARE(state().value("state").toString(), QString("closed"));
+        QTRY_VERIFY(!state().value("operationPending").toBool());
+        QVERIFY(call("qqcom_send", {{"endpoint", "A"}, {"data", "hello"}, {"format", "utf8"}}).contains("error"));
+    }
+
+    void automationAllPortTypesAndAtomicValidation()
+    {
+        MainWindow window;
+        const auto configure = [&](const QString &type, const QJsonObject &parameters) {
+            return window.executeAutomationTool("qqcom_configure_endpoint", {{"endpoint", "B"}, {"type", type},
+                {"autoRecover", false}, {"parameters", parameters}});
+        };
+        QVERIFY(!configure("serial", {{"serial.port", "COM999"}, {"serial.baud", 230400}}).contains("error"));
+        QVERIFY(!configure("tcp-client", {{"client.host", "localhost"}, {"client.port", 8000}}).contains("error"));
+        QVERIFY(!configure("tcp-server", {{"server.address", "127.0.0.1"}, {"server.port", 0}}).contains("error"));
+        QVERIFY(!configure("udp", {{"udp.address", "127.0.0.1"}, {"udp.port", 0}, {"udp.target", "127.0.0.1"}}).contains("error"));
+        const auto before = window.executeAutomationTool("qqcom_get_state", {}).value("endpoints");
+        QVERIFY(configure("udp", {{"udp.targetPort", 65536}}).contains("error"));
+        QVERIFY(configure("udp", {{"client.port", 9000}}).contains("error"));
+        QVERIFY(configure("udp", {{"udp.target", "999.0.0.1"}}).contains("error"));
+        QVERIFY(window.executeAutomationTool("qqcom_configure_endpoint", {{"endpoint", "B"},
+            {"framing", QJsonObject{{"mode", "delimiter"}, {"delimiterHex", "F"}}}}).contains("error"));
+        QCOMPARE(window.executeAutomationTool("qqcom_get_state", {}).value("endpoints"), before);
+        const auto list = window.executeAutomationTool("qqcom_list_ports", {{"refresh", true}});
+        QVERIFY(list.value("localIPv4").toArray().contains("127.0.0.1"));
+    }
+
+    void automationHistoryCursorTruncationAndDisplayFilters()
+    {
+        TrafficPanel panel;
+        PortDraft a, b;
+        panel.setPorts({a, b});
+        auto *model = panel.findChild<TrafficModel *>();
+        auto *text = panel.findChild<TrafficTextView *>();
+        QVERIFY(model && text);
+        const auto message = [a](int id, const QByteArray &bytes) {
+            Traffic::Message result;
+            result.id = id;
+            result.source = Traffic::makeSource(a, 0);
+            result.direction = Traffic::Direction::Receive;
+            result.raw = bytes;
+            result.rawLength = bytes.size();
+            return result;
+        };
+        panel.appendMessages({message(1, "one"), message(2, "two"), message(3, QByteArray(5000, 'x'))});
+        QTRY_COMPARE(model->rowCount(), 3);
+        const auto first = panel.queryTraffic({{"limit", 2}});
+        QCOMPARE(first.value("records").toArray().size(), 2);
+        QVERIFY(first.value("hasMore").toBool());
+        const auto second = panel.queryTraffic({{"cursor", first.value("nextCursor")}});
+        QCOMPARE(second.value("records").toArray().size(), 1);
+        const auto record = second.value("records").toArray().first().toObject();
+        QVERIFY(record.value("truncated").toBool());
+        QCOMPARE(record.value("rawLength").toInt(), 5000);
+        QCOMPARE(record.value("previewLength").toInt(), 4096);
+        const auto displayed = panel.readDisplayedText(7);
+        QCOMPARE(displayed.value("text").toString(), text->toPlainText().right(7));
+        QVERIFY(displayed.value("truncated").toBool());
+        model->setBudget(100000, 1);
+        QVERIFY(panel.queryTraffic({{"cursor", first.value("nextCursor").toString().section(':', 0, 0) + ":0"}}).value("gap").toBool());
+        panel.clearTraffic();
+        QVERIFY(panel.queryTraffic({{"cursor", second.value("nextCursor")}}).contains("error"));
+        QVERIFY(panel.readDisplayedText(100).value("text").toString().isEmpty());
+    }
+
     void historyProjectionRestartsImmediatelyWithLatestConditions()
     {
         TrafficPanel panel;
@@ -1524,9 +1913,11 @@ private slots:
 
         // 行内控件三族：结尾符下拉（每行 1）、延时框（每行 1）、勾选框（每行 2——启用 + Hex）。
         // 它们的**对象身份**就是判据，所以下面的断言全部写成与遍历顺序无关的形式。
-        const auto tailsBefore = table->findChildren<QComboBox *>();
-        const auto checksBefore = table->findChildren<QCheckBox *>();
-        const auto delaysBefore = table->findChildren<QSpinBox *>();
+        auto *grid = table->findChild<QTableWidget *>();
+        QVERIFY(grid);
+        const auto tailsBefore = grid->findChildren<QComboBox *>();
+        const auto checksBefore = grid->findChildren<QCheckBox *>();
+        const auto delaysBefore = grid->findChildren<QSpinBox *>();
         QCOMPARE(tailsBefore.size(), 3);
         QCOMPARE(checksBefore.size(), 6);
         QCOMPARE(delaysBefore.size(), 3);
@@ -1542,9 +1933,9 @@ private slots:
 
         // ① 行内控件必须还是原来那些对象——重建过一次就说明"编辑 → 落库 → 重建"这条
         //    use-after-free 链条又回来了。
-        QCOMPARE(table->findChildren<QComboBox *>(), tailsBefore);
-        QCOMPARE(table->findChildren<QCheckBox *>(), checksBefore);
-        QCOMPARE(table->findChildren<QSpinBox *>(), delaysBefore);
+        QCOMPARE(grid->findChildren<QComboBox *>(), tailsBefore);
+        QCOMPARE(grid->findChildren<QCheckBox *>(), checksBefore);
+        QCOMPARE(grid->findChildren<QSpinBox *>(), delaysBefore);
 
         // ② 编辑必须落到模型（"静默"不等于"不生效"）。默认 enabled=true / isHex=false，
         //    全部点一遍之后每一行都该反过来。
@@ -1632,6 +2023,19 @@ private slots:
         auto *sendA = window.findChild<QPushButton *>(QStringLiteral("sendTargetA"));
         auto *sendB = window.findChild<QPushButton *>(QStringLiteral("sendTargetB"));
         QVERIFY(table && model && sendA && sendB);
+        QUdpSocket receiver;
+        QVERIFY(receiver.bind(QHostAddress::LocalHost, 0));
+        auto *endpoint = window.findChild<PortSelectorWidget *>(QStringLiteral("endpointB"));
+        QVERIFY(endpoint);
+        PortDraft udp;
+        udp.kind = PortDraft::Udp;
+        udp.values = {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
+                      {"udp.target", "127.0.0.1"}, {"udp.targetPort", receiver.localPort()}};
+        endpoint->setDraft(udp);
+        auto *open = endpoint->findChild<QPushButton *>(QStringLiteral("endpointAction"));
+        QVERIFY(open);
+        open->click();
+        QTRY_COMPARE(open->text(), QStringLiteral("解  绑"));
 
         CommandSet set;
         CommandItem text;
@@ -1664,6 +2068,10 @@ private slots:
 
         int rowsSeen = model->rowCount();
         rowSends.at(0)->click(); // 文本指令 → B
+        QTRY_VERIFY(receiver.hasPendingDatagrams());
+        QByteArray received(int(receiver.pendingDatagramSize()), '\0');
+        receiver.readDatagram(received.data(), received.size());
+        QCOMPARE(received, QByteArray("+CR,GO;\r\n"));
         QTRY_VERIFY(model->rowCount() > rowsSeen);
         auto sent = model->record(model->rowCount() - 1);
         QCOMPARE(sent.direction, Traffic::Direction::Transmit);
@@ -1672,6 +2080,10 @@ private slots:
 
         rowsSeen = model->rowCount();
         rowSends.at(1)->click(); // HEX 指令
+        QTRY_VERIFY(receiver.hasPendingDatagrams());
+        received.resize(int(receiver.pendingDatagramSize()));
+        receiver.readDatagram(received.data(), received.size());
+        QCOMPARE(received, QByteArray::fromHex("AA550D0A"));
         QTRY_VERIFY(model->rowCount() > rowsSeen);
         sent = model->record(model->rowCount() - 1);
         QCOMPARE(sent.direction, Traffic::Direction::Transmit);
@@ -2019,6 +2431,381 @@ private slots:
                 qPrintable(QStringLiteral("发送按钮未铺满列：按钮 %1，列 %2")
                     .arg(button->width()).arg(cell.width())));
         }
+    }
+
+    void commandRowEditsSurviveStructuralChanges_data()
+    {
+        QTest::addColumn<QString>("operation");
+        QTest::newRow("copy") << QStringLiteral("复制该指令");
+        QTest::newRow("delete") << QStringLiteral("删除该指令");
+        QTest::newRow("drag") << QStringLiteral("drag");
+    }
+
+    void commandRowEditsSurviveStructuralChanges()
+    {
+        QFETCH(QString, operation);
+        CommandTableWidget table;
+        table.setAttribute(Qt::WA_DontShowOnScreen);
+        table.resize(850, 400);
+        CommandSet set("edits");
+        for (int i = 0; i < 3; ++i) {
+            CommandItem command;
+            command.content = QString::number(i);
+            command.packMode = QStringLiteral("组包");
+            set.commands.append(command);
+        }
+        table.setCommandSet(set);
+        table.show();
+        auto *grid = table.findChild<QTableWidget *>();
+        QVERIFY(grid);
+        QTest::qWait(20);
+        grid->item(0, 2)->setText(QStringLiteral("EDITED"));
+        grid->cellWidget(0, 0)->findChild<QCheckBox *>()->setChecked(false);
+        grid->cellWidget(0, 3)->findChild<QCheckBox *>()->setChecked(true);
+        grid->cellWidget(0, 4)->findChild<QSpinBox *>()->setValue(321);
+        auto *tail = grid->cellWidget(0, 5)->findChild<QComboBox *>();
+        QCOMPARE(tail->itemText(1), QStringLiteral("+\\r"));
+        QCOMPARE(tail->itemText(2), QStringLiteral("+\\n"));
+        QCOMPARE(tail->itemText(3), QStringLiteral("+\\r\\n"));
+        tail->setCurrentIndex(3);
+        auto expected = set.commands.first();
+        expected.content = QStringLiteral("EDITED");
+        expected.enabled = false;
+        expected.isHex = true;
+        expected.delayMs = 321;
+        expected.tail = QStringLiteral("CR+LF");
+        QCOMPARE(table.commandSet().commands.first(), expected);
+        if (operation == "drag") {
+            const auto handle = grid->visualRect(grid->model()->index(0, 7)).center();
+            const auto target = grid->visualRect(grid->model()->index(2, 7));
+            const QPoint drop(target.center().x(), target.bottom() - 1);
+            QTest::mousePress(grid->viewport(), Qt::LeftButton, Qt::NoModifier, handle);
+            QTest::mouseMove(grid->viewport(), drop);
+            QTest::mouseRelease(grid->viewport(), Qt::LeftButton, Qt::NoModifier, drop);
+            QTRY_COMPARE(table.commandSet().commands.last(), expected);
+        } else {
+            bool invoked = false;
+            QTimer::singleShot(0, &table, [&] {
+                auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+                if (!menu) return;
+                for (auto *action : menu->actions()) {
+                    if (action->text() == operation) { action->trigger(); invoked = true; break; }
+                }
+                menu->close();
+            });
+            const int row = operation == QStringLiteral("删除该指令") ? 1 : 0;
+            grid->customContextMenuRequested(grid->visualItemRect(grid->item(row, 2)).center());
+            QVERIFY(invoked);
+            QCOMPARE(table.commandSet().commands.first(), expected);
+            if (operation == QStringLiteral("复制该指令")) {
+                auto copy = table.commandSet().commands.at(1);
+                QVERIFY(copy.id != expected.id);
+                copy.id = expected.id;
+                QCOMPARE(copy, expected);
+            }
+        }
+        QCOMPARE(table.commandSet().commands.size(), operation == QStringLiteral("复制该指令") ? 4
+                 : operation == QStringLiteral("删除该指令") ? 2 : 3);
+    }
+
+    void commandDeferredActionsCannotModifyAnotherGroup()
+    {
+        CommandTableWidget table;
+        table.resize(850, 400);
+        table.setAttribute(Qt::WA_DontShowOnScreen);
+        CommandSet first("first");
+        CommandItem item;
+        item.content = "FIRST";
+        first.commands = {item, CommandItem()};
+        CommandSet second("second");
+        item.id = QUuid::createUuid();
+        item.content = "SECOND";
+        second.commands = {item};
+        table.setCommandSet(first);
+        table.show();
+        auto *grid = table.findChild<QTableWidget *>();
+        QTest::qWait(20);
+        const auto handle = grid->visualRect(grid->model()->index(0, 7)).center();
+        const auto last = grid->visualRect(grid->model()->index(1, 7));
+        const QPoint drop(last.center().x(), last.bottom() - 1);
+        QTest::mousePress(grid->viewport(), Qt::LeftButton, Qt::NoModifier, handle);
+        QTest::mouseRelease(grid->viewport(), Qt::LeftButton, Qt::NoModifier, drop);
+        table.setCommandSet(second);
+        QTest::qWait(20);
+        QCOMPARE(table.commandSet().toJson(), second.toJson());
+        table.setCommandSet(first);
+        bool invoked = false;
+        QTimer::singleShot(0, &table, [&] {
+            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu) return;
+            table.setCommandSet(second);
+            for (auto *action : menu->actions()) {
+                if (action->text() == QStringLiteral("删除该指令")) {
+                    action->trigger();
+                    invoked = true;
+                    break;
+                }
+            }
+            menu->close();
+        });
+        grid->customContextMenuRequested(grid->visualItemRect(grid->item(0, 2)).center());
+        QVERIFY(invoked);
+        QCOMPARE(table.commandSet().toJson(), second.toJson());
+
+        // 底栏移动菜单也不能在切组后使用旧菜单移动另一组的勾选项。
+        table.setCommandSet(first);
+        table.setMoveTargetSets({first, second});
+        auto *move = table.findChild<QPushButton *>(QStringLiteral("moveCheckedCommands"));
+        QVERIFY(move && move->menu());
+        QSignalSpy requests(&table, &CommandTableWidget::moveCommandsRequested);
+        move->menu()->popup(move->mapToGlobal(QPoint(0, move->height())));
+        QVERIFY(!move->menu()->actions().isEmpty());
+        auto *staleAction = move->menu()->actions().first();
+        table.setCommandSet(second);
+        staleAction->trigger();
+        move->menu()->close();
+        QCOMPARE(requests.count(), 0);
+        QCOMPARE(table.commandSet().toJson(), second.toJson());
+    }
+
+    void commandMetadataChangesKeepEditorsAndSelection()
+    {
+        QTemporaryDir directory;
+        auto *manager = CommandManager::instance();
+        PreferencesStore backup(nullptr, directory.filePath("backup.ini"));
+        manager->save(&backup);
+        const auto restore = qScopeGuard([&] { manager->load(&backup); });
+        PreferencesStore store(nullptr, directory.filePath("metadata.ini"));
+        CommandPanel panel;
+        panel.setPreferencesStore(&store);
+        panel.setExpanded(true);
+        panel.setAttribute(Qt::WA_DontShowOnScreen);
+        panel.show();
+        auto source = manager->allSets().first();
+        CommandItem command;
+        command.content = "CURRENT";
+        command.delayMs = 500;
+        source.commands = {command};
+        manager->updateSet(source.id, source);
+        auto *table = panel.findChild<CommandTableWidget *>();
+        auto *grid = table->findChild<QTableWidget *>();
+        auto *check = grid->cellWidget(0, 0);
+        grid->selectRow(0);
+        grid->editItem(grid->item(0, 2));
+        QVERIFY(table->hasActiveEditor());
+        CommandSet other("other");
+        manager->addSet(other);
+        source.name = "renamed";
+        manager->updateSet(source.id, source);
+        QCOMPARE(grid->cellWidget(0, 0), check);
+        QCOMPARE(grid->selectionModel()->selectedRows().size(), 1);
+        QVERIFY(table->hasActiveEditor());
+        QCOMPARE(table->commandSet().name, source.name);
+        auto *batch = table->findChild<QPushButton *>(QStringLiteral("primaryButton"));
+        batch->click();
+        QVERIFY(panel.hasPendingSends());
+        auto *selector = panel.findChild<QComboBox *>(QStringLiteral("commandSetSelector"));
+        selector->setCurrentIndex(selector->findData(other.id.toString()));
+        QVERIFY(!panel.hasPendingSends());
+    }
+
+    void movingCheckedCommandsPreservesDataAndPersists()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        auto *manager = CommandManager::instance();
+        PreferencesStore backup(nullptr, dir.filePath(QStringLiteral("backup.ini")));
+        manager->save(&backup);
+        const auto restore = qScopeGuard([&] { manager->load(&backup); });
+        PreferencesStore store(nullptr, dir.filePath(QStringLiteral("move.ini")));
+        CommandPanel panel;
+        panel.setPreferencesStore(&store);
+        panel.setExpanded(true);
+        panel.resize(900, 500);
+        panel.setAttribute(Qt::WA_DontShowOnScreen);
+        panel.show();
+        auto *table = panel.findChild<CommandTableWidget *>();
+        auto *selector = panel.findChild<QComboBox *>(QStringLiteral("commandSetSelector"));
+        auto *move = panel.findChild<QPushButton *>(QStringLiteral("moveCheckedCommands"));
+        QVERIFY(table && selector && move && move->menu());
+        CommandSet source = manager->getSet(selector->currentData().toUuid());
+        source.notes = QStringLiteral("保留来源备注");
+        for (int i = 0; i < 4; ++i) {
+            CommandItem command;
+            command.content = QStringLiteral("AA 0%1").arg(i);
+            command.description = QStringLiteral("指令%1").arg(i);
+            command.isHex = true;
+            command.tail = QStringLiteral("CR+LF");
+            command.packMode = QStringLiteral("组包");
+            command.delayMs = 80;
+            command.enabled = false;
+            source.commands.append(command);
+        }
+        manager->updateSet(source.id, source);
+        QVERIFY(!move->isEnabled()); // 只有一组。
+        CommandSet target(QStringLiteral("目标组"));
+        target.notes = QStringLiteral("保留目标备注");
+        CommandItem existing;
+        existing.content = QStringLiteral("EXISTING");
+        target.commands = {existing};
+        manager->addSet(target);
+        QVERIFY(!move->isEnabled()); // 没有勾选。
+        target.name = QStringLiteral("目标 & 分组");
+        manager->updateSet(target.id, target);
+        auto *grid = table->findChild<QTableWidget *>();
+        QVERIFY(grid);
+        grid->cellWidget(0, 0)->findChild<QCheckBox *>()->setChecked(true);
+        grid->cellWidget(2, 0)->findChild<QCheckBox *>()->setChecked(true);
+        grid->item(0, 2)->setText(QStringLiteral("AA FF")); // 移动最新编辑值。
+        grid->cellWidget(2, 4)->findChild<QSpinBox *>()->setValue(123);
+        grid->selectRow(1); // 行选中不影响「移动勾选」。
+        const auto before = table->commandSet();
+        QVERIFY(move->isEnabled());
+        panel.resize(panel.expandedMinimumWidth(), 500);
+        QTest::qWait(20);
+        const auto artifactDir = qEnvironmentVariable("QQCOM_UI_ARTIFACT_DIR");
+        if (!artifactDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(artifactDir));
+            QVERIFY(panel.grab().save(artifactDir + QStringLiteral("/command-move-panel.png")));
+        }
+
+        QSignalSpy sent(&panel, &CommandPanel::sendCommand);
+        auto *batch = table->findChild<QPushButton *>(QStringLiteral("primaryButton"));
+        QVERIFY(batch);
+        batch->click();
+        QVERIFY(panel.hasPendingSends());
+        QSignalSpy broadcast(manager, &CommandManager::setsChanged);
+        bool selectedTarget = false;
+        QStringList menuTargets;
+        QTimer::singleShot(0, &panel, [&] {
+            menuTargets.append(QStringLiteral("菜单已打开"));
+            const auto actions = move->menu()->actions();
+            for (auto *action : actions)
+                menuTargets.append(action->text() + action->data().toUuid().toString());
+            if (actions.size() == 1 && actions.first()->data().toUuid() == target.id
+                && actions.first()->text() == QStringLiteral("目标 && 分组")) {
+                selectedTarget = true;
+                actions.first()->trigger();
+            }
+            move->menu()->close();
+        });
+        move->showMenu();
+        QTRY_VERIFY2(selectedTarget, qPrintable(menuTargets.join(QLatin1Char('\n'))));
+        QCOMPARE(broadcast.count(), 1);
+        QVERIFY(!panel.hasPendingSends());
+        QTest::qWait(230);
+        QCOMPARE(sent.count(), 0);
+        const auto remaining = manager->getSet(source.id);
+        const auto moved = manager->getSet(target.id);
+        QCOMPARE(remaining.notes, source.notes);
+        QCOMPARE(remaining.commands.size(), 2);
+        QCOMPARE(remaining.commands.at(0).toJson(), before.commands.at(1).toJson());
+        QCOMPARE(remaining.commands.at(1).toJson(), before.commands.at(3).toJson());
+        QCOMPARE(moved.notes, target.notes);
+        QCOMPARE(moved.commands.size(), 3);
+        QCOMPARE(moved.commands.at(0).toJson(), existing.toJson());
+        QCOMPARE(moved.commands.at(1).toJson(), before.commands.at(0).toJson());
+        QCOMPARE(moved.commands.at(2).toJson(), before.commands.at(2).toJson());
+        QCOMPARE(table->commandSet().toJson(), remaining.toJson());
+        QCOMPARE(selector->currentData().toUuid(), source.id);
+        QVERIFY(!move->isEnabled());
+        selector->setCurrentIndex(selector->findData(target.id.toString()));
+        QCOMPARE(table->commandSet().toJson(), moved.toJson());
+        manager->load(&store);
+        QCOMPARE(manager->getSet(source.id).toJson(), remaining.toJson());
+        QCOMPARE(manager->getSet(target.id).toJson(), moved.toJson());
+    }
+
+    void movingSelectedCommandsUsesRowsRatherThanChecks()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        auto *manager = CommandManager::instance();
+        PreferencesStore backup(nullptr, dir.filePath(QStringLiteral("backup.ini")));
+        manager->save(&backup);
+        const auto restore = qScopeGuard([&] { manager->load(&backup); });
+        PreferencesStore store(nullptr, dir.filePath(QStringLiteral("move.ini")));
+        CommandPanel panel;
+        panel.setPreferencesStore(&store);
+        panel.setExpanded(true);
+        panel.resize(900, 500);
+        panel.setAttribute(Qt::WA_DontShowOnScreen);
+        panel.show();
+        auto *table = panel.findChild<CommandTableWidget *>();
+        auto *selector = panel.findChild<QComboBox *>(QStringLiteral("commandSetSelector"));
+        QVERIFY(table && selector);
+        CommandSet source = manager->getSet(selector->currentData().toUuid());
+        for (int i = 0; i < 4; ++i) {
+            CommandItem command;
+            command.content = QStringLiteral("ROW%1").arg(i);
+            command.enabled = (i == 1);
+            source.commands.append(command);
+        }
+        manager->updateSet(source.id, source);
+        CommandSet target(QStringLiteral("目标组"));
+        manager->addSet(target);
+        // 同名分组按 UUID 区分。
+        CommandSet other(target.name);
+        manager->addSet(other);
+        auto *grid = table->findChild<QTableWidget *>();
+        QVERIFY(grid);
+        QTest::qWait(20);
+        const auto rowPoint = [&](int row) { return grid->visualItemRect(grid->item(row, 2)).center(); };
+        QTest::mouseClick(grid->viewport(), Qt::LeftButton, Qt::NoModifier, rowPoint(2));
+        QTest::mouseClick(grid->viewport(), Qt::LeftButton, Qt::ControlModifier, rowPoint(0));
+        QCOMPARE(grid->selectionModel()->selectedRows().size(), 2);
+        QSignalSpy sent(&panel, &CommandPanel::sendCommand);
+        QSignalSpy requests(table, &CommandTableWidget::moveCommandsRequested);
+        bool menuValid = false;
+        const auto openContextMenu = [&](int row, bool choose) {
+            QTimer::singleShot(0, &panel, [&, choose] {
+                auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+                auto *moves = menu ? menu->findChild<QMenu *>(QStringLiteral("moveSelectedCommands")) : nullptr;
+                if (moves && moves->isEnabled() && moves->actions().size() == 2) {
+                    for (auto *action : moves->actions()) {
+                        if (action->data().toUuid() == target.id) {
+                            menuValid = true;
+                            if (choose) action->trigger();
+                            break;
+                        }
+                    }
+                }
+                if (menu) menu->close();
+            });
+            grid->customContextMenuRequested(rowPoint(row));
+        };
+        openContextMenu(0, false); // 取消菜单不修改数据。
+        QVERIFY(menuValid);
+        QCOMPARE(requests.count(), 0);
+        QCOMPARE(table->commandSet().toJson(), source.toJson());
+        openContextMenu(0, true);
+        QCOMPARE(requests.count(), 1);
+        QCOMPARE(requests.first().at(0).value<QList<int>>(), QList<int>({0, 2}));
+        auto moved = manager->getSet(target.id);
+        QCOMPARE(moved.commands.size(), 2);
+        QCOMPARE(moved.commands.at(0).toJson(), source.commands.at(0).toJson());
+        QCOMPARE(moved.commands.at(1).toJson(), source.commands.at(2).toJson());
+        QVERIFY(manager->getSet(other.id).commands.isEmpty());
+
+        // 右键未选中的行时，只移动右键所在行。
+        grid->selectRow(0);
+        openContextMenu(1, true);
+        QCOMPARE(requests.count(), 2);
+        QCOMPARE(requests.last().at(0).value<QList<int>>(), QList<int>({1}));
+        moved = manager->getSet(target.id);
+        QCOMPARE(moved.commands.last().toJson(), source.commands.at(3).toJson());
+        QCOMPARE(table->commandSet().commands.first().toJson(), source.commands.at(1).toJson());
+        QCOMPARE(sent.count(), 0);
+
+        const auto beforeInvalid = manager->getSet(source.id).toJson();
+        table->moveCommandsRequested({0}, source.id);
+        table->moveCommandsRequested({0}, QUuid::createUuid());
+        table->moveCommandsRequested({0, 9}, target.id);
+        QCOMPARE(manager->getSet(source.id).toJson(), beforeInvalid);
+        QCOMPARE(manager->getSet(target.id).toJson(), moved.toJson());
+        manager->load(&store);
+        QCOMPARE(manager->getSet(source.id).toJson(), beforeInvalid);
+        QCOMPARE(manager->getSet(target.id).toJson(), moved.toJson());
     }
 
     // 扩展面板的「分组」：只改下拉框就要落盘，下次启动还要回到那一组。
@@ -2427,7 +3214,18 @@ private slots:
         window.show();
         const auto fill = [](QLabel *badge) {
             const QImage image = badge->grab().toImage();
-            return image.pixelColor(image.width() / 2, image.height() / 2);
+            // 中心可能是抗锯齿字形；背景占像素多数，不依赖字体与 DPI。
+            QHash<QRgb, int> counts;
+            QRgb dominant = 0;
+            int maximum = 0;
+            for (int y = 0; y < image.height(); ++y) {
+                for (int x = 0; x < image.width(); ++x) {
+                    const auto pixel = image.pixel(x, y);
+                    const int count = ++counts[pixel];
+                    if (count > maximum) { maximum = count; dominant = pixel; }
+                }
+            }
+            return QColor::fromRgba(dominant);
         };
         QCOMPARE(fill(badgeA), QColor(0xB4, 0x53, 0x09));
         QCOMPARE(fill(badgeB), QColor(0x0E, 0x74, 0x90));
@@ -3641,7 +4439,7 @@ private slots:
         // 用户主动停止是正常状态迁移：State 行「已关闭」，不弹窗。
         action->click();
         QTRY_COMPARE(action->text(), QStringLiteral("监  听"));
-        QVERIFY2(text->toPlainText().contains(QStringLiteral("已关闭")),
+        QTRY_VERIFY2(text->toPlainText().contains(QStringLiteral("已关闭")),
             qPrintable(text->toPlainText()));
         QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
     }
@@ -4574,20 +5372,26 @@ private slots:
         // 修 bug 时很容易顺手改成无条件启用，那等于把"能不能发"变成"点了才知道"。
         QVERIFY2(!send->isEnabled(), "未连接端点时发送按钮不该可用");
 
-        // 目标是发送区当前选中的端点。默认只勾着 A（串口）。这里改成只勾 B
-        //（TCP 服务器，不需要真实硬件），顺带验证目标切换会刷新可用性。
+        // 目标切换刷新可用性；B 使用真实 UDP 回环接收器验收发送字节。
+        QUdpSocket receiver;
+        QVERIFY(receiver.bind(QHostAddress::LocalHost, 0));
+        PortDraft udp;
+        udp.kind = PortDraft::Udp;
+        udp.values = {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
+                      {"udp.target", "127.0.0.1"}, {"udp.targetPort", receiver.localPort()}};
+        b->setDraft(udp);
         if (!targetB->isChecked()) targetB->click();
         if (targetA->isChecked()) targetA->click();
         QVERIFY(!targetA->isChecked() && targetB->isChecked());
         QCOMPARE(panel->targetMask(), 2);
 
-        // 打开 B：走端点动作按钮，与用户操作同一条路 → runtime 监听 → 状态回传。
+        // 打开 B：走真实端点动作与状态回传。
         auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
         QVERIFY(action);
         action->click();
-        QTRY_COMPARE(action->text(), QStringLiteral("停  止"));
+        QTRY_COMPARE(action->text(), QStringLiteral("解  绑"));
 
-        // ★ 核心断言：端点打开后发送按钮必须启用。这一条正是"接线缺失"的探测器。
+        // 端点打开后发送按钮必须启用。
         QTRY_VERIFY2(send->isEnabled(),
             "端点已监听，但发送按钮仍禁用——检查 handleEndpointState 是否把状态喂给了 SendPanel");
 
@@ -4600,8 +5404,7 @@ private slots:
         suffix->setCurrentIndex(3); // +CR+LF
         QTRY_VERIFY(send->isEnabled());
 
-        // 手动发送：消息必须真的进模型（TCP 服务器暂无客户端，写入可能失败，
-        // 但"发出了一条 TX"这件事必须成立——失败也要留下可见记录）。
+        // 手动发送：真实接收端和历史记录的载荷一致。
         const int rowsBefore = model->rowCount();
         send->click();
         QTRY_VERIFY(model->rowCount() > rowsBefore);
@@ -4610,6 +5413,10 @@ private slots:
         QCOMPARE(sent.source.endpointIndex, 1);       // 发去了选中的 B，不是默认的 A
         QCOMPARE(sent.origin, Traffic::Origin::Manual); // 手点 = 手动
         QCOMPARE(sent.raw, QByteArray("+CR,GO;\r\n")); // 末尾真的追加在字节末尾
+        QTRY_VERIFY(receiver.hasPendingDatagrams());
+        QByteArray received(int(receiver.pendingDatagramSize()), Qt::Uninitialized);
+        QCOMPARE(receiver.readDatagram(received.data(), received.size()), qint64(received.size()));
+        QCOMPARE(received, sent.raw);
 
         // 两个都选中：同一拍发到 A 和 B。A 没打开，也要留下一条失败记录。
         targetA->click();
@@ -4621,11 +5428,10 @@ private slots:
         bool sawB = false;
         for (int row = rowsBeforeBoth; row < model->rowCount(); ++row) {
             const auto record = model->record(row);
-            if (record.direction != Traffic::Direction::Transmit) continue;
-            if (record.source.endpointIndex == 0) sawA = true;
-            if (record.source.endpointIndex == 1) sawB = true;
+            if (record.source.endpointIndex == 0 && record.direction == Traffic::Direction::Error) sawA = true;
+            if (record.source.endpointIndex == 1 && record.direction == Traffic::Direction::Transmit) sawB = true;
         }
-        QVERIFY2(sawA && sawB, "两个都选中时应同时发到 A 和 B");
+        QVERIFY2(sawA && sawB, "两个都选中时，A 关闭应记录失败，B 应成功发送");
         targetA->click();
         QCOMPARE(panel->targetMask(), 2);
 
@@ -4644,7 +5450,7 @@ private slots:
 
         // 关闭端点后按钮必须回到禁用：可用性跟着连接状态走，不是一次性的。
         action->click();
-        QTRY_COMPARE(action->text(), QStringLiteral("监  听"));
+        QTRY_COMPARE(action->text(), QStringLiteral("绑  定"));
         QTRY_VERIFY2(!send->isEnabled(), "端点已关闭，发送按钮应回到禁用");
     }
 
@@ -7701,10 +8507,17 @@ private slots:
 
         if (!targetB->isChecked()) targetB->click();
         if (targetA->isChecked()) targetA->click();
+        QUdpSocket receiver;
+        QVERIFY(receiver.bind(QHostAddress::LocalHost, 0));
+        PortDraft udp;
+        udp.kind = PortDraft::Udp;
+        udp.values = {{"udp.address", "127.0.0.1"}, {"udp.port", 0},
+                      {"udp.target", "127.0.0.1"}, {"udp.targetPort", receiver.localPort()}};
+        b->setDraft(udp);
         auto *action = b->findChild<QPushButton *>(QStringLiteral("endpointAction"));
         QVERIFY(action);
         action->click();
-        QTRY_COMPARE(action->text(), QStringLiteral("停  止"));
+        QTRY_COMPARE(action->text(), QStringLiteral("解  绑"));
         auto *format = window.findChild<QComboBox *>(QStringLiteral("sendFormat"));
         auto *suffix = window.findChild<QComboBox *>(QStringLiteral("sendSuffix"));
         QVERIFY(format && suffix);
@@ -7718,6 +8531,10 @@ private slots:
         QTRY_VERIFY(model->rowCount() > rowsBefore);
         QCOMPARE(editor->toPlainText(), QStringLiteral("AT"));
         QCOMPARE(model->record(model->rowCount() - 1).raw, QByteArray("AT"));
+        QTRY_VERIFY(receiver.hasPendingDatagrams());
+        QByteArray received(int(receiver.pendingDatagramSize()), Qt::Uninitialized);
+        QCOMPARE(receiver.readDatagram(received.data(), received.size()), qint64(received.size()));
+        QCOMPARE(received, QByteArray("AT"));
 
         cursor = editor->textCursor();
         cursor.movePosition(QTextCursor::End);
@@ -7762,7 +8579,7 @@ private slots:
         QVERIFY(!clearOnEnter->isEnabled());
         QVERIFY(clearOnEnter->isChecked());
         action->click();
-        QTRY_COMPARE(action->text(), QStringLiteral("监  听"));
+        QTRY_COMPARE(action->text(), QStringLiteral("绑  定"));
     }
 
     // 串口被占用时勾选自动恢复再打开：按钮进入「等待中」，再点一次必须停住，
@@ -7912,6 +8729,13 @@ private slots:
 
 int main(int argc, char **argv)
 {
+    if (argc > 1 && QByteArray(argv[1]) == "--cli") {
+        QCoreApplication app(argc, argv);
+        app.setOrganizationName("QQComTests");
+        app.setApplicationName("QQComUiTests");
+        QStandardPaths::setTestModeEnabled(true);
+        return Cli::run(app.arguments().mid(2), "test");
+    }
     // UI smoke tests must run outside Qt Creator and on headless CI agents.
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
         qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -7919,6 +8743,11 @@ int main(int argc, char **argv)
     app.setOrganizationName("QQComTests");
     app.setApplicationName("QQComUiTests");
     QStandardPaths::setTestModeEnabled(true);
+    if (qEnvironmentVariable("QQCOM_CLI_STARTUP_FIXTURE") == "1") {
+        MainWindow window;
+        QTimer::singleShot(2500, &app, &QCoreApplication::quit);
+        return app.exec();
+    }
     UiSmokeTest test;
     return QTest::qExec(&test, argc, argv);
 }

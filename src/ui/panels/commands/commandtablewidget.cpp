@@ -80,29 +80,17 @@ protected:
     }
 };
 
-// 批量填充表格期间统一持有 m_updating 的 RAII 守卫。
-// 旧实现让 updateRow() 自己 m_updating = true/false，结果 refreshTable() 填完第一行后
-// 保护就被打回 false，后续行的 setItem() 会 emit cellChanged → commandsChanged →
-// 面板回写模型。改由调用方持有，保证整段填充期间保护一直有效，并支持嵌套调用。
-class UpdateGuard
-{
-public:
-    explicit UpdateGuard(bool &flag) : m_flag(flag), m_oldValue(flag) { m_flag = true; }
-    ~UpdateGuard() { m_flag = m_oldValue; }
-
-    UpdateGuard(const UpdateGuard &) = delete;
-    UpdateGuard &operator=(const UpdateGuard &) = delete;
-
-private:
-    bool &m_flag;
-    bool m_oldValue;
-};
-
-// 结尾符下拉的显示名。顺序与 CommandTail 的取值（0/1/2/3）一一对应，
-// 所以存/取都用 currentIndex，不依赖翻译后的文本。
+// 显示名与 tailValues 的实际值同序，存取使用选项 data，不依赖翻译文本。
 QStringList tailLabels()
 {
-    return {QObject::tr("无"), QObject::tr("+\\r\\n"), QObject::tr("+\\r"), QObject::tr("+\\n")};
+    return {QObject::tr("无"), QObject::tr("+\\r"), QObject::tr("+\\n"), QObject::tr("+\\r\\n")};
+}
+
+const QStringList &tailValues()
+{
+    static const QStringList values{QStringLiteral("无"), QStringLiteral("CR"),
+                                    QStringLiteral("LF"), QStringLiteral("CR+LF")};
+    return values;
 }
 
 // Qt 表格的 WordWrap 只在空白处折。AT 指令几乎没有空格，开了折行也还是一行，
@@ -127,7 +115,6 @@ public:
     explicit ContentColumnDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
 
     void setWrap(bool wrap) { m_wrap = wrap; }
-    bool wrap() const { return m_wrap; }
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
                const QModelIndex &index) const override
@@ -238,6 +225,12 @@ private:
 CommandTableWidget::CommandTableWidget(QWidget *parent) : QWidget(parent)
 {
     setupUi();
+    connect(this, &CommandTableWidget::structureAboutToChange, this, [this] {
+        ++m_structureRevision;
+        m_dragRow = -1;
+        hideDropIndicator();
+        m_table->viewport()->unsetCursor();
+    });
 }
 
 void CommandTableWidget::setupUi()
@@ -286,6 +279,7 @@ void CommandTableWidget::setupUi()
     m_table->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_table->verticalHeader()->setMinimumSectionSize(24);
     m_table->setSelectionBehavior(QTableWidget::SelectRows);
+    m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_table->setEditTriggers(QTableWidget::DoubleClicked | QTableWidget::EditKeyPressed);
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
     // 手柄列的按下/移动/释放要在视口上拦：QTableWidget 自带的 InternalMove 只搬 item，
@@ -299,10 +293,10 @@ void CommandTableWidget::setupUi()
     //   纵向 —— ResizeToContents 算出新行高（增删行、字号/DPI 变化都走这里）
     //   横向 —— updateSendColumnWidth / updateTailColumnWidth 改列宽
     // 两者都是 Qt 自己发的"这块几何变了"通知，是唯一事实来源。
-    // **只同步那一段**（信号带 first/last）：纵向一次性 resize 所有行时 last-first 可能很大，
-    // 但这时只同步真正受影响的行段，远比整表遍历便宜；批量填充期间由挂起标志整个跳过。
+    // sectionResized 的参数是行号、旧高度、新高度；只同步该行。
+    // 批量调整行高时挂起联动，结束后统一同步。
     connect(m_table->verticalHeader(), &QHeaderView::sectionResized, this,
-            [this](int first, int last, int) { syncCellWidgetGeometry(first, last); });
+            [this](int row, int, int) { syncCellWidgetGeometry(row, row); });
     connect(m_table->horizontalHeader(), &QHeaderView::sectionResized, this,
             [this](int logical, int oldSize, int newSize) {
                 syncCellWidgetGeometry();
@@ -326,6 +320,20 @@ void CommandTableWidget::setupUi()
     m_removeButton = new QPushButton(tr("删除勾选"), this);
     m_removeButton->setObjectName("removeChecked");
     m_removeButton->setToolTip(tr("删除所有已勾选的指令，删除前会先确认"));
+    m_moveCheckedButton = new QPushButton(tr("移动勾选到"), this);
+    m_moveCheckedButton->setObjectName(QStringLiteral("moveCheckedCommands"));
+    auto *moveMenu = new QMenu(m_moveCheckedButton);
+    m_moveCheckedButton->setMenu(moveMenu);
+    connect(moveMenu, &QMenu::aboutToShow, this, [this, moveMenu] {
+        moveMenu->clear();
+        populateMoveMenu(moveMenu);
+        moveMenu->setProperty("structureRevision", m_structureRevision);
+    });
+    connect(moveMenu, &QMenu::triggered, this, [this, moveMenu](QAction *action) {
+        if (moveMenu->property("structureRevision").toULongLong() == m_structureRevision)
+            emit moveCommandsRequested(checkedRows(), action->data().toUuid());
+    });
+    updateMoveAvailability();
     m_loopSend = new QCheckBox(tr("循环发送"), this);
     m_loopSend->setObjectName(QStringLiteral("loopBatchSend"));
     m_loopSend->setToolTip(tr("勾选后「按序发送勾选项」发完最后一条回到第一条，再点一次按钮停止"));
@@ -339,7 +347,7 @@ void CommandTableWidget::setupUi()
     connect(m_removeButton, &QPushButton::clicked, this, &CommandTableWidget::removeCommand);
     connect(m_batchSendButton, &QPushButton::clicked, this, [this] {
         // 循环进行中按钮文案是「停止循环」。再点一次只停，不重新开一轮。
-        if (m_batchSendButton->property("looping").toBool()) {
+        if (m_batchLooping) {
             emit batchSendStopRequested();
             return;
         }
@@ -348,13 +356,14 @@ void CommandTableWidget::setupUi()
         const QList<int> rows = checkedRows();
         QList<CommandItem> commands;
         commands.reserve(rows.size());
-        for (int row : rows) commands.append(commandFromRow(row));
+        for (int row : rows) commands.append(m_currentSet.commands.at(row));
         if (!commands.isEmpty())
             emit batchSendRequested(rows, commands, m_loopSend && m_loopSend->isChecked());
     });
 
     buttonLayout->addWidget(m_addButton);
     buttonLayout->addWidget(m_removeButton);
+    buttonLayout->addWidget(m_moveCheckedButton);
     buttonLayout->addStretch();
     buttonLayout->addWidget(m_loopSend);
     buttonLayout->addWidget(m_batchSendButton);
@@ -364,38 +373,60 @@ void CommandTableWidget::setupUi()
 
 void CommandTableWidget::setCommandSet(const CommandSet &set)
 {
+    const bool contentChanged = set.id != m_currentSet.id || set.commands != m_currentSet.commands;
+    if (contentChanged) emit structureAboutToChange();
     m_currentSet = set;
-    refreshTable();
+    if (contentChanged) refreshTable();
+    else updateMoveAvailability();
+}
+
+void CommandTableWidget::setMoveTargetSets(const QList<CommandSet> &sets)
+{
+    // 只保留身份和名称；菜单打开时再生成，不在控件发信号期间销毁菜单项。
+    m_moveTargetSets.clear();
+    for (const auto &set : sets) m_moveTargetSets.append({set.id, set.name});
+    updateMoveAvailability();
+}
+
+void CommandTableWidget::populateMoveMenu(QMenu *menu)
+{
+    for (const auto &target : m_moveTargetSets) {
+        if (target.first == m_currentSet.id) continue;
+        auto *action = menu->addAction(QString(target.second).replace(QLatin1Char('&'), QStringLiteral("&&")));
+        action->setData(target.first);
+        action->setToolTip(target.second);
+    }
+}
+
+void CommandTableWidget::updateMoveAvailability()
+{
+    const bool hasTarget = std::any_of(m_moveTargetSets.cbegin(), m_moveTargetSets.cend(),
+        [this](const auto &target) { return target.first != m_currentSet.id; });
+    m_moveCheckedButton->setEnabled(hasTarget && m_checkedCount > 0);
+    m_moveCheckedButton->setToolTip(!hasTarget
+        ? tr("请先添加其他分组，再移动勾选的指令")
+        : tr("将所有已勾选的指令按列表顺序移到目标分组末尾"));
 }
 
 CommandSet CommandTableWidget::commandSet() const
 {
-    // 从表格收集当前状态
-    CommandSet set = m_currentSet;
-    set.commands.clear();
-
-    for (int row = 0; row < m_table->rowCount(); ++row) {
-        set.commands.append(commandFromRow(row));
-    }
-
-    return set;
-}
-
-QList<CommandItem> CommandTableWidget::enabledCommands() const
-{
-    QList<CommandItem> commands;
-    for (int row = 0; row < m_table->rowCount(); ++row) {
-        CommandItem cmd = commandFromRow(row);
-        if (cmd.enabled) {
-            commands.append(cmd);
-        }
-    }
-    return commands;
+    // 每次编辑只同步对应行；快照利用 Qt 隐式共享，不再扫描控件树。
+    return m_currentSet;
 }
 
 int CommandTableWidget::rowCount() const
 {
     return m_table ? m_table->rowCount() : 0;
+}
+
+bool CommandTableWidget::hasActiveEditor() const
+{
+    // Delegate editors live directly on the viewport. Cell widgets (checkboxes,
+    // delay spin boxes, suffix combos) have their own wrappers instead.
+    for (auto *child : m_table->viewport()->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly))
+        if (!child->isHidden() && (qobject_cast<QLineEdit *>(child) || qobject_cast<QPlainTextEdit *>(child)))
+            return true;
+    return false;
 }
 
 // 勾选列现在是一个 QCheckBox 控件（QSS 覆盖得到），取勾选状态要走控件而不是 item。
@@ -413,89 +444,52 @@ bool CommandTableWidget::isRowChecked(int row) const
 QList<int> CommandTableWidget::checkedRows() const
 {
     QList<int> rows;
-    for (int row = 0; row < m_table->rowCount(); ++row) {
-        if (isRowChecked(row)) rows.append(row);
+    rows.reserve(m_checkedCount);
+    for (int row = 0; row < m_currentSet.commands.size(); ++row) {
+        if (m_currentSet.commands.at(row).enabled) rows.append(row);
     }
     return rows;
 }
 
 void CommandTableWidget::refreshTable()
 {
-    // 守卫覆盖整段填充：期间 setItem/setCellWidget 产生的 cellChanged 一律不回写模型
-    const UpdateGuard guard(m_updating);
-    // 逐行建 cellWidget 会连续改动行高 → 触发多轮重排/重绘。整段填充期间关掉更新，
-    // 只在最后一次性刷新；否则每次 refreshTable 都要走 N 轮布局（大表格下就是卡顿来源）。
+    const QScopedValueRollback<bool> updating(m_updating, true);
     m_table->setUpdatesEnabled(false);
-    // 逐行填充期间挂起几何同步：否则每行 setCellWidget → 行高变化 → sectionResized →
-    // 全表遍历一遍，整体退化成 O(n²)（见 syncCellWidgetGeometry 的说明）。
-    // 这对守卫必须在最后一次同步之前结束。挂着的时候 sync / 行高重算会直接返回，
-    // 填充结束后那一次就变成空操作，单元格控件还停在旧位置上。
     {
-    const QSignalBlocker headerBlocker(m_table->horizontalHeader());
-    const QScopedValueRollback<bool> geometryGuard(m_geometrySyncSuspended, true);
-
-    // 先清空旧内容再重建，而不是直接在原表上覆写。
-    //
-    // 两个必须同时满足的约束，前两版各踩了一边：
-    //
-    // ① **不能把旧控件留在表格的控件树里等 deleteLater**（这是 `clearContents()` /
-    //    直接 `setCellWidget` 覆写的默认行为，QAbstractItemView 就是这么排的）。
-    //    刷新是同步路径，不返回事件循环 → 延迟删除永远排不上队 → 控件逐轮累积在
-    //    视口下，下一轮还要额外背上一整屏旧控件的代价。探针 command_refresh_perf
-    //    实测 300 行连刷从 330ms 一路涨到 5.7 秒，正是用户报的"列表越用越卡"。
-    //
-    // ② **也不能当场 delete**。重建往往发生在"行内控件自己的信号"里：用户点选
-    //    结尾符下拉框 → activated → commandsChanged → 落库；拖拽手柄 → 鼠标释放
-    //    → moveRow → 重建。此时事件链上那个控件（下拉框本体 / 手柄的宿主容器）
-    //    正处在自己的事件或信号派发中，立即析构它 = use-after-free，
-    //    下一句回到它内部就崩——用户报的"选换行符崩""拖动崩"都是这个。
-    //
-    // 两者兼顾的做法：**立刻把它从控件树里摘出去**（解掉①），**把析构留给 Qt**
-    // （解掉②）。`removeCellWidget()` 内部已经为旧控件排好了 deleteLater，我们
-    // 只负责让它同时离开父子树 —— 树的规模因此不再随刷新轮数增长，而真正的
-    // 析构发生在本轮事件派发退栈之后，那时代码已经不在被销毁对象的栈帧里。
-    // 先 hide() 再脱父：setParent(nullptr) 会让控件变成顶层窗口，不先隐藏会闪窗。
-    for (int row = 0; row < m_table->rowCount(); ++row) {
-        for (int col = 0; col < m_table->columnCount(); ++col) {
-            QWidget *stale = m_table->cellWidget(row, col);
-            if (!stale) continue;
-            stale->hide();                        // 先藏：脱父后它就是顶层窗口
-            m_table->removeCellWidget(row, col);  // 摘索引 + 内部排 deleteLater
-            stale->setParent(nullptr);            // 立刻脱离控件树：这一句才治得住累积
+        const QSignalBlocker headerBlocker(m_table->horizontalHeader());
+        const QScopedValueRollback<bool> geometryGuard(m_geometrySyncSuspended, true);
+        // 立即脱离控件树，延迟析构：既避免连续重建积累子控件，也不销毁信号派发者。
+        for (int row = 0; row < m_table->rowCount(); ++row) {
+            for (int col = 0; col < ColumnCount; ++col) {
+                auto *stale = m_table->cellWidget(row, col);
+                if (!stale) continue;
+                stale->hide();
+                m_table->removeCellWidget(row, col);
+                stale->setParent(nullptr);
+            }
         }
+        m_table->clearContents();
+        m_table->setRowCount(0);
+        m_table->setRowCount(m_currentSet.commands.size());
+        m_sendCursor = -1;
+        m_sentRows.clear();
+        m_checkedCount = 0;
+        m_tailLabels = tailLabels();
+        m_tailWidthHint = measureTailColumnWidth();
+        for (int row = 0; row < m_currentSet.commands.size(); ++row) {
+            const auto &command = m_currentSet.commands.at(row);
+            updateRow(row, command);
+            if (command.enabled) ++m_checkedCount;
+        }
+        updateSendColumnWidth();
+        updateTailColumnWidth();
     }
-    m_table->clearContents();
-    m_table->setRowCount(0);
-    m_table->setRowCount(m_currentSet.commands.size());
-
-    // 行号被重新排过了，上一轮的发送痕迹跟着作废——不清的话，高亮会落在
-    // "碰巧同号"的另一条指令上，比没有高亮更误导。注意这里**不能**调
-    // clearSendRun()：它要按旧行号擦控件，而此刻控件已经全被换掉了，
-    // 直接丢状态即可（新控件本来就没有痕迹）。
-    m_sendCursor = -1;
-    m_sentRows.clear();
-
-    // 结尾符列需要的宽度与行内容无关（每行的 combo 项完全一样），量一次就够——
-    // 旧实现每行都调 sizeHint()，等于把同一个答案重算 N 遍（行数越多越慢）。
-    m_tailLabels = tailLabels();
-    m_tailWidthHint = measureTailColumnWidth();
-
-    for (int i = 0; i < m_currentSet.commands.size(); ++i) {
-        updateRow(i, m_currentSet.commands.at(i));
-    }
-
-    m_table->setUpdatesEnabled(true);
-    // 行建完才知道最长指令名有多宽：发送列按它自适应，避免长名称被截断
-    updateSendColumnWidth();
-    // 结尾符列同样按内容量——否则 "+\\r\\n" 会被裁成 "+\\"（用户实测）
-    updateTailColumnWidth();
-    }
-    // 行数/行高/列宽都定下来了，此时才拿到最终 visualRect，统一重排一次 cellWidget。
-    // 必须在这里做——上面几步每改一步 Qt 都会重算行高，早跑等于按旧的行高摆控件。
-    // 折行开着时行高还要按最终列宽再量一次，refit 里会顺手把控件几何刷掉。
+    // 批量建行期间只挂起几何联动；完成后统一同步一次，避免 O(n²) 布局。
     if (m_contentWordWrap) refitContentRowHeights();
     else syncCellWidgetGeometry();
+    m_table->setUpdatesEnabled(true);
     m_table->viewport()->update();
+    updateMoveAvailability();
 }
 
 void CommandTableWidget::setContentWordWrap(bool wrap)
@@ -535,7 +529,10 @@ void CommandTableWidget::refitContentRowHeights()
         // ResizeToContents，行高重新跟着行内控件走。
         m_table->verticalHeader()->setSectionResizeMode(
             m_contentWordWrap ? QHeaderView::Interactive : QHeaderView::ResizeToContents);
-        m_table->resizeRowsToContents();
+        {
+            const QScopedValueRollback<bool> geometryGuard(m_geometrySyncSuspended, true);
+            m_table->resizeRowsToContents();
+        }
         syncCellWidgetGeometry();
     }
     if (m_refitAgain && m_contentWordWrap) scheduleContentRowRefit();
@@ -552,7 +549,8 @@ int CommandTableWidget::minimumContentWidth() const
         total += col == SendColumn ? SendColumnMinWidth : m_table->columnWidth(col);
     }
     total += ContentColumnMinWidth; // 发送框（stretch）必须留出的可用宽度
-    return total + m_table->frameWidth() * 2 + 2;
+    // 底栏新增移动菜单后也要计入展开宽度，保证操作按钮完整可见。
+    return qMax(total + m_table->frameWidth() * 2 + 2, layout()->minimumSize().width());
 }
 
 void CommandTableWidget::refreshColumnWidths()
@@ -668,6 +666,13 @@ void CommandTableWidget::beginSendRun()
     clearSendRun();
 }
 
+void CommandTableWidget::setBatchLooping(bool looping)
+{
+    m_batchLooping = looping;
+    m_batchSendButton->setProperty("looping", looping);
+    m_batchSendButton->setText(looping ? tr("停止循环") : tr("按序发送勾选项"));
+}
+
 void CommandTableWidget::setSendCursor(int row)
 {
     const int previous = m_sendCursor;
@@ -777,7 +782,7 @@ void CommandTableWidget::updateTailColumnWidth()
 
 void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
 {
-    // 注意：这里不再自己复位 m_updating，由调用方通过 UpdateGuard 统一管理
+    // 注意：这里不再自己复位 m_updating，由调用方统一管理
 
     // 凡是放进 cell 的控件一律走 wrapCentered()：宿主（cellWidget）铺满 cell 矩形，
     // 控件在宿主里按布局居中。六个 cellWidget（☑/Hex/延时/结尾符/发送/≡）统一走这一条路，
@@ -789,10 +794,8 @@ void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
     // 用户看到的只是一个没有勾的小方块。控件化之后样式统一、也能拿到 16px 的勾。
     auto *checkBox = new QCheckBox(this);
     checkBox->setChecked(cmd.enabled);
-    checkBox->setToolTip(tr("勾选后参与「按序发送勾选项」批量发送"));
-    connect(checkBox, &QCheckBox::toggled, this, [this] {
-        if (!m_updating) emit commandsChanged();
-    });
+    checkBox->setToolTip(tr("勾选后可批量发送、移动或删除指令"));
+    connect(checkBox, &QCheckBox::toggled, this, [this, row] { onRowEdited(row); });
     m_table->setCellWidget(row, CheckColumn, wrapCentered(checkBox));
 
     // 列1: No.
@@ -810,9 +813,7 @@ void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
     // 列3: Hex（复选框控件）
     auto *hexCheckBox = new QCheckBox(this);
     hexCheckBox->setChecked(cmd.isHex);
-    connect(hexCheckBox, &QCheckBox::toggled, this, [this] {
-        if (!m_updating) emit commandsChanged();
-    });
+    connect(hexCheckBox, &QCheckBox::toggled, this, [this, row] { onRowEdited(row); });
     m_table->setCellWidget(row, HexColumn, wrapCentered(hexCheckBox));
 
     // 列4: 延时（SpinBox）
@@ -825,9 +826,8 @@ void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
     delaySpinBox->setToolTip(tr("发送前延时（毫秒）"));
     delaySpinBox->setValue(cmd.delayMs);
     delaySpinBox->setMinimumWidth(40);
-    connect(delaySpinBox, QOverload<int>::of(&QSpinBox::valueChanged), this, [this] {
-        if (!m_updating) emit commandsChanged();
-    });
+    connect(delaySpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this, row] { onRowEdited(row); });
     m_table->setCellWidget(row, DelayColumn, wrapCentered(delaySpinBox));
 
     // 列5: 结尾符（ComboBox）
@@ -836,24 +836,16 @@ void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
     // 预存在成员里（refreshTable 开头算一次），逐行仍建自己的 model —— 建 model 是
     // 每行一次的 O(4)，真正的开销在重复调用 tailLabels()（内含 tr()）与重复量列宽。
     auto *tailComboBox = new QComboBox(this);
-    tailComboBox->addItems(m_tailLabels);
-    // 将字符串转换为下拉框索引
-    int tailIndex = 0;
-    if (cmd.tail == "CR") tailIndex = 1;
-    else if (cmd.tail == "LF") tailIndex = 2;
-    else if (cmd.tail == "CR+LF") tailIndex = 3;
-    tailComboBox->setCurrentIndex(tailIndex);
+    for (int i = 0; i < m_tailLabels.size(); ++i)
+        tailComboBox->addItem(m_tailLabels.at(i), tailValues().at(i));
+    tailComboBox->setCurrentIndex(qMax(0, tailComboBox->findData(cmd.tail)));
     // 按项目统一约定让样式表自己算宽（箭头画在 combo 的右侧内边距里，只按文本量会偏窄）。
     // 之前它没有走这一步，列宽只有 62px 时 "+\\r\\n" 这类文本把可视区挤到几乎为零，
     // 用户看起来就像"点不中、选不了"。
     fitComboToItems(tailComboBox);
     tailComboBox->setToolTip(tr("发送时附加的结尾符"));
-    // 性能优化：使用 activated 信号而不是 currentIndexChanged
-    // activated 只在用户主动选择时触发，不会在程序设置 setCurrentIndex 时触发
-    // 减少不必要的信号处理，提升响应速度
-    connect(tailComboBox, QOverload<int>::of(&QComboBox::activated), this, [this] {
-        if (!m_updating) emit commandsChanged();
-    });
+    connect(tailComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, row] { onRowEdited(row); });
     m_table->setCellWidget(row, TailColumn, wrapCentered(tailComboBox));
 
     // 列6: 发送按钮（文本即指令名）
@@ -880,24 +872,12 @@ void CommandTableWidget::updateRow(int row, const CommandItem &cmd)
     m_table->setCellWidget(row, HandleColumn, handle);
 }
 
-// 辅助函数：将下拉框索引转换为结尾符字符串
-static QString commandTailFromInt(int index)
-{
-    switch (index) {
-        case 0: return "无";
-        case 1: return "CR";
-        case 2: return "LF";
-        case 3: return "CR+LF";
-        default: return "无";
-    }
-}
-
 CommandItem CommandTableWidget::commandFromRow(int row) const
 {
     if (row < 0 || row >= m_table->rowCount()) return CommandItem();
 
-    CommandItem cmd;
-    cmd.id = m_currentSet.commands.value(row).id; // 行内无法编辑 id，沿用模型里的
+    // Preserve fields without a table editor (identity and legacy pack mode).
+    CommandItem cmd = m_currentSet.commands.value(row);
 
     // 列0: 勾选框（控件化）
     cmd.enabled = isRowChecked(row);
@@ -923,22 +903,33 @@ CommandItem CommandTableWidget::commandFromRow(int row) const
 
     // 列5: 结尾符
     if (auto *tailComboBox = tailComboBoxAt(row)) {
-        cmd.tail = commandTailFromInt(tailComboBox->currentIndex());
+        cmd.tail = tailComboBox->currentData().toString();
     }
 
     // 列6: 描述（优先取按钮上的属性，取不到再退回按钮文本）
     if (auto *sendButton = sendButtonAt(row)) {
-        cmd.description = sendButton->property("description").toString();
-        if (cmd.description.isEmpty()) {
-            cmd.description = sendButton->text();
-        }
+        const auto description = sendButton->property("description");
+        cmd.description = description.isValid() ? description.toString() : sendButton->text();
     }
 
     return cmd;
 }
 
+void CommandTableWidget::onRowEdited(int row)
+{
+    if (m_updating || row < 0 || row >= m_currentSet.commands.size()) return;
+    const auto command = commandFromRow(row);
+    const auto &previous = m_currentSet.commands.at(row);
+    if (command == previous) return;
+    m_checkedCount += int(command.enabled) - int(previous.enabled);
+    m_currentSet.commands[row] = command;
+    updateMoveAvailability();
+    emit commandsChanged();
+}
+
 void CommandTableWidget::addCommand()
 {
+    emit structureAboutToChange();
     if (!m_table) return;
 
     CommandItem newCmd;
@@ -946,43 +937,40 @@ void CommandTableWidget::addCommand()
     newCmd.description = tr("测试指令");
 
     m_currentSet.commands.append(newCmd);
+    if (newCmd.enabled) ++m_checkedCount;
 
     {
-        const UpdateGuard guard(m_updating);
+        const QScopedValueRollback<bool> guard(m_updating, true);
         int row = m_table->rowCount();
         m_table->insertRow(row);
         updateRow(row, newCmd);
     }
 
+    updateSendColumnWidth();
+    updateMoveAvailability();
     emit commandsChanged();
 }
 
 void CommandTableWidget::copyRows(const QList<int> &rows)
 {
-    if (!m_table || rows.isEmpty()) return;
-
-    // 先按当前控件快照出副本：refreshTable 之后原行控件就被换掉了
-    QList<CommandItem> copies;
-    copies.reserve(rows.size());
-    for (int row : rows) {
-        if (row < 0 || row >= m_table->rowCount()) continue;
-        CommandItem copy = commandFromRow(row);
-        copy.id = QUuid::createUuid(); // 副本是新指令，绝不共用原 id
-        copies.append(copy);
+    QSet<int> copying;
+    for (int row : rows)
+        if (row >= 0 && row < m_currentSet.commands.size()) copying.insert(row);
+    if (copying.isEmpty()) return;
+    emit structureAboutToChange();
+    QList<CommandItem> result;
+    result.reserve(m_currentSet.commands.size() + copying.size());
+    for (int row = 0; row < m_currentSet.commands.size(); ++row) {
+        const auto &command = m_currentSet.commands.at(row);
+        result.append(command);
+        if (copying.contains(row)) {
+            auto copy = command;
+            copy.id = QUuid::createUuid();
+            result.append(copy);
+        }
     }
-    if (copies.isEmpty()) return;
-
-    // 从后往前插：前面的插入不会挤掉后面行的下标，多份副本的相对顺序也保持原样
-    for (int i = copies.size() - 1; i >= 0; --i) {
-        const int at = qMin(rows.at(i) + 1, m_currentSet.commands.size());
-        m_currentSet.commands.insert(at, copies.at(i));
-    }
-
-    {
-        const UpdateGuard guard(m_updating);
-        refreshTable();
-    }
-
+    m_currentSet.commands = std::move(result);
+    refreshTable();
     emit commandsChanged();
 }
 
@@ -998,42 +986,25 @@ bool CommandTableWidget::confirmRemoval(int count)
 void CommandTableWidget::removeCommand()
 {
     const QList<int> rows = checkedRows();
+    const auto revision = m_structureRevision;
     if (rows.isEmpty()) return; // 没勾任何行就没什么可问的，直接不动作
-    if (!confirmRemoval(rows.size())) return;
+    if (!confirmRemoval(rows.size()) || revision != m_structureRevision) return;
     removeRows(rows);
 }
 
 void CommandTableWidget::removeRows(const QList<int> &rows)
 {
-    if (!m_table || rows.isEmpty()) return;
-
-    // 先定出待删行号的去重有序集合，再在模型上一次成型，最后整体重建表格。
-    //
-    // 旧写法是"从后往前逐个 removeRow + removeAt"：每次 removeRow 都要让
-    // QTableWidget 搬动其后所有行的 item 与 cellWidget（O(n)），因此删 k 行是
-    // O(k·n)，勾选一半删一半就退化成 O(n²)——实测 4000 行删 2000 行要 15 秒（卡死）。
-    // 模型先行 + 一次 refreshTable 把它压回 O(n)（moveRow 早就用的同一套路）。
-    QList<int> ordered;
-    ordered.reserve(rows.size());
-    for (int row : rows) {
-        if (row >= 0 && row < m_currentSet.commands.size()) ordered.append(row);
-    }
-    if (ordered.isEmpty()) return;
-    std::sort(ordered.begin(), ordered.end());
-    ordered.erase(std::unique(ordered.begin(), ordered.end()), ordered.end());
-
-    // 从后往前摘除（QList::removeAt 自身的搬移是小的 O(n) 单次，总共 O(k·n) 但只搬
-    // 指针不碰控件——真正贵的是 QTableWidget::removeRow 的 item/cellWidget 搬移与
-    // 布局重算，那部分被下面的整体 refreshTable 一次做完）。
-    for (int i = ordered.size() - 1; i >= 0; --i) {
-        m_currentSet.commands.removeAt(ordered.at(i));
-    }
-
-    {
-        const UpdateGuard guard(m_updating);
-        refreshTable();
-    }
-
+    QSet<int> removing;
+    for (int row : rows)
+        if (row >= 0 && row < m_currentSet.commands.size()) removing.insert(row);
+    if (removing.isEmpty()) return;
+    emit structureAboutToChange();
+    QList<CommandItem> remaining;
+    remaining.reserve(m_currentSet.commands.size() - removing.size());
+    for (int row = 0; row < m_currentSet.commands.size(); ++row)
+        if (!removing.contains(row)) remaining.append(m_currentSet.commands.at(row));
+    m_currentSet.commands = std::move(remaining);
+    refreshTable();
     emit commandsChanged();
 }
 
@@ -1041,18 +1012,16 @@ void CommandTableWidget::moveRow(int from, int to)
 {
     const int total = m_currentSet.commands.size();
     if (from < 0 || from >= total || to < 0 || to >= total || from == to) return;
+    emit structureAboutToChange();
 
     // 先搬模型，再整体重建表格。
     // QTableWidget 的自有 InternalMove 只搬 item，Hex/延时/结尾符/发送按钮这些
     // cellWidget 会留在原行；逐个摘挂控件又要踩"setCellWidget 会销毁旧控件"的所有权
-    // 坑。全表重建由 UpdateGuard 兜住不会引发 commandsChanged 风暴，而且 No. 列、
+    // 坑。全表重建由更新守卫兜住不会引发 commandsChanged 风暴，而且 No. 列、
     // 发送按钮的 row 属性、commands 顺序都从同一份数据重建，天然一致。
     m_currentSet.commands.move(from, to);
 
-    {
-        const UpdateGuard guard(m_updating);
-        refreshTable();
-    }
+    refreshTable();
 
     emit commandsChanged();
 }
@@ -1115,7 +1084,10 @@ bool CommandTableWidget::eventFilter(QObject *watched, QEvent *event)
             // refreshTable 会把整行控件（含它）换掉。虽然新实现已把析构推迟到
             // 事件循环，但把它推到本轮派发结束之后再执行更干净：
             // 重建时机与"哪个控件正在处理事件"彻底解耦，不依赖销毁时机的巧合。
-            QTimer::singleShot(0, this, [this, from, to] { moveRow(from, to); });
+            const auto revision = m_structureRevision;
+            QTimer::singleShot(0, this, [this, from, to, revision] {
+                if (revision == m_structureRevision) moveRow(from, to);
+            });
         } else {
             setDragRowDimmed(from, false);
         }
@@ -1191,12 +1163,12 @@ void CommandTableWidget::onCellChanged(int row, int column)
         if (auto *item = m_table->item(row, column)) {
             // setToolTip 会再发一次 cellChanged。守卫住，避免提示和正文互相触发。
             if (item->toolTip() != item->text()) {
-                const UpdateGuard guard(m_updating);
+                const QScopedValueRollback<bool> guard(m_updating, true);
                 item->setToolTip(item->text());
             }
         }
         if (m_contentWordWrap) refitContentRowHeights();
-        emit commandsChanged();
+        onRowEdited(row);
     }
 }
 
@@ -1206,7 +1178,7 @@ void CommandTableWidget::onSendClicked()
     if (!button) return;
 
     int row = button->property("row").toInt();
-    CommandItem cmd = commandFromRow(row);
+    const CommandItem cmd = m_currentSet.commands.value(row);
 
     if (cmd.isValid()) {
         emit sendCommand(cmd);
@@ -1221,14 +1193,39 @@ void CommandTableWidget::onCustomContextMenuRequested(const QPoint &pos)
 
     if (index.isValid()) {
         const int row = index.row();
+        const auto revision = m_structureRevision;
+        // 右键已选行时保留多选；右键其他行时只操作该行，与勾选框无关。
+        if (!m_table->selectionModel()->isRowSelected(row, QModelIndex()))
+            m_table->selectionModel()->setCurrentIndex(index,
+                QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        QList<int> selectedRows;
+        for (const auto &selected : m_table->selectionModel()->selectedRows())
+            selectedRows.append(selected.row());
+        std::sort(selectedRows.begin(), selectedRows.end());
+
         auto *renameAction = menu.addAction(tr("重命名"));
-        connect(renameAction, &QAction::triggered, this, [this, row] { renameRow(row); });
+        connect(renameAction, &QAction::triggered, this, [this, row, revision] {
+            if (revision == m_structureRevision) renameRow(row);
+        });
 
         auto *copyAction = menu.addAction(tr("复制该指令"));
-        connect(copyAction, &QAction::triggered, this, [this, row] { copyRows({row}); });
+        connect(copyAction, &QAction::triggered, this, [this, row, revision] {
+            if (revision == m_structureRevision) copyRows({row});
+        });
+
+        auto *moveMenu = menu.addMenu(tr("移动选中到"));
+        moveMenu->setObjectName(QStringLiteral("moveSelectedCommands"));
+        populateMoveMenu(moveMenu);
+        moveMenu->setEnabled(!moveMenu->isEmpty());
+        connect(moveMenu, &QMenu::triggered, this, [this, selectedRows, revision](QAction *action) {
+            if (revision == m_structureRevision)
+                emit moveCommandsRequested(selectedRows, action->data().toUuid());
+        });
 
         auto *removeAction = menu.addAction(tr("删除该指令"));
-        connect(removeAction, &QAction::triggered, this, [this, row] { removeRows({row}); });
+        connect(removeAction, &QAction::triggered, this, [this, row, revision] {
+            if (revision == m_structureRevision) removeRows({row});
+        });
     } else {
         // 空白区域右键：直接补一条指令
         auto *addAction = menu.addAction(tr("添加指令"));
@@ -1243,13 +1240,14 @@ void CommandTableWidget::renameRow(int row)
     if (row < 0 || row >= m_table->rowCount()) return;
 
     const CommandItem current = commandFromRow(row);
+    const auto revision = m_structureRevision;
 
     bool ok = false;
     // 对话框一律统一使用 StyleDialogs 封装，确保父窗口正确且样式一致
     const QString name = StyleDialogs::getText(this, tr("重命名指令"),
                                                tr("指令名称:"),
                                                current.description, &ok);
-    if (!ok) return;
+    if (!ok || revision != m_structureRevision) return;
 
     if (auto *sendButton = sendButtonAt(row)) {
         sendButton->setText(name.isEmpty() ? tr("发送") : name);

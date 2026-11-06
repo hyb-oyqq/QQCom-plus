@@ -445,6 +445,11 @@ void FileTransferWidget::buildPage(Page *page)
     });
 }
 
+bool FileTransferWidget::isBusy() const
+{
+    return m_service && m_service->isBusy();
+}
+
 void FileTransferWidget::setRuntime(EndpointRuntime *runtime)
 {
     m_service->setRuntime(runtime);

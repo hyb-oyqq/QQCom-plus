@@ -38,6 +38,14 @@ struct CommandItem
     // 按文本形态追加结尾符。仅用于确实需要"一整段文本"的场景（如发送区预填）；
     // 发送路径请用 tailBytes()，否则 HEX 指令会丢结尾符。
     QString contentWithTail() const;
+
+    bool operator==(const CommandItem &other) const
+    {
+        return id == other.id && content == other.content && description == other.description
+            && isHex == other.isHex && delayMs == other.delayMs && tail == other.tail
+            && packMode == other.packMode && enabled == other.enabled;
+    }
+    bool operator!=(const CommandItem &other) const { return !(*this == other); }
 };
 
 #endif

@@ -27,6 +27,8 @@ public:
     // 删除一个键（清场用）。与 setValue(key, QVariant()) 不等价：后者留下 @Invalid()，
     // 读回来是"无效值"而不是"默认值"，toBool() 会得到 false。
     void remove(const QString &key);
+    // Flush explicit automation edits before acknowledging durable storage.
+    bool sync();
 
 signals:
     void addressHistoryChanged();

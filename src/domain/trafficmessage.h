@@ -55,7 +55,8 @@ enum class Origin
     Manual,    // 用户手动发送
     Scheduled, // 周期或顺序任务
     Forward,   // 路由转发
-    Sample     // 界面示例数据
+    Sample,    // 界面示例数据
+    Automation // CLI 提交；在界面与日志中标为 AI
 };
 
 // 字节边界语义。这一项决定一条消息能不能被当成"完整的一条"来阅读：

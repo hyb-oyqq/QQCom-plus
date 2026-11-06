@@ -40,4 +40,11 @@ if (-not (Test-Path -LiteralPath $updater -PathType Leaf)) {
 }
 Copy-Item -LiteralPath $updater -Destination (Join-Path (Split-Path -Parent $binaryPath) 'qqcom-updater.ps1') -Force
 
+if ([System.IO.Path]::GetFileName($binaryPath) -ieq 'QQCom.exe') {
+    $cliLauncher = Join-Path $PSScriptRoot 'qqcom-cli.cmd'
+    $aiGuide = Join-Path (Split-Path -Parent $PSScriptRoot) 'AI_ACCESS.md'
+    Copy-Item -LiteralPath $cliLauncher -Destination (Join-Path (Split-Path -Parent $binaryPath) 'qqcom-cli.cmd') -Force
+    Copy-Item -LiteralPath $aiGuide -Destination (Join-Path (Split-Path -Parent $binaryPath) 'AI_ACCESS.md') -Force
+}
+
 Write-Host "Qt $Configuration runtime deployed to $((Split-Path -Parent $binaryPath))"

@@ -1,6 +1,7 @@
 #include "commandmanager.h"
 #include "persistence/preferencesstore.h"
 #include <QJsonArray>
+#include <QSet>
 #include <utility>
 
 CommandManager::CommandManager(QObject *parent) : QObject(parent)
@@ -18,13 +19,16 @@ CommandSet CommandManager::getSet(const QUuid &id) const
     for (const auto &set : m_sets) {
         if (set.id == id) return set;
     }
-    return CommandSet();
+    CommandSet missing;
+    missing.id = QUuid();
+    return missing;
 }
 
 void CommandManager::addSet(const CommandSet &set)
 {
     pushSnapshot();
     m_sets.append(set);
+    m_serializedSets.remove(set.id);
     emit setsChanged();
 }
 
@@ -34,6 +38,7 @@ void CommandManager::updateSet(const QUuid &id, const CommandSet &set, bool push
         if (m_sets[i].id == id) {
             if (pushUndo) pushSnapshot();
             m_sets[i] = set;
+            m_serializedSets.remove(id);
             emit setsChanged();
             return;
         }
@@ -46,6 +51,7 @@ void CommandManager::removeSet(const QUuid &id)
         if (m_sets[i].id == id) {
             pushSnapshot();
             m_sets.removeAt(i);
+            m_serializedSets.remove(id);
             emit setsChanged();
             return;
         }
@@ -60,6 +66,7 @@ void CommandManager::load(PreferencesStore *store)
     m_undoStack.clear();
     m_redoStack.clear();
     m_sets.clear();
+    m_serializedSets.clear();
     for (const auto &value : array) {
         m_sets.append(CommandSet::fromJson(value.toObject()));
     }
@@ -79,8 +86,18 @@ void CommandManager::save(PreferencesStore *store)
     if (!store) return;
 
     QJsonArray array;
+    QSet<QUuid> serializedIds;
     for (const auto &set : m_sets) {
-        array.append(set.toJson());
+        // 旧配置可能带重复 UUID；缓存不能把后面的分组覆盖成前一组。
+        if (serializedIds.contains(set.id)) {
+            array.append(set.toJson());
+            continue;
+        }
+        serializedIds.insert(set.id);
+        auto cached = m_serializedSets.constFind(set.id);
+        if (cached == m_serializedSets.cend())
+            cached = m_serializedSets.insert(set.id, set.toJson());
+        array.append(cached.value());
     }
     store->setValue("commandSets", array);
 }
@@ -106,6 +123,7 @@ bool CommandManager::importFromFile(const QString &filePath, QString &errorMessa
         for (auto &command : set.commands) command.id = QUuid::createUuid();
     }
     m_sets.append(std::move(sets));
+    m_serializedSets.clear();
 
     emit setsChanged();
     return true;
@@ -131,6 +149,7 @@ void CommandManager::undo()
     m_redoStack.push(m_sets);
     // 恢复上一个状态
     m_sets = m_undoStack.pop();
+    m_serializedSets.clear();
     emit setsChanged();
     emit undoRedoChanged();
 }
@@ -143,28 +162,61 @@ void CommandManager::redo()
     m_undoStack.push(m_sets);
     // 恢复重做状态
     m_sets = m_redoStack.pop();
+    m_serializedSets.clear();
     emit setsChanged();
     emit undoRedoChanged();
 }
 
 void CommandManager::syncSet(const QUuid &id, const CommandSet &set)
 {
-    // 静默更新：只改内存里的那一份，不压快照、**不广播 setsChanged**。
-    //
-    // 这里必须彻底静默，不能转手调用 updateSet()——后者无条件 emit setsChanged()，
-    // 而调用方 CommandPanel::saveCurrentSet() 位于"表格编辑 → 落库"这条**最高频**的
-    // 路径上（勾选、改延时、选结尾符、改内容都会走到）。广播的实际后果是：
-    //   setsChanged → CommandPanel::refreshSetComboBox() → CommandTableWidget::setCommandSet()
-    //   → refreshTable() → 销毁整表行内控件，
-    // 而此刻正在派发信号的，恰恰就是其中一个控件（例如用户刚点选的结尾符下拉框）。
-    // 两个用户可复现的崩溃——"拖动崩"与"选择换行符崩"——都出在这条链的末尾
-    // （use-after-free），"快捷指令列表越用越卡"也出在这里（每次编辑都全表重建）。
-    // 表格是模型的镜像：编辑后的值由 saveCurrentSet 主动推给模型，模型不需要
-    // 再反过来通知一次"你改了"。
+    // 行内编辑只更新数据；广播会在信号派发期间反向重建表格。
     for (auto &existing : m_sets) {
         if (existing.id == id) {
+            if (existing.name == set.name && existing.notes == set.notes
+                && existing.commands == set.commands) return;
             existing = set;
+            m_serializedSets.remove(id);
             return;
         }
     }
+}
+
+bool CommandManager::moveCommands(const QUuid &sourceId, const QUuid &targetId, const QList<int> &rows)
+{
+    if (rows.isEmpty() || sourceId == targetId) return false;
+    int sourceIndex = -1;
+    int targetIndex = -1;
+    for (int i = 0; i < m_sets.size(); ++i) {
+        if (m_sets.at(i).id == sourceId) {
+            if (sourceIndex >= 0) return false;
+            sourceIndex = i;
+        }
+        if (m_sets.at(i).id == targetId) {
+            if (targetIndex >= 0) return false;
+            targetIndex = i;
+        }
+    }
+    if (sourceIndex < 0 || targetIndex < 0) return false;
+    const auto &commands = m_sets.at(sourceIndex).commands;
+    QSet<int> moving;
+    for (int row : rows) {
+        if (row < 0 || row >= commands.size()) return false;
+        moving.insert(row);
+    }
+    auto source = m_sets.at(sourceIndex);
+    auto target = m_sets.at(targetIndex);
+    source.commands.clear();
+    source.commands.reserve(commands.size() - moving.size());
+    target.commands.reserve(target.commands.size() + moving.size());
+    for (int row = 0; row < commands.size(); ++row) {
+        if (moving.contains(row)) target.commands.append(commands.at(row));
+        else source.commands.append(commands.at(row));
+    }
+    pushSnapshot();
+    m_sets[sourceIndex] = std::move(source);
+    m_sets[targetIndex] = std::move(target);
+    m_serializedSets.remove(sourceId);
+    m_serializedSets.remove(targetId);
+    emit setsChanged();
+    return true;
 }

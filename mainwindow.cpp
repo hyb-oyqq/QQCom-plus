@@ -2,6 +2,7 @@
 #include "ui_mainwindow.h"
 #include "version/version.h"
 #include "app/endpointruntime.h"
+#include "automation/localcontrol.h"
 #include "ui/panels/routing/routeeditorwidget.h"
 #include "ui/panels/sending/sendpanel.h"
 #include "ui/panels/traffic/trafficpanel.h"
@@ -232,6 +233,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(discovery, &PortDiscoveryService::scanFinished, this,
         [this](quint64 generation, const QList<SerialPortDescriptor> &ports) {
             m_serialScanGeneration = generation;
+            m_automationPorts = ports;
             m_presentSerialPorts.clear();
             for (const auto &port : ports)
                 m_presentSerialPorts.insert(port.portName);
@@ -638,6 +640,7 @@ MainWindow::MainWindow(QWidget *parent)
         setStayOnTop(false);
 
     ui->statusbar->addWidget(status, 1);
+    setupAutomation(ui->statusbar);
 
     // 通信运行时：对象搬进 I/O 线程，GUI 只通过队列信号与它往来。
     // 线程结束时运行时在 I/O 线程内自我销毁，串口/socket 的收尾不落在 GUI。
@@ -731,6 +734,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
 MainWindow::~MainWindow()
 {
+    if (m_controlServer) m_controlServer->stop();
     for (auto *selector : m_selectors) selector->commitAddressHistory();
     // 先停 I/O 线程再拆 UI：运行时析构在 I/O 线程内完成，端口关闭
     // 不需要 GUI 参与，也就不会出现退出时的竞态。

@@ -12,6 +12,7 @@
 #include "ui/common/apptheme.h"
 #include "ui/common/styledialogs.h"
 #include "persistence/preferencesstore.h"
+#include "automation/capabilitycatalog.h"
 
 #include <QApplication>
 #include <QBoxLayout>
@@ -22,6 +23,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QKeyEvent>
+#include <QJsonArray>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -33,6 +35,8 @@
 #include <QStackedWidget>
 #include <QStyle>
 #include <QTextStream>
+#include <QTextCursor>
+#include <QTextDocument>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -447,31 +451,7 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     auto *toggleFilter = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")), this);
     connect(toggleFilter, &QShortcut::activated, this,
         [this] { m_filterToggle->setChecked(!m_filterToggle->isChecked()); });
-    connect(clear, &QPushButton::clicked, this, [this] {
-        cancelProjection();
-        m_pending.clear();
-        m_model->replaceRecords({});
-        m_text->clearAll();
-        m_totalAccepted = 0;
-        m_filteredOut = 0;
-        m_releasedRecords = 0;
-        m_releasedLines = 0;
-        // 缓冲清空了：视图与条件之间不再有"未追平"的关系。
-        // 清空是会话边界，此刻屏幕为空——以**当前条件**作为这一会话的已应用基线不会丢任何
-        // 已显示的行（本来就没有已显示的行）。由此随后的外观重投影一律走"用已应用条件重放"
-        // 的同一条路径，不再有"没有基线就退回当前条件"的例外分支——那条例外会在
-        // 「清空 → 追加 → 敲关键词未应用 → 改外观」这条链上把关键词无声套到历史上，
-        // 破坏"外观不改变行集"的不变量。同时这也让清空后首批数据到达时不会被误判为
-        // "待应用"（那批数据本就是按当前条件收的）。
-        markReprojected();
-        // 清空是会话边界：正在记录时换一个带时间戳的新文件（旧文件原样留在磁盘上，
-        // 不覆盖、不追加）。记录开关保持勾选——用户清的是屏幕，不是记录任务。
-        if (m_logFile) {
-            closeLogFile();
-            openNewLogFile();
-        }
-        updateSummary();
-    });
+    connect(clear, &QPushButton::clicked, this, &TrafficPanel::clearTraffic);
     connect(exportButton, &QPushButton::clicked, this, &TrafficPanel::exportVisible);
     connect(m_follow, &QPushButton::toggled, this, [this](bool follow) {
         if (follow) m_text->scrollToBottom();
@@ -490,6 +470,114 @@ TrafficPanel::TrafficPanel(QWidget *parent) : QWidget(parent)
     // 文本视图按到达时的过滤条件收流，条件在这里做第一次汇聚；
     // m_preferences 此时尚未注入，updateFilter 里的 savePreferences 是空操作。
     updateFilter();
+}
+
+void TrafficPanel::clearTraffic()
+{
+    cancelProjection();
+    m_pending.clear();
+    m_model->replaceRecords({});
+    m_text->clearAll();
+    m_totalAccepted = 0;
+    m_filteredOut = 0;
+    m_releasedRecords = 0;
+    m_releasedLines = 0;
+    // 清空是会话边界，以当前条件建立新的历史基线。
+    markReprojected();
+    // 正在记录时新开日志；旧文件保留，记录开关不变。
+    if (m_logFile) {
+        closeLogFile();
+        openNewLogFile();
+    }
+    updateSummary();
+}
+
+QJsonObject TrafficPanel::automationState() const
+{
+    const auto &applied = m_matcher.options();
+    return {{"format", PayloadCodec::formatName(currentDisplayFormat())}, {"historyRows", m_model->rowCount()},
+        {"historyId", m_model->historyId()}, {"pendingRows", m_pending.size()},
+        {"totalAccepted", QString::number(m_totalAccepted)}, {"projectionInProgress", isReprojecting()},
+        {"follow", m_follow->isChecked()}, {"recording", m_recordAction->isChecked()},
+        {"logFile", m_logFilePath}, {"prefix", m_displayOptions.prefix},
+        {"filters", QJsonObject{{"endpointA", m_portAButton->isChecked()}, {"endpointB", m_portBButton->isChecked()},
+            {"rx", applied.rx}, {"tx", applied.tx}, {"forwards", applied.forwards},
+            {"keywords", QJsonArray::fromStringList(applied.keywords)},
+            {"excludes", QJsonArray::fromStringList(applied.excludes)}, {"caseSensitive", applied.caseSensitive}}}};
+}
+
+QJsonObject TrafficPanel::readDisplayedText(int maxChars) const
+{
+    const auto *document = m_text->document();
+    const int total = qMax(0, document->characterCount() - 1);
+    const int count = qMin(qBound(1, maxChars, 65536), total);
+    QTextCursor cursor(m_text->document());
+    cursor.setPosition(total - count);
+    cursor.setPosition(total, QTextCursor::KeepAnchor);
+    auto text = cursor.selectedText();
+    text.replace(QChar::ParagraphSeparator, QLatin1Char('\n'));
+    return {{"text", text}, {"totalChars", total}, {"truncated", total > count},
+            {"pendingRows", m_pending.size()}, {"projectionInProgress", isReprojecting()},
+            {"format", PayloadCodec::formatName(currentDisplayFormat())}};
+}
+
+QJsonObject TrafficPanel::queryTraffic(const QJsonObject &arguments) const
+{
+    quint64 after = m_model->firstSequence() - 1;
+    const auto cursor = arguments.value("cursor").toString();
+    if (!cursor.isEmpty()) {
+        const auto parts = cursor.split(':');
+        bool ok = false;
+        after = parts.value(1).toULongLong(&ok);
+        if (parts.size() != 2 || !ok)
+            return CapabilityCatalog::failure("invalid_cursor", "Invalid history cursor");
+        if (parts.at(0) != m_model->historyId())
+            return CapabilityCatalog::failure("cursor_expired", "History was cleared or replaced; restart without cursor");
+        if (after >= m_model->nextSequence())
+            return CapabilityCatalog::failure("invalid_cursor", "Cursor is ahead of the current history");
+    }
+    const bool gap = after + 1 < m_model->firstSequence();
+    after = qMax(after, m_model->firstSequence() - 1);
+    int row = int(after + 1 - m_model->firstSequence());
+    const int limit = qBound(1, arguments.value("limit").toInt(100), 200);
+    const int endpoint = arguments.value("endpoint").toString() == "A" ? 0 : 1;
+    const auto direction = arguments.value("direction").toString();
+    const auto contains = arguments.value("contains").toString();
+    QJsonArray records;
+    qsizetype bytes = 0;
+    int scanned = 0;
+    while (row < m_model->rowCount() && records.size() < limit && scanned < 10000) {
+        const auto &message = m_model->record(row);
+        const bool structuralMatch = (!arguments.contains("endpoint") || message.source.endpointIndex == endpoint)
+            && (direction.isEmpty() || Traffic::directionName(message.direction) == direction);
+        QString hex, text;
+        bool match = structuralMatch;
+        if (match) {
+            hex = QString::fromLatin1(message.raw.toHex(' ').toUpper());
+            text = PayloadCodec::renderMultiline(message.raw, currentDisplayFormat());
+            match = contains.isEmpty() || text.contains(contains, Qt::CaseInsensitive)
+                || hex.contains(contains, Qt::CaseInsensitive) || message.statusText.contains(contains, Qt::CaseInsensitive);
+        }
+        if (match && bytes + message.raw.size() > 65536 && !records.isEmpty()) break;
+        ++scanned;
+        after = m_model->firstSequence() + quint64(row++);
+        if (!match) continue;
+        bytes += message.raw.size();
+        records.append(QJsonObject{{"sequence", QString::number(after)}, {"id", QString::number(message.id)},
+            {"timestamp", message.timestamp.toString(Qt::ISODateWithMs)},
+            {"endpoint", message.source.endpointIndex < 0 ? QString() : QString(message.source.endpointIndex == 0 ? "A" : "B")},
+            {"generation", QString::number(message.source.generation)},
+            {"peerId", message.source.peerId.toString(QUuid::WithoutBraces)}, {"peerAddress", message.source.peerAddress},
+            {"direction", Traffic::directionName(message.direction)}, {"origin", Traffic::originName(message.origin)},
+            {"state", int(message.state)}, {"stateName", Traffic::stateName(message.state)},
+            {"framing", QStringList{"stream", "datagram", "message"}.value(int(message.framing))},
+            {"hex", hex}, {"text", text}, {"rawLength", message.rawLength},
+            {"previewLength", message.raw.size()}, {"truncated", message.truncated}, {"statusText", message.statusText}});
+    }
+    return {{"records", records}, {"nextCursor", m_model->historyId() + ':' + QString::number(after)},
+        {"hasMore", row < m_model->rowCount()}, {"gap", gap}, {"scanned", scanned},
+        {"pendingRows", m_pending.size()}, {"historyRows", m_model->rowCount()}, {"previewByteLimit", 4096},
+        {"format", PayloadCodec::formatName(currentDisplayFormat())}};
 }
 
 void TrafficPanel::setPorts(const QList<PortDraft> &ports)

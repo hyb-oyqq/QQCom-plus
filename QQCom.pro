@@ -33,7 +33,8 @@ RC_ICONS = resources/icons/app.ico
 
 SOURCES += \
     main.cpp \
-    mainwindow.cpp
+    mainwindow.cpp \
+    src/ui/automation/windowautomation.cpp
 
 HEADERS += \
     mainwindow.h

@@ -2,11 +2,13 @@
 #include "version/version.h"
 #include "domain/networkaddress.h"
 #include "update/updateservice.h"
+#include "automation/clirunner.h"
 
 #include "ui/common/apptheme.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
@@ -14,6 +16,7 @@
 #include <QLocale>
 #include <QSettings>
 #include <QTimer>
+#include <QTextStream>
 #include <QTranslator>
 #include <QUrl>
 
@@ -81,6 +84,15 @@ bool parseAutoOpenEndpoint(const QString &spec, PortDraft *out)
 
 int main(int argc, char *argv[])
 {
+    // Native CLI uses QCoreApplication: no window, theme, font or platform plugin
+    // initialization is needed to discover capabilities or call a running window.
+    if (argc > 1 && QByteArray(argv[1]) == "--cli") {
+        QCoreApplication cli(argc, argv);
+        cli.setApplicationName("QQCom");
+        cli.setOrganizationName("QQCom");
+        cli.setApplicationVersion(QStringLiteral(QQCOM_VERSION_STR));
+        return Cli::run(cli.arguments().mid(2), QStringLiteral(QQCOM_VERSION_STR));
+    }
     QApplication a(argc, argv);
     a.setApplicationName("QQCom");
     a.setOrganizationName("QQCom");
@@ -103,6 +115,7 @@ int main(int argc, char *argv[])
     QCommandLineParser parser;
     parser.setApplicationDescription("QQCom communication workbench");
     parser.addHelpOption();
+    parser.addOption({"cli", "Native JSON command interface (must be the first option); use --cli --help."});
     parser.addOption({"sample", "Show clearly labelled example traffic."});
     parser.addOption({"routes", "Show the forwarding rule editor."});
     parser.addOption({"snapshot", "Render the window to a PNG and exit.", "path"});
@@ -122,6 +135,10 @@ int main(int argc, char *argv[])
     parser.addOption({"accept-update",
         "Download an available update without asking (test-only)."});
     parser.process(a);
+    if (parser.isSet("cli")) {
+        QTextStream(stderr) << "--cli must be the first option; use QQCom.exe --cli --help\n";
+        return 2;
+    }
     // 程序主图标：exe 内嵌资源（RC_ICONS）管资源管理器，这里管运行中的窗口与任务栏。
 
     QTranslator translator;

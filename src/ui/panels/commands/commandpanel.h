@@ -11,9 +11,9 @@ class QPushButton;
 class QVBoxLayout;
 class CommandTableWidget;
 class PreferencesStore;
+class CommandSendScheduler;
 
-// 指令面板：右侧可展开/收起的面板，包含指令集管理、周期发送、导入导出。
-// 集成多个标签页：初始化、周期发送、解析(HEX)、解析(TXT)。
+// 快捷指令面板：协调分组、表格、发送时序和偏好，协议与分组操作由应用层负责。
 class CommandPanel : public QWidget
 {
     Q_OBJECT
@@ -27,6 +27,8 @@ public:
     // 展开/收起
     bool isExpanded() const { return m_expanded; }
     void setExpanded(bool expanded);
+    bool hasPendingSends() const;
+    bool hasActiveCommandEditor() const;
     // 展开时"内容完整可见"所需的最小宽度。主窗口用它算窗口最小宽度：
     // 窗口放不下两侧面板的最小宽度时，应该变大窗口而不是压缩内容（用户钦定）。
     int expandedMinimumWidth() const { return m_expandedMinimumWidth; }
@@ -47,9 +49,9 @@ private slots:
     void onExportClicked();
     void onContentWrapToggled(bool wrap);
     void onCommandsChanged();
+    void onMoveCommandsRequested(const QList<int> &rows, const QUuid &targetSetId);
     void onSendCommand(const CommandItem &cmd);
-    // rows 与 commands 一一对应且同序：时序与进度都在这一个函数里排，两边不会错开。
-    // loop 为真时这一轮的最后一条发完后，再排同样的一轮。
+    // 行号和指令快照交给唯一的发送时序器；表格只接收进度。
     void onBatchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands, bool loop);
     void onBatchSendStopRequested();
     void refreshSetComboBox();
@@ -65,9 +67,6 @@ private:
     void savePreferences();
     void applyExpandedState();
     void updateMargins();
-    // 按累加延时排一轮。loop 且这一轮还没被取消时，最后一条发出后再排下一轮。
-    void scheduleBatch(const QList<int> &rows, const QList<CommandItem> &commands, bool loop);
-    void setBatchButtonLooping(bool looping);
 
     QVBoxLayout *m_mainLayout = nullptr;
     QWidget *m_topBarWidget = nullptr;  // 顶部工具栏容器，用于整体显示/隐藏
@@ -80,8 +79,7 @@ private:
     QPushButton *m_wrapButton = nullptr;
 
     CommandTableWidget *m_commandTable = nullptr;
-
-
+    CommandSendScheduler *m_scheduler = nullptr;
     PreferencesStore *m_preferences = nullptr;
     // 没有保存过展开状态时收起。构造时先落到几何上，偏好读到后再改。
     bool m_expanded = false;
@@ -96,8 +94,7 @@ private:
     int m_topBarMinimumWidth = 0;
     int m_commandTableMinimumWidth = 0;
     int m_expandedMinimumWidth = 0;
-    // 循环发送的代数。每次新开一轮或用户停止都加一，旧定时器看到代数不对就不再发、不再续轮。
-    int m_batchGeneration = 0;
+    int m_pendingSingleSends = 0;
 };
 
 #endif

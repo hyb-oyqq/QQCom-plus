@@ -4,6 +4,7 @@
 #include <QMainWindow>
 #include <QIcon>
 #include <QSet>
+#include <QJsonObject>
 #include "domain/trafficmessage.h"
 #include "ui/panels/portselector/portselectorwidget.h"
 #include "transport/transporttypes.h"
@@ -27,6 +28,8 @@ class RouteEditorWidget;
 class SendPanel;
 class TrafficPanel;
 class CommandPanel;
+class LocalControlServer;
+class QStatusBar;
 struct CommandItem;
 
 QT_BEGIN_NAMESPACE
@@ -51,6 +54,7 @@ public:
     // 压测探针对账用的会话累计值：接收记录条数（含示例）与 RX 原始字节数。
     quint64 sessionRecordCount() const;
     qint64 sessionRxBytes() const;
+    QJsonObject executeAutomationTool(const QString &name, const QJsonObject &arguments);
     // 状态栏里的临时提示：单独占一格，到时清空。不覆盖 A/B 连接状态，也不动统计。
     // 空文本会把这一格藏起来。alert 为真时这条用错误色，避免和旁边的灰色状态混在一起。
     //
@@ -80,6 +84,8 @@ protected:
     void closeEvent(QCloseEvent *event) override;
 
 private:
+    void setupAutomation(QStatusBar *statusbar);
+    QJsonObject automationState() const;
     void refreshEndpoints();
     void restoreEndpointDrafts(PreferencesStore *preferences);
     // 恢复上次的窗口几何。**首次 showEvent 时调用一次**，不能在构造末尾：
@@ -113,6 +119,9 @@ private:
     void handleCommandSend(const CommandItem &command);
 
     Ui::MainWindow *ui;
+    LocalControlServer *m_controlServer = nullptr;
+    bool m_automationPending[2] = {};
+    QList<SerialPortDescriptor> m_automationPorts;
     PreferencesStore *m_preferences = nullptr; // 端点草稿持久化（面板各有自己的注入通道）
     QList<PortDraft> m_ports;
     QList<PortSelectorWidget *> m_selectors;

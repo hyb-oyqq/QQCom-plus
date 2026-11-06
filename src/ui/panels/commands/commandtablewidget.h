@@ -2,6 +2,7 @@
 #define COMMANDTABLEWIDGET_H
 
 #include "domain/commandset.h"
+#include <QPair>
 #include <QSet>
 #include <QStringList>
 #include <QWidget>
@@ -13,6 +14,7 @@ class QTimer;
 class QSpinBox;
 class QComboBox;
 class QCheckBox;
+class QMenu;
 
 // 指令表格：显示和编辑单个指令集的所有指令。
 // 支持添加、删除、编辑、拖拽排序、单条发送、批量发送。
@@ -26,26 +28,17 @@ public:
     // 加载指令集
     void setCommandSet(const CommandSet &set);
     CommandSet commandSet() const;
+    void setMoveTargetSets(const QList<CommandSet> &sets);
 
-    // 获取选中的指令
-    QList<CommandItem> selectedCommands() const;
-    QList<CommandItem> enabledCommands() const;
-    // 当前行数。只读查询，和 commandSet() 一样属于表格的自然对外接口——
-    // 保持私有会逼测试去数 child 数量来推断行数，那是错的判据。
     int rowCount() const;
+    bool hasActiveEditor() const;
 
     // 发送框折行。关：单行，放不下就末尾省略（全文在提示里）。
     // 开：按这一列的当前宽度折行，行高跟着长高。没有空格的 AT 指令也折。
     void setContentWordWrap(bool wrap);
     bool contentWordWrap() const { return m_contentWordWrap; }
 
-    // ---- 批量发送进度（用户钦定：要能看出"发到哪一条了"）----
-    // 三个入口由**唯一持有发送时序的那一方**（CommandPanel，它按累加延时排 QTimer）
-    // 驱动。表格只负责把状态画出来，不自己算时间——时序有两份就一定会在某次改动后
-    // 互相错开，而"高亮跟实际发送不同步"比没有高亮更让人困惑。
-    //   开始一轮：清掉上一轮的痕迹。
-    //   游标落在某行：该行的勾选框转琥珀（正在发），此前发过的留绿色勾（已发完）。
-    //   一轮结束：游标收掉，已发送标记留着，让用户能看清这一轮覆盖了哪几条。
+    // 发送时序器驱动进度：开始清标记，游标为琥珀色，已发送为绿色，结束保留痕迹。
     void beginSendRun();
     void setSendCursor(int row);
     void endSendRun();
@@ -54,15 +47,17 @@ public:
     // 某一行当前的发送进度："sending" 正在发 / "sent" 本轮已发 / 空 无标记。
     // 读的是勾选框上的实际属性，与上面几个写入口对称。
     QString sendStateOf(int row) const;
+    void setBatchLooping(bool looping);
 
 signals:
     void commandsChanged();
+    // 行身份或顺序变化前，先让面板停止使用旧行号的发送任务。
+    void structureAboutToChange();
+    void moveCommandsRequested(const QList<int> &rows, const QUuid &targetSetId);
     // 不带目标：目标唯一来源是发送区当前的选择（SendPanel::targetMask），
     // 指令本身不存"发去哪个口"。
     void sendCommand(const CommandItem &cmd);
-    // rows 与 commands 一一对应且同序：面板按累加延时逐条发时，用行号把进度回报给表格
-    // （只带 commands 的话面板不知道该点亮哪一行——行号只有表格自己知道）。
-    // loop 为真时发完最后一条回到第一条，直到用户再点一次按钮。
+    // rows 与 commands 一一对应且同序，loop 为真时循环至主动停止。
     void batchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands, bool loop);
     // 循环进行中再点按钮：停在当前轮，不再排下一轮。
     void batchSendStopRequested();
@@ -76,7 +71,7 @@ private slots:
 
 public:
     void refreshColumnWidths();
-    // 表格内容铺开所需的最小宽度：各固定列宽之和 + 发送框的可用下限。
+    // 内容铺开所需的最小宽度：表格各列与底部操作栏所需宽度的较大值。
     // 上层（CommandPanel）用它决定面板最小宽度——窗口不够宽时宁可撑开窗口，
     // 也不要把末尾的「≡」手柄列和发送按钮裁掉（用户反馈）。
     int minimumContentWidth() const;
@@ -90,10 +85,13 @@ private:
     void refreshTable();
     void updateRow(int row, const CommandItem &cmd);
     CommandItem commandFromRow(int row) const;
+    void onRowEdited(int row);
 
     // 行操作
     bool isRowChecked(int row) const;
     QList<int> checkedRows() const;
+    void populateMoveMenu(QMenu *menu);
+    void updateMoveAvailability();
     void copyRows(const QList<int> &rows);
     void removeRows(const QList<int> &rows);
     void moveRow(int from, int to);
@@ -145,6 +143,10 @@ private:
     bool m_refitAgain = false;
     QPushButton *m_addButton = nullptr;
     QPushButton *m_removeButton = nullptr;
+    QPushButton *m_moveCheckedButton = nullptr;
+    QList<QPair<QUuid, QString>> m_moveTargetSets;
+    int m_checkedCount = 0;
+    bool m_batchLooping = false;
     QCheckBox *m_loopSend = nullptr;
     QPushButton *m_batchSendButton = nullptr;
     QWidget *m_dropIndicator = nullptr;
@@ -163,6 +165,7 @@ private:
     // 拖拽状态
     int m_dragRow = -1;
     int m_dropAt = -1;
+    quint64 m_structureRevision = 0;
 
     // 批量发送进度：正在发送的行（-1 = 无）与本轮已发出的行。
     // 用行号而不是指令 id：游标是"屏幕上哪一行亮着"，而重建后 id 还在、行号会变——

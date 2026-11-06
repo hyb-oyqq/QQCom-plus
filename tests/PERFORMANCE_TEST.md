@@ -24,8 +24,11 @@ cd ..\..
 | `perf/traffic_load_perf.pro` | `QQCom_traffic_load_perf.exe 1000000 10000 10 64 1 plain HEX` | 百万条历史、跨线程逐条投递、继续刷新与日志；参数为历史条数/每秒速率/秒数/载荷字节/日志开关/场景/格式 |
 | `perf/command_table_perf.pro` | `QQCom_command_perf.exe 250 500` | 指令表删除条数/总行数 |
 | `perf/command_refresh_perf.pro` | `QQCom_command_refresh_perf.exe 2000` | 指令表建行、布局、整表刷新及控件数量 |
+| `perf/command_panel_perf.pro` | `QQCom_command_panel_perf.exe 500` | 4 组各 500 条指令，60 次勾选编辑、100 次数据快照、5 次无关组改名 |
 
 组帧工程可传 `FRAMER_SOURCE_ROOT=<源码目录>`，目录需含 `app/receiveframer.*` 和 `domain/receiveframing.h`，用同一探针对照旧实现。指令探针另将结果写入当前工作目录的 `QQCom_cmdperf_out.txt` / `QQCom_cmdrefresh_out.txt`。
+
+`command_panel_perf` 直接构建真实面板、管理器及持久化代码，以临时配置隔离日常数据。可传 `COMMAND_SOURCE_ROOT=<src目录>` 对照修改前源码，结果以微秒追加到当前工作目录的 `command_panel_perf.txt`。计时包含同步控件处理和配置序列化；勾选段不处理磁盘刷新或事件循环，改名段包含布局、事件处理和延迟析构。对照应在相同样式、平台、行数及 Kit 下交错运行至少 3 轮，并在构建结束后单独执行。
 
 监视探针需同时看总周期、等待和长尾。所谓“净工作”是总周期减人为等待，等待期间也可能处理插入，不能单看该差值比较不同实现。历史重投影随条数增长；不要由小批次结果推断百万行仍不卡顿。批量文本编辑块应保留，逐字段单独插入会放大文档布局开销。
 

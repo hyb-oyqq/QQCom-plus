@@ -7,7 +7,7 @@
 //   ② updateRow() 每行都调 tailLabels()（内含 tr()）重建一次标签表。
 // 改法：标签表与列宽在 refreshTable 开头算一次（见 commandtablewidget.cpp）。
 //
-// 本探针量化"刷新一屏"的成本随行数的缩放关系，用来证明改动后不再随行数线性走高。
+// 本探针量化完整建行和布局成本；切换分组身份强制重建，避免把同组无变化的快捷返回算作刷新。
 // 用法：QQCom_command_refresh_perf.exe [行数]（默认 2000，重复 5 轮取中位数）
 #include <QApplication>
 #include <QCoreApplication>
@@ -50,6 +50,11 @@ int main(int argc, char **argv)
     if (!grid) { qWarning("no grid"); return 2; }
 
     const auto set = makeSet(total);
+    const auto reload = [&] {
+        auto next = set;
+        next.id = QUuid::createUuid();
+        table.setCommandSet(next);
+    };
 
     // 连续刷新前后统计"本控件下的子控件总数"：如果它在增长，说明旧的 cellWidget
     // 没有被真正回收（deleteLater 只在返回事件循环时才执行，连续刷新期间会越积越多）。
@@ -57,7 +62,7 @@ int main(int argc, char **argv)
     QString leakInfo;
     {
         const int before = table.findChildren<QWidget *>().size();
-        table.setCommandSet(set);
+        reload();
         const int afterBuild = table.findChildren<QWidget *>().size();
         QApplication::processEvents();
         const int afterPump = table.findChildren<QWidget *>().size();
@@ -68,7 +73,7 @@ int main(int argc, char **argv)
     // 否则只知道总时长，不知道超线性成本出在哪一段。
     QElapsedTimer phase;
     phase.start();
-    table.setCommandSet(set);
+    reload();
     const qint64 buildMs = phase.elapsed();
     phase.restart();
     QApplication::processEvents();
@@ -86,7 +91,7 @@ int main(int argc, char **argv)
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QElapsedTimer timer;
         timer.start();
-        table.setCommandSet(set);
+        reload();
         const qint64 buildRound = timer.elapsed();
         timer.restart();
         QApplication::processEvents(); // 把布局/重绘一并算进去，这才是用户等的那段时间

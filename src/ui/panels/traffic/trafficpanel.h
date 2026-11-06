@@ -9,6 +9,7 @@
 #include "trafficfilter.h"
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QJsonObject>
 #include <QObject>
 #include <QSet>
 #include <QStringList>
@@ -56,6 +57,10 @@ public:
     // 忘掉手动指定的目录，回到程序目录下的 log 文件夹。
     void resetLogDirectory();
     void setCommandPanelToggle(bool expanded);
+    QJsonObject automationState() const;
+    QJsonObject queryTraffic(const QJsonObject &arguments) const;
+    QJsonObject readDisplayedText(int maxChars) const;
+    void clearTraffic();
     // 头两行（顶栏 + 过滤条）"最少要多宽"没有独立的访问器：行里的控件各自声明下限
     // （见 `ui/common/rowmetrics.h`），布局据此算出 minimumSizeHint，主窗口直接用它。
     // 早先这里有个 filterRowWidthHint() 做逐项求和，已删除——那种手工账目漏掉一项

@@ -23,7 +23,10 @@ $install = Join-Path $work 'install'
 $userData = Join-Path $work 'user-data'
 $packageDir = Join-Path $work 'package'
 $logPath = Join-Path $work 'update.log'
-$serverScript = Join-Path $env:TEMP 'qqcom-local-update-server.py'
+$serverScript = Join-Path $PSScriptRoot 'local_update_server.py'
+if (-not (Test-Path -LiteralPath $serverScript -PathType Leaf)) {
+    throw "Local update server fixture was not found: $serverScript"
+}
 New-Item -ItemType Directory -Force -Path $install, $userData, $packageDir | Out-Null
 
 function Stop-Tree([System.Diagnostics.Process] $Process) {
@@ -45,7 +48,7 @@ try {
     $package = Join-Path $packageDir "QQCom-$TargetVersion-win64.zip"
     if (-not (Test-Path -LiteralPath $package)) { throw "Package was not created: $package" }
 
-    $server = Start-Process -FilePath 'python' -ArgumentList @($serverScript, $package, $TargetVersion) -WorkingDirectory $work -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $work 'server.out') -RedirectStandardError (Join-Path $work 'server.err')
+    $server = Start-Process -FilePath 'python' -ArgumentList @(('"' + $serverScript + '"'), ('"' + $package + '"'), $TargetVersion) -WorkingDirectory $work -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $work 'server.out') -RedirectStandardError (Join-Path $work 'server.err')
     $origin = $null
     $deadline = (Get-Date).AddSeconds(20)
     while ((Get-Date) -lt $deadline) {
@@ -68,7 +71,7 @@ try {
     $app = Start-Process -FilePath (Join-Path $install 'QQCom.exe') -ArgumentList @(
         '--local-update-source', $origin,
         '--local-update-current-version', $CurrentVersion,
-        '--accept-update') -WorkingDirectory $install -PassThru
+        '--accept-update') -WorkingDirectory $install -PassThru -WindowStyle Hidden
     Write-Host "APP_PID $($app.Id)"
 
     $deadline = (Get-Date).AddSeconds(180)

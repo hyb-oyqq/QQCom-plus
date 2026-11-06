@@ -12,6 +12,8 @@
 #include <QCheckBox>
 #include <QPushButton>
 #include <QDebug>
+#include <QMessageBox>
+#include <QTimer>
 
 #include "ui/panels/commands/commandtablewidget.h"
 #include "domain/commandset.h"
@@ -36,6 +38,7 @@ int main(int argc, char **argv)
 
     const int deleteCount = argc > 1 ? QString::fromLatin1(argv[1]).toInt() : 250;
     const int total = argc > 2 ? QString::fromLatin1(argv[2]).toInt() : 500;
+    if (deleteCount <= 0 || total < deleteCount) return 2;
 
     CommandTableWidget table;
     table.setCommandSet(makeSet(total));
@@ -47,20 +50,24 @@ int main(int argc, char **argv)
     auto *grid = table.findChild<QTableWidget *>();
     if (!grid) { qWarning("no grid"); return 2; }
 
-    // 勾选前 deleteCount 行（新建默认已勾选，这里显式确保）。
-    for (int row = 0; row < deleteCount && row < total; ++row) {
+    // 只勾选前 deleteCount 行，底栏真实删除入口据此确定待删范围。
+    for (int row = 0; row < total; ++row) {
         if (auto *cb = grid->cellWidget(row, 0) ? grid->cellWidget(row, 0)->findChild<QCheckBox *>() : nullptr)
-            cb->setChecked(true);
+            cb->setChecked(row < deleteCount);
     }
 
-    // 收集要删的行号，直接调 removeRows（绕过确认框）。
-    QList<int> rows;
-    for (int row = 0; row < deleteCount && row < total; ++row)
-        rows.append(row);
-
+    auto *remove = table.findChild<QPushButton *>(QStringLiteral("removeChecked"));
+    if (!remove) return 2;
     QElapsedTimer timer;
-    timer.start();
-    table.removeRows(rows);
+    // 走真实界面入口，在接受确认后计时，不为探针暴露私有行操作。
+    QTimer::singleShot(0, &table, [&] {
+        if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            timer.start();
+            dialog->done(QMessageBox::Yes);
+        }
+    });
+    remove->click();
+    if (!timer.isValid() || table.rowCount() != total - deleteCount) return 3;
     const qint64 ms = timer.elapsed();
 
     qInfo().noquote() << QStringLiteral("总行数=%1 删除=%2 剩余=%3 耗时=%4 ms")

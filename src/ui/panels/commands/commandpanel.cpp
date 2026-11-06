@@ -3,6 +3,7 @@
 #include "exportgroupsdialog.h"
 #include "app/commandformats.h"
 #include "app/commandmanager.h"
+#include "app/commandsendscheduler.h"
 #include "persistence/preferencesstore.h"
 #include "domain/commanditem.h"
 #include "ui/common/styledialogs.h"
@@ -22,6 +23,18 @@
 CommandPanel::CommandPanel(QWidget *parent) : QWidget(parent)
 {
     setupUi();
+    m_scheduler = new CommandSendScheduler(this);
+    connect(m_scheduler, &CommandSendScheduler::runStarted,
+            m_commandTable, &CommandTableWidget::beginSendRun);
+    connect(m_scheduler, &CommandSendScheduler::commandReady, this,
+            [this](int row, const CommandItem &command) {
+                m_commandTable->setSendCursor(row);
+                emit sendCommand(command);
+            });
+    connect(m_scheduler, &CommandSendScheduler::finished, this, [this] {
+        m_commandTable->setBatchLooping(false);
+        m_commandTable->endSendRun();
+    });
 
     // 连接 CommandManager 信号
     connect(CommandManager::instance(), &CommandManager::setsChanged,
@@ -105,6 +118,10 @@ void CommandPanel::setupUi()
     m_commandTable = new CommandTableWidget(this);
     connect(m_commandTable, &CommandTableWidget::commandsChanged,
             this, &CommandPanel::onCommandsChanged);
+    connect(m_commandTable, &CommandTableWidget::moveCommandsRequested,
+            this, &CommandPanel::onMoveCommandsRequested);
+    connect(m_commandTable, &CommandTableWidget::structureAboutToChange,
+            this, &CommandPanel::onBatchSendStopRequested);
     connect(m_commandTable, &CommandTableWidget::sendCommand,
             this, &CommandPanel::onSendCommand);
     connect(m_commandTable, &CommandTableWidget::batchSendRequested,
@@ -222,7 +239,7 @@ void CommandPanel::onAddSetClicked()
                                          tr("新指令集"), &ok);
     if (!ok || name.trimmed().isEmpty()) return;
 
-    CommandSet newSet(name);
+    CommandSet newSet(name.trimmed());
     CommandManager::instance()->addSet(newSet);
     savePreferences();
 
@@ -265,6 +282,9 @@ void CommandPanel::onRenameSetClicked()
                                                set.name, &ok).trimmed();
     if (!ok || name.isEmpty() || name == set.name) return;
 
+    // 对话框运行期间可能收到外部更新；只修改最新分组的名称。
+    set = CommandManager::instance()->getSet(currentId);
+    if (set.id.isNull()) return;
     set.name = name;
     // 名称显示在下拉框中，更新后需要广播，让当前选中项立即显示新名称。
     CommandManager::instance()->updateSet(currentId, set, true);
@@ -341,10 +361,25 @@ void CommandPanel::onContentWrapToggled(bool wrap)
     savePreferences();
 }
 
+bool CommandPanel::hasActiveCommandEditor() const
+{
+    return m_commandTable && m_commandTable->hasActiveEditor();
+}
+
+bool CommandPanel::hasPendingSends() const
+{
+    return (m_scheduler && m_scheduler->isActive()) || m_pendingSingleSends > 0;
+}
+
 void CommandPanel::onCommandsChanged()
 {
     saveCurrentSet();
     savePreferences();
+}
+
+void CommandPanel::onMoveCommandsRequested(const QList<int> &rows, const QUuid &targetSetId)
+{
+    if (CommandManager::instance()->moveCommands(m_currentSetId, targetSetId, rows)) savePreferences();
 }
 
 void CommandPanel::onSendCommand(const CommandItem &cmd)
@@ -352,75 +387,23 @@ void CommandPanel::onSendCommand(const CommandItem &cmd)
     // 只负责"按用户填的延时等一拍再发"，怎么发、发去哪由组合根决定：
     // 编码与结尾符在 MainWindow::handleCommandSend 里按统一规则处理，目标取发送区
     // 当前选择。命令面板不碰字节、不碰目标——它是"内容与时机"的来源，仅此而已。
-    QTimer::singleShot(cmd.delayMs, this, [this, cmd] { emit sendCommand(cmd); });
-}
-
-void CommandPanel::setBatchButtonLooping(bool looping)
-{
-    auto *button = m_commandTable ? m_commandTable->findChild<QPushButton *>(QStringLiteral("primaryButton"))
-                                  : nullptr;
-    if (!button) return;
-    button->setProperty("looping", looping);
-    button->setText(looping ? tr("停止循环") : tr("按序发送勾选项"));
+    ++m_pendingSingleSends;
+    QTimer::singleShot(qMax(0, cmd.delayMs), this, [this, cmd] {
+        --m_pendingSingleSends;
+        emit sendCommand(cmd);
+    });
 }
 
 void CommandPanel::onBatchSendStopRequested()
 {
-    // 代数加一：已经排上的发送和续轮回调看到代数不对就退出。
-    ++m_batchGeneration;
-    setBatchButtonLooping(false);
-    if (m_commandTable) m_commandTable->endSendRun();
-}
-
-void CommandPanel::scheduleBatch(const QList<int> &rows, const QList<CommandItem> &commands, bool loop)
-{
-    // 批量发送，累加延时（第 n 条在第 n 条之前所有延时之和后发出）。
-    //
-    // **进度与发送在同一拍里推进**：定时器回调里先点亮该行的游标，再发出去。
-    // 这是唯一的时序来源——若让表格另起一套定时器去"猜"进度，两套时钟迟早错开，
-    // 而高亮跟实际发送不同步比没有高亮更让人困惑。
-    constexpr int RunTailHoldMs = 700; // 单轮最后一拍发完后再留一会儿，让收尾可见
-    // 循环时两条之间至少隔这一拍，避免延时全是 0 时把事件循环占满。
-    constexpr int LoopGapMs = 50;
-
-    const int generation = m_batchGeneration;
-    if (m_commandTable) m_commandTable->beginSendRun();
-
-    int totalDelay = 0;
-    for (int i = 0; i < commands.size(); ++i) {
-        totalDelay += commands.at(i).delayMs;
-        const int row = rows.value(i, -1);
-        QTimer::singleShot(totalDelay, this, [this, command = commands.at(i), row, generation] {
-            if (generation != m_batchGeneration) return;
-            m_commandTable->setSendCursor(row);
-            emit sendCommand(command);
-        });
-    }
-
-    if (loop) {
-        const int gap = qMax(LoopGapMs, commands.isEmpty() ? LoopGapMs : commands.last().delayMs);
-        QTimer::singleShot(totalDelay + gap, this, [this, rows, commands, generation] {
-            if (generation != m_batchGeneration) return;
-            scheduleBatch(rows, commands, true);
-        });
-        return;
-    }
-
-    // 一轮结束：收掉游标，但**保留已发送的绿色勾**——用户要能一眼看出这一轮覆盖了
-    // 哪几条（这正是"表示目前发送到哪条指令了"的另一半）。
-    QTimer::singleShot(totalDelay + RunTailHoldMs, this, [this, generation] {
-        if (generation != m_batchGeneration) return;
-        m_commandTable->endSendRun();
-    });
+    if (m_scheduler) m_scheduler->stop();
 }
 
 void CommandPanel::onBatchSendRequested(const QList<int> &rows, const QList<CommandItem> &commands, bool loop)
 {
-    if (commands.isEmpty()) return;
-    // 新开一轮作废还没发出去的旧定时器，包括正在循环的那一轮。
-    ++m_batchGeneration;
-    setBatchButtonLooping(loop);
-    scheduleBatch(rows, commands, loop);
+    if (commands.isEmpty() || rows.size() != commands.size()) return;
+    m_scheduler->start(rows, commands, loop);
+    m_commandTable->setBatchLooping(loop && m_scheduler->isActive());
 }
 
 void CommandPanel::refreshSetComboBox()
@@ -468,6 +451,7 @@ void CommandPanel::refreshSetComboBox()
                                       ? CommandSet()
                                       : CommandManager::instance()->getSet(idToLoad);
     m_commandTable->setCommandSet(currentSet);
+    m_commandTable->setMoveTargetSets(sets);
 
     m_updatingSets = false;
 }
@@ -484,13 +468,7 @@ void CommandPanel::saveCurrentSet()
     set.name = oldSet.name;
     set.notes = oldSet.notes;
 
-    // 静默回写：只改内存、不压撤销快照、不广播 setsChanged。
-    //
-    // 这条路径每一次行内编辑都会走到（勾选 / 改延时 / 选结尾符 / 改内容），所以
-    // "静默"是硬要求而不是优化：一旦广播，命令面板会重建下拉框 → 表格 setCommandSet
-    // → refreshTable 销毁行内控件，而其中就有**正在派发这次信号的那个控件**——
-    // 用户报告的"拖拽崩""选结尾符崩"正是这条链的 use-after-free。
-    // 表格是模型的镜像，值由这里的 set 主动推过去，模型不反向通知。
+    // 行内编辑即时同步到管理器，不广播反向刷新。
     CommandManager::instance()->syncSet(m_currentSetId, set);
 }
 

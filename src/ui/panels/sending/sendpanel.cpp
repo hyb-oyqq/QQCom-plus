@@ -481,6 +481,20 @@ void SendPanel::setEndpointOpen(int index, bool open)
     updateSendAvailability();
 }
 
+bool SendPanel::fileTransferBusy() const
+{
+    return m_fileTransfer && m_fileTransfer->isBusy();
+}
+
+QJsonObject SendPanel::automationState() const
+{
+    const auto text = m_editor->toPlainText();
+    return {{"targetMask", targetMask()}, {"format", m_format->currentText()},
+        {"lineEnding", m_suffix->currentText()}, {"text", text.left(8192)},
+        {"textTruncated", text.size() > 8192}, {"repeating", m_repeat->isChecked()},
+        {"intervalMs", m_interval->value()}, {"fileTransferBusy", fileTransferBusy()}};
+}
+
 void SendPanel::setRuntime(EndpointRuntime *runtime)
 {
     if (m_fileTransfer) m_fileTransfer->setRuntime(runtime);

@@ -5,13 +5,20 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
+#include <QScopeGuard>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QTemporaryDir>
 #include <QUdpSocket>
+#include <limits>
+#include "automation/clirunner.h"
+#include "automation/commandautomation.h"
+#include "automation/capabilitycatalog.h"
 #include "app/endpointruntime.h"
 #include "app/receiveframer.h"
 #include "app/commandmanager.h"
+#include "app/commandsendscheduler.h"
 #include "app/filetransferservice.h"
 #include "persistence/preferencesstore.h"
 #include "transport/serialtransport.h"
@@ -92,6 +99,312 @@ class TransportTest : public QObject
     Q_OBJECT
 
 private slots:
+    void cliParsesTypedParametersAndJsonFiles()
+    {
+        Cli::Command command;
+        QString error;
+        QVERIFY2(Cli::parse({"configure", "A", "--type", "serial", "--param", "serial.baud=230400",
+            "--param", "serial.bits=8", "--auto-recover", "false", "--instance", "123", "--no-start"}, command, error), qPrintable(error));
+        QCOMPARE(command.tool, QString("qqcom_configure_endpoint"));
+        const auto parameters = command.arguments.value("parameters").toObject();
+        QVERIFY(parameters.value("serial.baud").isDouble());
+        QCOMPARE(parameters.value("serial.baud").toInt(), 230400);
+        QCOMPARE(parameters.value("serial.bits").toString(), QString("8"));
+        QCOMPARE(command.instance, QString("123"));
+        QVERIFY(!command.autoStart);
+        QVERIFY(!command.arguments.value("autoRecover").toBool());
+
+        QTemporaryDir directory;
+        QFile file(directory.filePath("arguments.json"));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QJsonObject arguments{{"endpoint", "B"}, {"format", "utf8"}, {"data", QString::fromUtf8("中文 \"$()`\\\n")}};
+        file.write(QJsonDocument(arguments).toJson());
+        file.close();
+        QVERIFY2(Cli::parse({"call", "qqcom_send", "--input-file", file.fileName()}, command, error), qPrintable(error));
+        QCOMPARE(command.arguments, arguments);
+    }
+
+    void cliRejectsInvalidInput_data()
+    {
+        QTest::addColumn<QStringList>("arguments");
+        QTest::newRow("unknown-command") << QStringList{"missing"};
+        QTest::newRow("missing-endpoint") << QStringList{"open"};
+        QTest::newRow("wrong-endpoint") << QStringList{"open", "C"};
+        QTest::newRow("extra-position") << QStringList{"state", "A"};
+        QTest::newRow("irrelevant-option") << QStringList{"state", "--data", "hello"};
+        QTest::newRow("missing-payload") << QStringList{"send", "A", "--format", "hex"};
+        QTest::newRow("invalid-encoding") << QStringList{"send", "A", "--data", "hello", "--format", "jpeg"};
+        QTest::newRow("unknown-parameter") << QStringList{"configure", "A", "--param", "baud=100"};
+        QTest::newRow("fractional-integer") << QStringList{"configure", "A", "--param", "client.port=12.3"};
+        QTest::newRow("out-of-range") << QStringList{"configure", "A", "--param", "client.port=65536"};
+        QTest::newRow("invalid-bool") << QStringList{"configure", "A", "--auto-recover", "yes"};
+        QTest::newRow("invalid-timeout") << QStringList{"state", "--timeout", "0"};
+        QTest::newRow("invalid-limit") << QStringList{"traffic", "--limit", "201"};
+        QTest::newRow("invalid-json") << QStringList{"call", "qqcom_get_state", "--json", "[]"};
+        QTest::newRow("conflicting-json") << QStringList{"call", "qqcom_get_state", "--json", "{}", "--input-file", "missing.json"};
+        QTest::newRow("missing-file") << QStringList{"call", "qqcom_get_state", "--input-file", "missing.json"};
+        QTest::newRow("unknown-tool") << QStringList{"call", "unknown-tool"};
+        QTest::newRow("missing-group-name") << QStringList{"commands", "create-group"};
+        QTest::newRow("missing-command-content") << QStringList{"commands", "add", "123"};
+        QTest::newRow("unknown-command-operation") << QStringList{"commands", "remove-all"};
+        QTest::newRow("missing-command-id") << QStringList{"commands", "update", "123"};
+        QTest::newRow("invalid-command-format") << QStringList{"commands", "add", "123", "--content", "hello", "--format", "gbk"};
+        QTest::newRow("negative-command-position") << QStringList{"commands", "update", "123", "456", "--position", "-1"};
+        QTest::newRow("invalid-command-delay") << QStringList{"commands", "add", "123", "--content", "hello", "--delay", "10001"};
+        QTest::newRow("invalid-command-enabled") << QStringList{"commands", "add", "123", "--content", "hello", "--enabled", "yes"};
+        QTest::newRow("invalid-command-option") << QStringList{"commands", "delete-group", "123", "--name", "unexpected"};
+    }
+
+    void cliRejectsInvalidInput()
+    {
+        QFETCH(QStringList, arguments);
+        Cli::Command command;
+        QString error;
+        QVERIFY(!Cli::parse(arguments, command, error));
+        QVERIFY(!error.isEmpty());
+    }
+
+    void cliCommandEditingParsesTypedPatches()
+    {
+        Cli::Command command;
+        QString error;
+        QVERIFY2(Cli::parse({"commands", "add", "group-id", "--content", "AA 55", "--format", "hex",
+            "--line-ending", "crlf", "--delay", "120", "--enabled", "false", "--packed", "true", "--position", "0"}, command, error), qPrintable(error));
+        QCOMPARE(command.tool, QString("qqcom_add_command"));
+        QCOMPARE(command.arguments.value("delayMs").toInt(), 120);
+        QVERIFY(command.arguments.value("enabled").isBool());
+        QVERIFY(!command.arguments.value("enabled").toBool());
+        QVERIFY(command.arguments.value("packed").toBool());
+        QCOMPARE(command.arguments.value("position").toInt(-1), 0);
+        QVERIFY2(Cli::parse({"commands", "update", "group-id", "command-id", "--description", "new label"}, command, error), qPrintable(error));
+        QCOMPARE(command.arguments.size(), 3);
+        QVERIFY(!command.arguments.contains("content"));
+        QVERIFY2(Cli::parse({"commands", "list"}, command, error), qPrintable(error));
+        QCOMPARE(command.tool, QString("qqcom_list_commands"));
+        QVERIFY2(Cli::parse({"commands", "get", "group-id", "--offset", "4", "--limit", "10"}, command, error), qPrintable(error));
+        QCOMPARE(command.tool, QString("qqcom_get_command_group"));
+        QCOMPARE(command.arguments.value("offset").toInt(), 4);
+    }
+
+    void commandMovesAreAtomicAndInvalidateSerializedGroups()
+    {
+        QTemporaryDir directory;
+        PreferencesStore backup(nullptr, directory.filePath("backup.ini"));
+        auto *manager = CommandManager::instance();
+        manager->save(&backup);
+        const auto restore = qScopeGuard([&] { manager->load(&backup); });
+        PreferencesStore store(nullptr, directory.filePath("move.ini"));
+        manager->load(&store);
+        auto source = manager->allSets().first();
+        for (int i = 0; i < 4; ++i) {
+            CommandItem command;
+            command.content = QString::number(i);
+            source.commands.append(command);
+        }
+        manager->syncSet(source.id, source);
+        CommandSet target("target");
+        manager->addSet(target);
+        manager->save(&store); // 先建立序列化缓存。
+        QSignalSpy changed(manager, &CommandManager::setsChanged);
+        QVERIFY(!manager->moveCommands(source.id, target.id, {0, 99}));
+        QVERIFY(!manager->moveCommands(source.id, source.id, {0}));
+        QVERIFY(!manager->moveCommands(source.id, QUuid::createUuid(), {0}));
+        QVERIFY(!manager->moveCommands(source.id, target.id, {}));
+        QCOMPARE(changed.size(), 0);
+        QVERIFY(manager->moveCommands(source.id, target.id, {2, 0, 2}));
+        QCOMPARE(changed.size(), 1);
+        const auto moved = manager->getSet(target.id);
+        QCOMPARE(moved.commands, QList<CommandItem>({source.commands.at(0), source.commands.at(2)}));
+        QCOMPARE(manager->getSet(source.id).commands,
+                 QList<CommandItem>({source.commands.at(1), source.commands.at(3)}));
+        manager->save(&store);
+        const auto serialized = store.value("commandSets").toJsonArray();
+        QCOMPARE(serialized.at(0).toObject(), manager->getSet(source.id).toJson());
+        QCOMPARE(serialized.at(1).toObject(), moved.toJson());
+        manager->undo();
+        manager->save(&store);
+        QCOMPARE(store.value("commandSets").toJsonArray().first().toObject(), source.toJson());
+        manager->redo();
+        manager->save(&store);
+        QCOMPARE(store.value("commandSets").toJsonArray(), serialized);
+        auto edited = moved;
+        edited.commands[0].content = "edited";
+        manager->syncSet(edited.id, edited);
+        manager->save(&store);
+        QCOMPARE(store.value("commandSets").toJsonArray().at(1).toObject(), edited.toJson());
+        manager->removeSet(edited.id);
+        manager->save(&store);
+        QCOMPARE(store.value("commandSets").toJsonArray().size(), 1);
+    }
+
+    void commandSerializationPreservesDuplicateLegacyIds()
+    {
+        QTemporaryDir directory;
+        auto *manager = CommandManager::instance();
+        PreferencesStore backup(nullptr, directory.filePath("backup.ini"));
+        manager->save(&backup);
+        const auto restore = qScopeGuard([&] { manager->load(&backup); });
+        CommandSet first("first");
+        CommandSet second("second");
+        second.id = first.id;
+        PreferencesStore store(nullptr, directory.filePath("duplicates.ini"));
+        const QJsonArray groups{first.toJson(), second.toJson()};
+        store.setValue("commandSets", groups);
+        manager->load(&store);
+        manager->save(&store);
+        QCOMPARE(store.value("commandSets").toJsonArray(), groups);
+        manager->save(&store);
+        QCOMPARE(store.value("commandSets").toJsonArray(), groups);
+        QVERIFY(manager->getSet(QUuid::createUuid()).id.isNull());
+    }
+
+    void commandSchedulerOrdersStopsAndBoundsTimers()
+    {
+        CommandSendScheduler scheduler;
+        QSignalSpy ready(&scheduler, &CommandSendScheduler::commandReady);
+        QSignalSpy finished(&scheduler, &CommandSendScheduler::finished);
+        CommandItem first;
+        first.delayMs = 0;
+        CommandItem second;
+        second.delayMs = 25;
+        scheduler.start({4, 1}, {first, second}, false);
+        QTRY_COMPARE(ready.size(), 2);
+        QCOMPARE(ready.at(0).at(0).toInt(), 4);
+        QCOMPARE(ready.at(1).at(0).toInt(), 1);
+        QTRY_VERIFY(!scheduler.isActive());
+        QCOMPARE(finished.size(), 1);
+        CommandItem slow;
+        slow.delayMs = std::numeric_limits<int>::max();
+        QList<int> rows;
+        QList<CommandItem> commands;
+        for (int i = 0; i < 10000; ++i) { rows.append(i); commands.append(slow); }
+        scheduler.start(rows, commands, true);
+        QCOMPARE(scheduler.findChildren<QTimer *>().size(), 1);
+        QVERIFY(scheduler.isActive());
+        scheduler.stop();
+        QVERIFY(!scheduler.isActive());
+        QVERIFY(!scheduler.findChild<QTimer *>()->isActive());
+        QCOMPARE(ready.size(), 2);
+        // 停止后重启，不得执行旧批次；信号回调内也允许立即停止。
+        connect(&scheduler, &CommandSendScheduler::commandReady, &scheduler,
+                [&scheduler] { scheduler.stop(); });
+        scheduler.start({8, 9}, {first, first}, true);
+        QTRY_COMPARE(ready.size(), 3);
+        QTest::qWait(80);
+        QCOMPARE(ready.size(), 3);
+        QVERIFY(!scheduler.isActive());
+        scheduler.start({0}, {}, false);
+        QVERIFY(!scheduler.isActive());
+    }
+
+    void commandSchedulerCanRestartInsideSendCallback()
+    {
+        CommandSendScheduler scheduler;
+        CommandItem command;
+        command.delayMs = 0;
+        QList<int> sentRows;
+        connect(&scheduler, &CommandSendScheduler::commandReady, &scheduler,
+                [&](int row) {
+                    sentRows.append(row);
+                    if (row == 0) scheduler.start({5}, {command}, false);
+                    else scheduler.stop();
+                });
+        scheduler.start({0, 1}, {command, command}, true);
+        QTRY_COMPARE(sentRows, QList<int>({0, 5}));
+        QTest::qWait(80);
+        QCOMPARE(sentRows, QList<int>({0, 5}));
+        QVERIFY(!scheduler.isActive());
+    }
+
+    void commandAutomationPatchesOrderUndoAndPersistence()
+    {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("preferences.ini");
+        PreferencesStore store(nullptr, path);
+        auto *manager = CommandManager::instance();
+        manager->load(&store);
+        const auto call = [&](const QString &tool, const QJsonObject &arguments) {
+            return CommandAutomation::execute(manager, tool, arguments);
+        };
+        const auto created = call("qqcom_create_command_group", {{"name", " Device "}, {"notes", "keep notes"}});
+        const auto groupId = created.value("groupId").toString();
+        QVERIFY(!QUuid(groupId).isNull());
+        const auto first = call("qqcom_add_command", {{"groupId", groupId}, {"content", QString(6000, 'x')},
+            {"description", "first"}, {"lineEnding", "crlf"}, {"delayMs", 120}, {"enabled", false}});
+        const auto firstId = first.value("commandId").toString();
+        const auto secondId = call("qqcom_add_command", {{"groupId", groupId}, {"content", "AA 55"}, {"format", "hex"}}).value("commandId").toString();
+        const auto page = call("qqcom_get_command_group", {{"groupId", groupId}, {"limit", 1}});
+        QVERIFY(page.value("hasMore").toBool());
+        QCOMPARE(page.value("commands").toArray().first().toObject().value("content").toString().size(), 6000);
+        QCOMPARE(call("qqcom_get_command_group", {{"groupId", groupId}, {"offset", page.value("nextOffset")}})
+            .value("commands").toArray().first().toObject().value("id").toString(), secondId);
+        QVERIFY(call("qqcom_update_command", {{"groupId", groupId}, {"commandId", firstId}, {"description", "renamed"}}).value("updated").toBool());
+        auto group = manager->getSet(QUuid(groupId));
+        QCOMPARE(group.commands.first().content.size(), 6000);
+        QCOMPARE(group.commands.first().delayMs, 120);
+        QCOMPARE(group.commands.first().tailBytes(), QByteArray("\r\n"));
+        QVERIFY(!group.commands.first().enabled);
+        QVERIFY(call("qqcom_update_command", {{"groupId", groupId}, {"commandId", secondId}, {"position", 0}, {"packed", true}}).value("updated").toBool());
+        group = manager->getSet(QUuid(groupId));
+        QCOMPARE(group.commands.first().id, QUuid(secondId));
+        QVERIFY(group.commands.first().isHex);
+        QCOMPARE(group.commands.first().packMode, QStringLiteral("组包"));
+        manager->undo();
+        QCOMPARE(manager->getSet(QUuid(groupId)).commands.first().id, QUuid(firstId));
+        manager->redo();
+        QCOMPARE(manager->getSet(QUuid(groupId)).commands.first().id, QUuid(secondId));
+        QVERIFY(call("qqcom_update_command_group", {{"groupId", groupId}, {"name", "renamed group"}}).value("updated").toBool());
+        QCOMPARE(manager->getSet(QUuid(groupId)).notes, QString("keep notes"));
+        manager->save(&store);
+        QVERIFY(store.sync());
+        PreferencesStore reloaded(nullptr, path);
+        manager->load(&reloaded);
+        QCOMPARE(manager->getSet(QUuid(groupId)).name, QString("renamed group"));
+        QCOMPARE(manager->getSet(QUuid(groupId)).commands.at(1).id, QUuid(firstId));
+        QCOMPARE(manager->getSet(QUuid(groupId)).commands.at(1).content.size(), 6000);
+        QVERIFY(call("qqcom_delete_command", {{"groupId", groupId}, {"commandId", firstId}}).value("deleted").toBool());
+        QCOMPARE(manager->getSet(QUuid(groupId)).commands.size(), 1);
+        QVERIFY(call("qqcom_delete_command_group", {{"groupId", groupId}}).value("deleted").toBool());
+        QCOMPARE(manager->setCount(), 1);
+    }
+
+    void commandAutomationRejectsInvalidEditsAtomically()
+    {
+        QTemporaryDir directory;
+        PreferencesStore store(nullptr, directory.filePath("preferences.ini"));
+        auto *manager = CommandManager::instance();
+        manager->load(&store);
+        auto group = manager->allSets().first();
+        CommandItem command;
+        command.content = "unchanged";
+        group.commands.append(command);
+        manager->syncSet(group.id, group);
+        const auto groupId = group.id.toString();
+        const auto commandId = command.id.toString();
+        const auto before = group.toJson();
+        QSignalSpy changed(manager, &CommandManager::setsChanged);
+        const QList<QPair<QString, QJsonObject>> edits{
+            {"qqcom_delete_command_group", {{"groupId", groupId}}},
+            {"qqcom_update_command_group", {{"groupId", groupId}, {"name", "   "}}},
+            {"qqcom_update_command_group", {{"groupId", groupId}}},
+            {"qqcom_update_command_group", {{"groupId", QUuid::createUuid().toString()}, {"name", "missing"}}},
+            {"qqcom_delete_command_group", {{"groupId", "not-a-uuid"}}},
+            {"qqcom_add_command", {{"groupId", groupId}, {"content", "new"}, {"position", 2}}},
+            {"qqcom_update_command", {{"groupId", groupId}, {"commandId", commandId}, {"content", "new"}, {"position", 1}}},
+            {"qqcom_update_command", {{"groupId", groupId}, {"commandId", commandId}, {"delayMs", 10001}}},
+            {"qqcom_update_command", {{"groupId", groupId}, {"commandId", commandId}, {"enabled", "false"}}},
+            {"qqcom_update_command", {{"groupId", groupId}, {"commandId", commandId}}},
+            {"qqcom_delete_command", {{"groupId", groupId}, {"commandId", QUuid::createUuid().toString()}}},
+            {"qqcom_update_command", {{"groupId", groupId}, {"commandId", commandId}, {"id", QUuid::createUuid().toString()}}}};
+        for (const auto &edit : edits) {
+            const auto result = CommandAutomation::execute(manager, edit.first, edit.second);
+            QVERIFY2(result.contains("error"), qPrintable(edit.first));
+            QCOMPARE(manager->getSet(group.id).toJson(), before);
+            QVERIFY(!manager->canUndo());
+        }
+        QCOMPARE(changed.size(), 0);
+    }
+
     void recoveryCountsIssuesWithoutRepeatingErrorLogs()
     {
         EndpointRuntime runtime;

@@ -27,7 +27,10 @@ int TrafficModel::trimToBudget()
         m_rawBytes -= m_records.at(drop).raw.size();
         ++drop;
     }
-    if (drop > 0) m_records.remove(0, drop);
+    if (drop > 0) {
+        m_records.remove(0, drop);
+        m_firstSequence += quint64(drop);
+    }
     return drop;
 }
 
@@ -44,6 +47,8 @@ void TrafficModel::replaceRecords(QList<Traffic::Message> records)
     if (records.size() > 2000) records = records.last(2000);
     m_records.clear();
     m_rawBytes = 0;
+    m_historyId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_firstSequence = m_nextSequence = 1;
     appendRecords(std::move(records));
 }
 
@@ -54,6 +59,7 @@ int TrafficModel::appendRecords(QList<Traffic::Message> records)
         applyPreviewLimit(record);
         m_rawBytes += record.raw.size();
     }
+    m_nextSequence += quint64(records.size());
     m_records.append(std::move(records));
     return trimToBudget();
 }

@@ -2,6 +2,7 @@
 #define SENDPANEL_H
 
 #include <QWidget>
+#include <QJsonObject>
 #include "domain/portdraft.h"
 #include "domain/trafficmessage.h"
 
@@ -45,6 +46,8 @@ public:
     // 旁路发送（指令面板的单点 / 批量发送）必须取它，不得自己另定一套目标规则——
     // 否则会出现"同一条指令，手点「发送」能到 B，快捷按钮却发去了 A"。
     int targetMask() const;
+    QJsonObject automationState() const;
+    bool fileTransferBusy() const;
     // 旁路发送入口：把一段**已经准备好的原始字节**按发送区当前选中的目标发出去。
     // 存在意义是让指令面板与手点「发送」共用同一条路（同一个 sendRequested 信号、
     // 同一套目标规则、同一个发送来源标记），而不是自己也去调一次 runtime——

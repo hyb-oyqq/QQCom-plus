@@ -5,6 +5,7 @@ INCLUDEPATH += $$PWD/.. $$PWD/../..
 SOURCES += \
     $$PWD/commandformats.cpp \
     $$PWD/commandmanager.cpp \
+    $$PWD/commandsendscheduler.cpp \
     $$PWD/endpointruntime.cpp \
     $$PWD/filetransferservice.cpp \
     $$PWD/payloadchecksum.cpp \
@@ -13,6 +14,7 @@ SOURCES += \
 HEADERS += \
     $$PWD/commandformats.h \
     $$PWD/commandmanager.h \
+    $$PWD/commandsendscheduler.h \
     $$PWD/endpointruntime.h \
     $$PWD/filetransferservice.h \
     $$PWD/payloadchecksum.h \

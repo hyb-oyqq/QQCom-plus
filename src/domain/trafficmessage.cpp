@@ -27,6 +27,7 @@ QString originName(Origin origin)
     case Origin::Scheduled: return QStringLiteral("TIMER");
     case Origin::Forward: return QStringLiteral("FWD");
     case Origin::Sample: return QStringLiteral("SAMPLE");
+    case Origin::Automation: return QStringLiteral("AI");
     }
     return {};
 }

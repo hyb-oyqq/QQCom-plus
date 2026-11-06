@@ -6,6 +6,7 @@
 #include <QObject>
 #include <QList>
 #include <QStack>
+#include <QHash>
 
 class PreferencesStore;
 
@@ -25,6 +26,7 @@ public:
     void updateSet(const QUuid &id, const CommandSet &set, bool pushUndo = false);
     void syncSet(const QUuid &id, const CommandSet &set);
     void removeSet(const QUuid &id);
+    bool moveCommands(const QUuid &sourceId, const QUuid &targetId, const QList<int> &rows);
     int setCount() const { return m_sets.size(); }
 
     // 持久化
@@ -51,6 +53,8 @@ private:
     explicit CommandManager(QObject *parent = nullptr);
 
     QList<CommandSet> m_sets;
+    // 已序列化的分组独立失效，编辑一个分组不重新编码其他分组的全部指令。
+    QHash<QUuid, QJsonObject> m_serializedSets;
     QStack<QList<CommandSet>> m_undoStack;  // 最多10步
     QStack<QList<CommandSet>> m_redoStack;
     static constexpr int MaxUndoSteps = 10;

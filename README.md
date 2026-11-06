@@ -9,7 +9,8 @@ QQCom 是一个基于 Qt Widgets 的 Windows 通信调试工作台，支持串�
 - A/B 双端点真实收发，支持串口、TCP 客户端、TCP 服务器和 UDP。串口、TCP 客户端和 UDP 异常断开后可按 1 秒自动恢复，串口需等同名设备重新出现。TCP 服务器不自动重试监听。
 - 串口/TCP/UDP 均支持用户自定义空闲超时和结束符组帧，连接中可修改；UDP 按来源隔离，未启用时保留数据报边界。
 - 多种显示与发送编码、关键词/正则过滤、文本日志和 TSV 预览导出。
-- 手动/定时发送、快捷指令分组、拖动排序和 QQCom/JCom/BLE 文件导入导出。
+- 手动/定时发送、快捷指令分组、勾选/选中指令跨组移动、拖动排序和 QQCom/JCom/BLE 文件导入导出。
+- 原生 JSON CLI AI 接入：可自动发现/启动 QQCom，查询能力，配置和开关端口、发送数据、读取状态与历史/界面文本，以及编辑快捷指令分组和指令；见 [接入说明](docs/CLI.md)。
 - 文件收发面板：RAW 直接字节流收发，兼容 CRC 与经典校验和的 XMODEM 单文件收发，以及兼容常见 BLE 调试助手的 YMODEM 文件收发。
 - Windows x64 发布目录自动部署 Qt DLL 和插件，版本在 `version/version.h` 里改。
 
@@ -91,9 +92,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 
 
 发布流程、清单校验、安全要求和更新策略见 [OTA 方案](docs/OTA.md)。
 
+## AI 直接操作
+
+在程序目录执行 `qqcom-cli.cmd describe`，AI 即可读取全部能力和参数 Schema，再使用 `state`、`configure`、`open`、`send`、`traffic` 等命令。CLI 会自动连接同一用户的运行实例；没有实例时启动窗口，多个实例时显式选择 `--instance <UUID 或 PID>`。
+
+发布目录附带启动脚本和 [AI 操作说明](AI_ACCESS.md)，界面「AI 接入 → 复制 CLI 入口」可复制完整路径。AI 需要知道程序入口或所在目录；AI 可通过 CLI 自动发现能力，但仍需先找到程序入口。
+
 ## 文档
 
 - [架构](docs/ARCHITECTURE.md)
+- [AI / CLI 接入](docs/CLI.md)
 - [界面与使用约定](docs/UI_DESIGN.md)
 - [开发与验证](docs/DEVELOPMENT.md)
 - [OTA 自动升级方案](docs/OTA.md)

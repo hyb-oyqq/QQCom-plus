@@ -92,6 +92,14 @@ QStringList PreferencesStore::addressHistory(bool localAddress) const
     return result;
 }
 
+bool PreferencesStore::sync()
+{
+    m_settings->sync();
+    if (m_settings->status() == QSettings::NoError) return true;
+    emit saveFailed(tr("配置保存失败，请检查配置目录的写入权限。"));
+    return false;
+}
+
 void PreferencesStore::rememberAddress(const QString &input, bool localAddress)
 {
     const auto address = input.trimmed().toLower();

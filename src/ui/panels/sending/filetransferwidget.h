@@ -31,6 +31,7 @@ public:
     void setRuntime(EndpointRuntime *runtime);
     void setPreferences(PreferencesStore *store);
     void setEndpointOpen(int index, bool open);
+    bool isBusy() const;
 
 public slots:
     void rawDataReceived(int index, const Traffic::Source &source, const QByteArray &payload);
