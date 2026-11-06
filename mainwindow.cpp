@@ -46,7 +46,7 @@ namespace {
 constexpr int SerialAutoRefreshMs = 2000;
 // 收发速率的采样节拍：状态栏数字每秒跳一次足够可读，也更省 GUI 时间。
 constexpr int RateTickMs = 1000;
-// 状态栏右侧动作（检查更新、外观、置顶）与端点状态块共用这一高度，中线才对齐。
+// 状态栏右侧动作与端点状态块共用这一高度，中线才对齐。
 constexpr int StatusControlHeight = 20;
 
 // 左列（端口条 + 数据区）。内容有多宽只留给「展开面板」当起步宽度，
@@ -518,8 +518,28 @@ MainWindow::MainWindow(QWidget *parent)
     addGap(12);
     addCentered(m_statusNote);
 
+    // 连接状态与工具各成一组，统一组内间距。CLI 也放进这一布局，避免
+    // QStatusBar 为独立 permanent widget 追加另一套间距和垂直位置。
+    const auto makeControlGroup = [](const QString &name, int spacing) {
+        auto *group = new QWidget;
+        group->setObjectName(name);
+        auto *layout = new QHBoxLayout(group);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(spacing);
+        return group;
+    };
+    auto *controls = makeControlGroup(QStringLiteral("StatusControls"), 8);
+    auto *connections = makeControlGroup(QStringLiteral("StatusConnections"), 6);
+    auto *tools = makeControlGroup(QStringLiteral("StatusTools"), 6);
+    auto *controlSeparator = makeStatusSeparator();
+    controls->layout()->addWidget(connections);
+    controls->layout()->addWidget(controlSeparator);
+    controls->layout()->setAlignment(controlSeparator, Qt::AlignVCenter);
+    controls->layout()->addWidget(tools);
+    addGap(12);
+    addCentered(controls);
+
     for (int index = 0; index < 2; ++index) {
-        addGap(index == 0 ? 12 : 6);
         auto *chip = new QWidget;
         chip->setObjectName(QStringLiteral("EndpointChip"));
         chip->setFixedHeight(StatusControlHeight);
@@ -542,14 +562,12 @@ MainWindow::MainWindow(QWidget *parent)
         chipLayout->addWidget(dot, 0, Qt::AlignVCenter);
         chipLayout->addWidget(name, 0, Qt::AlignVCenter);
         chipLayout->addWidget(state, 0, Qt::AlignVCenter);
-        addCentered(chip);
+        connections->layout()->addWidget(chip);
     }
 
-    addGap(6);
-
-    // 检查更新、外观和置顶各占一块浅底，高度、圆角与端点状态一致。
-    // 合在同一块里时，文字和 12px 图标贴在一起，点的时候分不清点到哪一个。
+    // 所有动作共用样式属性，文字按钮和图标按钮都与状态块等高。
     const auto prepareAction = [](QToolButton *button) {
+        button->setProperty("statusAction", true);
         button->setFixedHeight(StatusControlHeight - 2);
         button->setAutoRaise(true);
         button->setFocusPolicy(Qt::NoFocus);
@@ -558,6 +576,7 @@ MainWindow::MainWindow(QWidget *parent)
     const auto makeActionChip = [&](const QString &name, int left, int right) {
         auto *chip = new QWidget;
         chip->setObjectName(name);
+        chip->setProperty("statusActionContainer", true);
         chip->setFixedHeight(StatusControlHeight);
         auto *layout = new QHBoxLayout(chip);
         layout->setContentsMargins(left, 0, right, 0);
@@ -566,7 +585,7 @@ MainWindow::MainWindow(QWidget *parent)
     };
 #ifdef Q_OS_WIN
     // 没有独立设置页。检查更新放在状态栏，和置顶一样是窗口级动作。
-    auto *updateChip = makeActionChip(QStringLiteral("StatusActions"), 6, 6);
+    auto *updateChip = makeActionChip(QStringLiteral("StatusActions"), 1, 1);
     auto *checkUpdate = new QToolButton;
     checkUpdate->setObjectName(QStringLiteral("checkUpdate"));
     checkUpdate->setText(tr("检查更新"));
@@ -575,10 +594,16 @@ MainWindow::MainWindow(QWidget *parent)
     checkUpdate->setToolButtonStyle(Qt::ToolButtonTextOnly);
     prepareAction(checkUpdate);
     updateChip->layout()->addWidget(checkUpdate);
-    addCentered(updateChip);
+    tools->layout()->addWidget(updateChip);
     connect(checkUpdate, &QToolButton::clicked, this, &MainWindow::updateCheckRequested);
-    addGap(6);
 #endif
+    auto *cliChip = makeActionChip(QStringLiteral("StatusCli"), 1, 1);
+    auto *cli = setupAutomation(cliChip);
+    cli->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    prepareAction(cli);
+    cliChip->layout()->addWidget(cli);
+    tools->layout()->addWidget(cliChip);
+
     auto *schemeChip = makeActionChip(QStringLiteral("StatusScheme"), 1, 1);
     m_colorScheme = new QToolButton;
     m_colorScheme->setObjectName(QStringLiteral("colorScheme"));
@@ -610,14 +635,13 @@ MainWindow::MainWindow(QWidget *parent)
     }
     m_colorScheme->setMenu(schemeMenu);
     schemeChip->layout()->addWidget(m_colorScheme);
-    addCentered(schemeChip);
+    tools->layout()->addWidget(schemeChip);
     // 存过就按保存的来。没存过只把勾对准当前模式，不写入：
     // 正式程序此时是跟随系统，测试进程会事先钉在亮色上。写入会把那一档当成用户的选择。
     if (preferences->contains(QStringLiteral("window/colorScheme")))
         setColorScheme(preferences->value(QStringLiteral("window/colorScheme")).toString(), true);
     else
         setColorScheme(AppTheme::modeKey(AppTheme::mode()), false);
-    addGap(6);
     auto *pinChip = makeActionChip(QStringLiteral("StatusPin"), 1, 1);
     m_stayOnTop = new QToolButton;
     m_stayOnTop->setObjectName(QStringLiteral("stayOnTop"));
@@ -629,7 +653,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_stayOnTop->setAccessibleName(tr("置顶"));
     prepareAction(m_stayOnTop);
     pinChip->layout()->addWidget(m_stayOnTop);
-    addCentered(pinChip);
+    tools->layout()->addWidget(pinChip);
     connect(m_stayOnTop, &QToolButton::toggled, this, &MainWindow::setStayOnTop);
     connect(AppTheme::instance(), &AppTheme::schemeChanged, this, [this] {
         if (m_stayOnTop) setStayOnTop(m_stayOnTop->isChecked());
@@ -640,7 +664,6 @@ MainWindow::MainWindow(QWidget *parent)
         setStayOnTop(false);
 
     ui->statusbar->addWidget(status, 1);
-    setupAutomation(ui->statusbar);
 
     // 通信运行时：对象搬进 I/O 线程，GUI 只通过队列信号与它往来。
     // 线程结束时运行时在 I/O 线程内自我销毁，串口/socket 的收尾不落在 GUI。

@@ -367,7 +367,7 @@ private slots:
         MainWindow window;
         auto *control = window.findChild<LocalControlServer *>();
         QVERIFY(control);
-        auto *access = window.findChild<QToolButton *>("aiAccessButton");
+        auto *access = window.findChild<QToolButton *>("cliButton");
         QVERIFY(access && access->menu());
         QCOMPARE(access->menu()->actions().size(), 3); // copy entry, separator, help
         QCOMPARE(window.findChildren<QLocalServer *>().size(), 1);
@@ -7330,10 +7330,10 @@ private slots:
         QTRY_COMPARE(model->rowCount(), 2);
         QCOMPARE(text->lineCount(), 1);
         QCOMPARE(text->document()->lastBlock().text(), baseline);
-        // 重新开启：后续错误事件恢复显示。
+        // 重新开启：历史错误与后续错误均恢复显示，等待防抖重投影完成。
         window.findChild<QAction *>(QStringLiteral("showError"))->setChecked(true);
         panel->appendMessages({makeMessage(3, Traffic::Direction::Error, "boom2")});
-        QTRY_COMPARE(text->lineCount(), 2);
+        QTRY_COMPARE(text->lineCount(), 3);
         QVERIFY2(text->document()->lastBlock().text().endsWith(QStringLiteral("boom2")),
             qPrintable(QStringLiteral("错误行实况：")
                 + text->document()->lastBlock().text()));
@@ -7536,21 +7536,24 @@ private slots:
             QCOMPARE(pin->toolButtonStyle(), Qt::ToolButtonIconOnly);
             QCOMPARE(pin->iconSize(), QSize(12, 12));
             auto *actions = window.findChild<QWidget *>(QStringLiteral("StatusActions"));
+            auto *cliChip = window.findChild<QWidget *>(QStringLiteral("StatusCli"));
             auto *schemeChip = window.findChild<QWidget *>(QStringLiteral("StatusScheme"));
             auto *pinChip = window.findChild<QWidget *>(QStringLiteral("StatusPin"));
             auto *chip = window.findChild<QWidget *>(QStringLiteral("EndpointChip"));
-            QVERIFY(actions && schemeChip && pinChip && chip);
+            QVERIFY(actions && cliChip && schemeChip && pinChip && chip);
             QCOMPARE(actions->height(), chip->height());
+            QCOMPARE(cliChip->height(), chip->height());
             QCOMPARE(schemeChip->height(), chip->height());
             QCOMPARE(pinChip->height(), chip->height());
-            const int gap = schemeChip->mapTo(&window, QPoint(0, 0)).x()
+            const int cliGap = cliChip->mapTo(&window, QPoint(0, 0)).x()
                 - actions->mapTo(&window, QPoint(actions->width(), 0)).x();
-            QVERIFY2(gap >= 4,
-                qPrintable(QStringLiteral("检查更新与外观应分开，实际间距 %1").arg(gap)));
+            QCOMPARE(cliGap, 6);
+            const int gap = schemeChip->mapTo(&window, QPoint(0, 0)).x()
+                - cliChip->mapTo(&window, QPoint(cliChip->width(), 0)).x();
+            QCOMPARE(gap, cliGap);
             const int pinGap = pinChip->mapTo(&window, QPoint(0, 0)).x()
                 - schemeChip->mapTo(&window, QPoint(schemeChip->width(), 0)).x();
-            QVERIFY2(pinGap >= 4,
-                qPrintable(QStringLiteral("外观与置顶应分开，实际间距 %1").arg(pinGap)));
+            QCOMPARE(pinGap, cliGap);
             const int pinMid = pin->mapTo(&window, QPoint(0, pin->height() / 2)).y();
             const int chipMid = chip->mapTo(&window, QPoint(0, chip->height() / 2)).y();
             QVERIFY2(qAbs(pinMid - chipMid) <= 1,
@@ -7630,6 +7633,14 @@ private slots:
         auto *system = window.findChild<QAction *>(QStringLiteral("colorScheme_system"));
         auto *bar = window.findChild<QStatusBar *>();
         QVERIFY(button && light && dark && system && bar);
+        const auto saveStatusPreview = [&](const QString &scheme) {
+            const auto directory = qEnvironmentVariable("QQCOM_UI_ARTIFACT_DIR");
+            if (directory.isEmpty()) return true;
+            auto *controls = window.findChild<QWidget *>(QStringLiteral("StatusControls"));
+            return controls && QDir().mkpath(directory)
+                && bar->grab().save(directory + "/statusbar-" + scheme + ".png")
+                && controls->grab().save(directory + "/status-controls-" + scheme + ".png");
+        };
         QVERIFY(button->menu());
         QCOMPARE(button->text(), QString());
         QVERIFY(!button->icon().isNull());
@@ -7648,6 +7659,7 @@ private slots:
         QVERIFY(!AppTheme::isDark());
         QCOMPARE(qApp->styleHints()->colorScheme(), Qt::ColorScheme::Light);
         const QColor lightSurface = surface(bar);
+        QVERIFY(saveStatusPreview(QStringLiteral("light")));
         QVERIFY2(lightSurface.lightness() > 200,
             qPrintable(QStringLiteral("亮色状态栏应是浅底：%1").arg(lightSurface.name())));
 
@@ -7657,6 +7669,7 @@ private slots:
         QVERIFY(AppTheme::isDark());
         QCOMPARE(qApp->styleHints()->colorScheme(), Qt::ColorScheme::Dark);
         const QColor darkSurface = surface(bar);
+        QVERIFY(saveStatusPreview(QStringLiteral("dark")));
         QVERIFY2(darkSurface.lightness() < 80,
             qPrintable(QStringLiteral("暗色状态栏应是深底：%1").arg(darkSurface.name())));
         QVERIFY(darkSurface != lightSurface);

@@ -157,12 +157,12 @@ QFrame#StatusDot[state="opening"] { background: #f59e0b; }
 QFrame#StatusDot[state="closed"] { background: #6b7690; }
 QFrame#StatusDot[state="error"] { background: #f87171; }
 QFrame#StatusDot[state="warning"] { background: #fbbf24; }
-QWidget#StatusActions, QWidget#StatusPin, QWidget#StatusScheme { background: #1e2433; border: 1px solid #343d52; border-radius: 4px; }
-QStatusBar QToolButton#checkUpdate, QStatusBar QToolButton#stayOnTop, QStatusBar QToolButton#colorScheme {
+QWidget[statusActionContainer="true"] { background: #1e2433; border: 1px solid #343d52; border-radius: 4px; }
+QStatusBar QToolButton[statusAction="true"] {
     background: transparent;
     border: 1px solid transparent;
     border-radius: 3px;
-    padding: 0 4px;
+    padding: 0 2px;
     margin: 0;
     min-height: 0;
     min-width: 0;
@@ -170,15 +170,13 @@ QStatusBar QToolButton#checkUpdate, QStatusBar QToolButton#stayOnTop, QStatusBar
     color: #c5d0e0;
 }
 QStatusBar QToolButton#stayOnTop, QStatusBar QToolButton#colorScheme { padding: 0; }
-QStatusBar QToolButton#checkUpdate:hover, QStatusBar QToolButton#stayOnTop:hover,
-QStatusBar QToolButton#colorScheme:hover {
+QStatusBar QToolButton[statusAction="true"]:hover {
     background: #2c3548;
     border-color: transparent;
     color: #e8eefb;
 }
-QStatusBar QToolButton#checkUpdate:pressed, QStatusBar QToolButton#stayOnTop:pressed,
-QStatusBar QToolButton#colorScheme:pressed, QStatusBar QToolButton#colorScheme:checked,
-QStatusBar QToolButton#stayOnTop:checked {
+QStatusBar QToolButton[statusAction="true"]:pressed,
+QStatusBar QToolButton[statusAction="true"]:checked {
     background: #3d4861;
     border-color: transparent;
     color: #e8eefb;

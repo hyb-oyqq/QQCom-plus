@@ -29,7 +29,6 @@ class SendPanel;
 class TrafficPanel;
 class CommandPanel;
 class LocalControlServer;
-class QStatusBar;
 struct CommandItem;
 
 QT_BEGIN_NAMESPACE
@@ -84,7 +83,7 @@ protected:
     void closeEvent(QCloseEvent *event) override;
 
 private:
-    void setupAutomation(QStatusBar *statusbar);
+    QToolButton *setupAutomation(QWidget *parent);
     QJsonObject automationState() const;
     void refreshEndpoints();
     void restoreEndpointDrafts(PreferencesStore *preferences);

@@ -2,6 +2,8 @@
 
 QQCom includes a native JSON CLI. No external AI client configuration, Python or Node.js is required.
 
+For users: click **CLI → 复制给 AI** in the QQCom window, paste the whole message into an AI that can run local commands, then describe your task. The message includes the full executable/launcher path, discovery commands and the current window's instance ID. Agents should use that instance for subsequent operations. Copy again from the target window after it closes or restarts.
+
 Run `qqcom-cli.cmd describe` beside the installed QQCom.exe, or invoke `QQCom.exe --cli describe` by its full path. This returns all supported tools, parameter schemas and CLI command names. Use `--help` for readable usage.
 
 Examples:

@@ -21,11 +21,12 @@
 #include <QFile>
 #include <QJsonArray>
 #include <QMenu>
+#include <QMessageBox>
 #include <QNetworkInterface>
-#include <QStatusBar>
+#include <QPushButton>
 #include <QToolButton>
 
-void MainWindow::setupAutomation(QStatusBar *statusbar)
+QToolButton *MainWindow::setupAutomation(QWidget *parent)
 {
     const auto handler = [this](const QString &name, const QJsonObject &arguments) {
         return executeAutomationTool(name, arguments);
@@ -34,37 +35,61 @@ void MainWindow::setupAutomation(QStatusBar *statusbar)
     m_controlServer->setHandler(handler);
     if (!m_controlServer->start())
         qWarning() << "Local CLI control unavailable:" << m_controlServer->errorString();
-    auto *button = new QToolButton(statusbar);
-    button->setObjectName("aiAccessButton");
-    button->setText(tr("AI 接入"));
-    button->setToolTip(tr("AI 可通过 CLI 操作端口、查询数据和编辑快捷指令"));
+    auto *button = new QToolButton(parent);
+    button->setObjectName("cliButton");
+    button->setText(tr("CLI"));
+    button->setAccessibleName(tr("CLI"));
+    button->setToolTip(tr("复制接入说明给 AI，让它操作当前窗口"));
     button->setAutoRaise(true);
     button->setPopupMode(QToolButton::InstantPopup);
     auto *menu = new QMenu(button);
-    auto *copyCli = menu->addAction(tr("复制 CLI 入口"));
-    connect(copyCli, &QAction::triggered, this, [this] {
+    const auto copyForAi = [this] {
+        if (!m_controlServer->isListening()) {
+            StyleDialogs::warning(this, tr("CLI"), tr("当前窗口的 CLI 未启动，请重启 QQCom 后重试。"));
+            return;
+        }
         const auto launcher = QCoreApplication::applicationDirPath() + "/qqcom-cli.cmd";
         const bool hasLauncher = QFile::exists(launcher);
         const auto path = QDir::toNativeSeparators(hasLauncher ? launcher : QCoreApplication::applicationFilePath());
         // PowerShell single-quoted literal; a path containing apostrophes remains literal.
         auto quoted = path;
         quoted.replace("'", "''");
-        QApplication::clipboard()->setText("& '" + quoted + (hasLauncher ? "' describe" : "' --cli describe"));
-        showStatusNote(tr("已复制 CLI 入口"), 4000);
-    });
+        const auto entry = "& '" + quoted + (hasLauncher ? "'" : "' --cli");
+        const auto instance = m_controlServer->descriptor().value("instanceId").toString();
+        // The pipeline also waits for the GUI-subsystem executable when no launcher is present.
+        QApplication::clipboard()->setText(tr(
+            "请通过本机 CLI 操作 QQCom，根据我接下来的要求完成任务。\n\n"
+            "先在 PowerShell 中运行以下命令，读取可用功能和参数说明（JSON）：\n"
+            "%1 describe | Out-String\n\n"
+            "再读取我当前 QQCom 窗口的状态：\n"
+            "%1 state --instance '%2' | Out-String\n\n"
+            "后续操作均使用上述入口，并带上 --instance '%2'，只操作这个窗口。"
+            "请根据 describe 返回的命令和参数自行完成操作；缺少必要的设备参数时向我询问。"
+            "打开端口后先查询 state，确认 state=open 且 operationPending=false，再发送数据；"
+            "结合状态和收发记录判断实际结果，超时后先检查结果，避免重复发送。"
+            "如果这个窗口已关闭或返回 no_instance，请让我从目标窗口重新复制接入说明。\n"
+        ).arg(entry, instance));
+        showStatusNote(tr("已复制，粘贴给 AI 后告诉它你想做什么"), 5000);
+    };
+    auto *copyCli = menu->addAction(tr("复制给 AI"));
+    connect(copyCli, &QAction::triggered, this, copyForAi);
     menu->addSeparator();
-    auto *help = menu->addAction(tr("如何让 AI 发现 QQCom"));
-    connect(help, &QAction::triggered, this, [this] {
-        StyleDialogs::information(this, tr("AI 接入"),
-            tr("使用随程序附带的 qqcom-cli.cmd 即可接入。\n"
-               "AI 先运行 describe 了解能力，再执行 state、configure、open、send、traffic 等命令。\n"
-               "CLI 会自动连接当前 QQCom；没有窗口时自动启动，多个窗口时按实例选择。\n"
-               "可用“复制 CLI 入口”把完整命令交给 AI。\n\n"
-               "支持 A/B 串口、TCP 客户端、TCP 服务器、UDP 的配置、开关、发送，以及状态、历史记录和界面文本查询。\n"
-               "快捷指令分组和组内指令支持增删改、完整内容查询和组内排序。"));
+    auto *help = menu->addAction(tr("使用说明"));
+    connect(help, &QAction::triggered, this, [this, copyForAi] {
+        QMessageBox dialog(QMessageBox::Information, tr("CLI"),
+            tr("点击“复制给 AI”，粘贴给 AI，再告诉它你想做什么。\n\n"
+               "例如：帮我配置 A 端口，发送查询指令并分析回复。\n\n"
+               "AI 会自行读取可用功能并操作当前窗口，你无需手动执行命令。\n"
+               "请使用能在本机执行命令的 AI。"), QMessageBox::Close, this);
+        dialog.setTextFormat(Qt::PlainText);
+        dialog.button(QMessageBox::Close)->setText(tr("关闭"));
+        auto *copy = dialog.addButton(tr("复制给 AI"), QMessageBox::AcceptRole);
+        dialog.setDefaultButton(copy);
+        dialog.exec();
+        if (dialog.clickedButton() == copy) copyForAi();
     });
     button->setMenu(menu);
-    statusbar->addPermanentWidget(button);
+    return button;
 }
 
 QJsonObject MainWindow::automationState() const
