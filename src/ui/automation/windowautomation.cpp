@@ -62,12 +62,19 @@ QToolButton *MainWindow::setupAutomation(QWidget *parent)
             "先在 PowerShell 中运行以下命令，读取可用功能和参数说明（JSON）：\n"
             "%1 describe | Out-String\n\n"
             "再读取我当前 QQCom 窗口的状态：\n"
-            "%1 state --instance '%2' | Out-String\n\n"
-            "后续操作均使用上述入口，并带上 --instance '%2'，只操作这个窗口。"
+            "%1 state --instance '%2' --no-start | Out-String\n\n"
+            "先记住 state 返回的程序路径、A/B 端点类型和设备参数。"
+            "后续操作均使用上述入口，并带上 --instance '%2'，只操作已确认的目标窗口；重新确认窗口后使用新的 instance ID。"
             "请根据 describe 返回的命令和参数自行完成操作；缺少必要的设备参数时向我询问。"
             "打开端口后先查询 state，确认 state=open 且 operationPending=false，再发送数据；"
             "结合状态和收发记录判断实际结果，超时后先检查结果，避免重复发送。"
-            "如果这个窗口已关闭或返回 no_instance，请让我从目标窗口重新复制接入说明。\n"
+            "\n\n如果窗口已关闭、重启或返回 no_instance，先运行以下命令重新发现在线窗口，不要带上旧的 --instance：\n"
+            "%1 instances | Out-String\n"
+            "对候选窗口使用 state --instance '<候选 ID>' --no-start 只读查询，结合程序路径、端点类型和设备参数核对目标。"
+            "能够唯一确认目标时，自动改用新的 instance ID 继续；不能仅因只有一个在线窗口就认定它是原目标。"
+            "没有在线窗口时，先检查程序进程及 describe 返回的发现目录，仍找不到时请我打开目标 QQCom。"
+            "只有无法唯一确认目标窗口时，才请我选择窗口，必要时从目标窗口重新复制说明。"
+            "确认目标前仅执行发现和只读查询。\n"
         ).arg(entry, instance));
         showStatusNote(tr("已复制，粘贴给 AI 后告诉它你想做什么"), 5000);
     };

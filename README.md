@@ -96,7 +96,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 
 
 在界面点击「CLI → 复制给 AI」，把复制的整段说明粘贴给能执行本机命令的 AI，再告诉它要做什么，例如“配置 A 端口，发送查询指令并分析回复”。AI 会自行读取可用功能并操作，无需用户手动运行命令。说明中已包含程序完整路径和当前窗口标识，多开窗口时也能准确连接。
 
-发布目录附带启动脚本和 [AI 操作说明](AI_ACCESS.md)。也可在程序目录执行 `qqcom-cli.cmd describe` 读取全部能力和参数 Schema，再使用 `state`、`configure`、`open`、`send`、`traffic` 等命令。不指定窗口时，CLI 会自动连接同一用户的运行实例；没有实例时启动窗口，多个实例时使用 `--instance <UUID 或 PID>` 选择。窗口重启后，从目标窗口重新复制说明即可。
+发布目录附带启动脚本和 [AI 操作说明](AI_ACCESS.md)。也可在程序目录执行 `qqcom-cli.cmd describe` 读取全部能力和参数 Schema，再使用 `state`、`configure`、`open`、`send`、`traffic` 等命令。不指定窗口时，CLI 会自动连接同一用户的运行实例；没有实例时启动窗口，多个实例时使用 `--instance <UUID 或 PID>` 选择。窗口重启或返回 `no_instance` 后，AI 应先通过 `instances` 重新发现，并用 `state --instance <候选 ID> --no-start` 核对程序路径和端点参数；能够唯一确认目标时自动更新 ID，无法确认时再请用户选择窗口，必要时重新复制说明。完整流程见 [接入说明](docs/CLI.md)。
 
 ## 文档
 

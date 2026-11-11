@@ -2,7 +2,9 @@
 
 QQCom includes a native JSON CLI. No external AI client configuration, Python or Node.js is required.
 
-For users: click **CLI → 复制给 AI** in the QQCom window, paste the whole message into an AI that can run local commands, then describe your task. The message includes the full executable/launcher path, discovery commands and the current window's instance ID. Agents should use that instance for subsequent operations. Copy again from the target window after it closes or restarts.
+For users: click **CLI → 复制给 AI** in the QQCom window, paste the whole message into an AI that can run local commands, then describe your task. The message includes the full executable/launcher path, discovery commands and the current window's instance ID. Agents should use that instance for subsequent operations and remember the executable path, endpoint types and device parameters returned by `state`.
+
+If the window closes, restarts or returns `no_instance`, first run `instances` through the same entry without the stale `--instance` filter. Read candidate states with `state --instance <candidateId> --no-start` and compare their executable paths, endpoint types and device parameters with the known target and task. If the target can be identified uniquely, continue automatically with its new instance ID; a single live window alone does not establish that it is the intended target. Until the target is confirmed, use discovery and read-only queries only. If no windows are found, check the QQCom processes and the discovery directory returned by `describe`, then ask the user to open the target window if it is still unavailable. Ask the user to choose a window, or copy its access message again if necessary, only when the target cannot be identified uniquely.
 
 Run `qqcom-cli.cmd describe` beside the installed QQCom.exe, or invoke `QQCom.exe --cli describe` by its full path. This returns all supported tools, parameter schemas and CLI command names. Use `--help` for readable usage.
 
