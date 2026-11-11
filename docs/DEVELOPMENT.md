@@ -2,9 +2,22 @@
 
 ## 工具链与构建
 
-主要验证环境为 Windows x64、Qt 6.10.1 MSVC 2022、C++17 和 qmake。Qt 需安装 Widgets、Network、SerialPort、Concurrent、Core5Compat、Test 及翻译工具。其他平台/MinGW 尚未完成发布验证。
+主要验证环境为 Windows x64、Qt 6.10.1 MSVC 2022、C++17 和 qmake。Qt 需安装 Widgets、Network、SerialPort、Concurrent、Core5Compat 和 Test。其他平台/MinGW 尚未完成发布验证。
 
 仓库根目录执行 `build.bat`，或用 Qt Creator 打开 `QQCom.pro`。脚本默认使用当前开发机路径，可通过环境变量 `QT_BIN` 和 `VCVARS64` 指定其他匹配的 Kit。构建结果在 `build/release/release/QQCom.exe`，生成物不会进入 Git。
+
+统一使用 `build/` 下的独立构建目录，不在源码根目录执行 qmake。Qt Creator 的构建目录也应设在 `build/` 下；`.qtcreator/QQCom.pro.user` 是本机 Kit 和运行配置，不提交。根目录不需要 `debug/`、`release/` 或 `.qmake.stash`，它们是早期在源码目录配置工程留下的产物，可以删除。
+
+| 路径 | 内容与清理方式 |
+| --- | --- |
+| `build/release/` | 主程序 Makefile、中间文件及 `release/QQCom.exe`；可重新构建 |
+| `build/core-tests/`、`build/ui-tests/`、`build/update-tests/` | 当前测试构建；可重新构建 |
+| `build/release-runtime/<version>/` | 完整打包输入，仅保留仍需使用的版本 |
+| `build/releases/` | 最终 ZIP 与定稿更新记录；不放解压目录、日志或清单 |
+| `build/release-verification/<version>/` | 校验报告、线上 Release/清单快照及测试日志、截图 |
+| `build/ota/` | 打包与更新演练暂存；发布核验后可清理，先检查是否有程序正在运行 |
+
+临时性能探针、对照源码和一次性诊断目录验证结束后删除，测量结论只在仍有效时并入架构或测试说明。源码不依赖这些构建产物。
 
 以下命令在已加载 MSVC 环境、Qt bin 已加入 PATH 的 **cmd.exe** 中执行，起点为仓库根目录：
 
@@ -62,4 +75,12 @@ powershell -NoProfile -File scripts/deploy_qt_windows.ps1 -Binary build/ui-tests
 # 其他 Kit 使用 -QtBin 指定对应 bin；Debug 构建加 -Configuration Debug
 ```
 
-发布时整理完整运行文件并保留 DLL 和插件目录，准备匹配的 MSVC 运行库，排除编译中间产物。最终交付按 [AGENTS.md](../AGENTS.md)：`build/releases/` 直接平铺 `QQCom-<version>-win64.zip` 与 `固件更新记录.md`，暂存目录、解压后的程序和 manifest 放在其他构建目录。更新记录最新标题为 `# QQCom-<version>-win64`，与 ZIP 名称一致，历史保留。打包及校验步骤见 [OTA 发布流程](OTA.md#发布流程)。版本清单、源码和文档入 Git，生成头、二进制、日志和截图不入 Git。提交前运行 `git diff --check`，检查文件列表和残留旧品牌；旧配置迁移路径及历史说明中的旧名称属于兼容依据。
+发布时整理完整运行文件并保留 DLL 和插件目录，准备匹配的 MSVC 运行库，排除编译中间产物。最终交付和更新记录格式按 [AGENTS.md](../AGENTS.md)，打包、线上附件校验和稳定清单推送见 [OTA 发布流程](OTA.md#发布流程)。
+
+## 贡献与提交
+
+从 `master` 创建短期分支，提交标题使用 Conventional Commits，例如 `fix: 修复 TCP 服务器关闭时的尾帧处理`。一次提交围绕一个主题，不混入生成物、个人配置或无关格式化。C++ 风格由根目录 `.clang-format` 和 `.editorconfig` 约束；历史文件不做无关的整篇重排。
+
+提交前执行 `git diff --check`、Release 构建及与改动有关的测试。修改服务层或公共控件执行对应 core/UI 回归；修改发布脚本执行 OTA 校验及更新演练。用 `git status --short` 检查完整文件列表，根目录的主窗口文件也要纳入检查。旧配置迁移路径和历史说明中的旧名称是兼容依据。
+
+源码、规则、文档、根目录更新记录、版本头和 `ota/stable.json` 入 Git；构建生成的头文件、二进制、日志、截图及本机配置不入 Git。`version/version.h` 是源码文件，不能随生成头一起删除。版本号使用 `主.次.修订`：破坏兼容性递增主版本，向后兼容的新能力递增次版本，问题修复递增修订版本。发布标签固定构建源码，后续维护提交到 `master`，不移动已有标签。

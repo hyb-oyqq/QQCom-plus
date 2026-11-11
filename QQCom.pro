@@ -42,11 +42,6 @@ HEADERS += \
 FORMS += \
     mainwindow.ui
 
-TRANSLATIONS += \
-    QQCom_zh_CN.ts
-CONFIG += lrelease
-CONFIG += embed_translations
-
 include(scripts/deploy_qt_windows.pri)
 
 # Default rules for deployment.

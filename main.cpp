@@ -13,11 +13,9 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QIcon>
-#include <QLocale>
 #include <QSettings>
 #include <QTimer>
 #include <QTextStream>
-#include <QTranslator>
 #include <QUrl>
 
 #include <algorithm>
@@ -138,17 +136,6 @@ int main(int argc, char *argv[])
     if (parser.isSet("cli")) {
         QTextStream(stderr) << "--cli must be the first option; use QQCom.exe --cli --help\n";
         return 2;
-    }
-    // 程序主图标：exe 内嵌资源（RC_ICONS）管资源管理器，这里管运行中的窗口与任务栏。
-
-    QTranslator translator;
-    const QStringList uiLanguages = QLocale::system().uiLanguages();
-    for (const QString &locale : uiLanguages) {
-        const QString baseName = "QQCom_" + QLocale(locale).name();
-        if (translator.load(":/i18n/" + baseName)) {
-            a.installTranslator(&translator);
-            break;
-        }
     }
     MainWindow w;
     if (parser.isSet("snapshot")) w.setAttribute(Qt::WA_DontShowOnScreen);

@@ -18,19 +18,7 @@ A/B 桥接把一端收到的字节原样写到另一端。后台日志轮转仍�
 
 ## 快速开始
 
-### RAW/XMODEM/YMODEM 文件收发
-
-发送区有「手动发送」和「文件收发」两个标签。文件页选择端点 A/B、方向和模式：
-
-- `RAW` 适合双方已经约定好文件边界的场景。发送端选择文件后点击“发送文件”；接收端选择保存路径，收到的字节会持续写入，传输结束后点击“停止”提交文件。RAW 本身没有结束标记，停止动作就是接收完成信号。
-- `XMODEM` 适合对端只要 128 字节块、不传文件名的场景。接收端先发 `C`（0x43）要 CRC16；约 3 秒没有数据再发 `NAK`（0x15）。对端若直接发来 132 字节校验和帧，也会立刻按经典校验和接收。发送端看到 `C` 就发 133 字节 CRC 帧，看到 `NAK` 就发 132 字节校验和帧。两边都选本地文件路径。末包不足 128 字节时用 0x1A 填充。协议不传长度，接收文件按 128 字节对齐，末尾的 0x1A 会保留。不支持 1024 字节块。
-- `YMODEM` 适合需要文件名、长度、CRC16 和重传的场景。发送端选择文件和 128/1024 字节分包；接收端选择目录，文件名和长度从 YMODEM 文件头取得。协议使用 `C` 启动、SOH/STX 分包、ACK/NAK、双 EOT 和空文件头结束，能与常见串口/BLE 调试助手互通。
-
-文件服务限制单文件 100 MB。XMODEM 和 YMODEM 都使用临时文件提交，传输失败不会留下未完成目标文件。YMODEM 接收还会清理文件名中的路径和 Windows 保留字符。该实现按单文件工作，不包含回滚或多文件批量传输。
-
-文件页可以填写一条前置指令和一条后置指令。前置指令发出后先等待设定的毫秒数，再开始文件字节；文件完成后再等待，然后发送后置指令。等待期间到达的字节不写入文件，也不会被当成 XMODEM/YMODEM 控制字。传输过程中显示速度、进度、重试次数、CRC 错误次数，以及已传输文件载荷的 CRC16 和 CRC32。
-
-两端必须连接到同一个可传输字节流的端点；普通监视区仍会显示通信内容，文件协议使用运行时的原始字节入口，不受组帧、结束符或空闲超时设置影响。
+直接使用请从 [Gitee Release](https://gitee.com/qinjmin/qqcom/releases) 下载 Windows x64 ZIP，解压后运行 `QQCom.exe`，保留同目录的 DLL、插件和更新器。端口、显示过滤及 RAW/XMODEM/YMODEM 文件收发的操作见 [使用约定](docs/UI_DESIGN.md)。
 
 ### 开发环境
 
@@ -67,49 +55,38 @@ git diff --check
 
 | 目录 | 作用 |
 | --- | --- |
-| `src/domain` | 领域值对象和消息模型 |
-| `src/transport` | 串口、TCP、UDP 传输实现 |
-| `src/app` | 端点运行时、组帧和快捷指令 |
-| `src/ui` | Qt Widgets 面板和公共控件 |
-| `src/persistence` | 偏好设置、历史地址和旧版本迁移 |
+| `src/` | domain、transport、app、discovery、persistence、automation、ui、update；职责见 [架构](docs/ARCHITECTURE.md) |
+| `resources/` | 图标、样式和 Qt 资源 |
 | `tests` | 核心、UI、性能和压力测试 |
-| `scripts` | 构建、版本、Qt 部署和发布工具 |
-| `docs` | 架构、开发、界面和 OTA 说明 |
+| `scripts` | Qt 部署、CLI 入口、OTA 打包、校验与演练工具 |
+| `docs` | 架构、使用、开发与贡献、CLI、OTA 说明 |
+| `ota/` | 客户端读取的稳定清单与清单模板，需提交 Git |
 | `version` | 版本头文件。改 `version.h` 里的主/次/修订号 |
+| `build/` | 全部构建与本地验证产物，不提交 Git；最终 ZIP 位于 `build/releases/` |
+
+`main.cpp`、`mainwindow.*` 和 `QQCom.pro` 留在根目录，作为程序与主窗口的组合入口。根目录不需要空的 `debug/`、`release/`；它们与实际输出 `build/release/release/`、交付目录 `build/releases/` 不同。详细构建目录约定见 [开发与验证](docs/DEVELOPMENT.md)。
 
 ## 版本和发布
 
-版本号改 `version/version.h` 里的 `QQCOM_VERSION_MAJOR`、`QQCOM_VERSION_MINOR`、`QQCOM_VERSION_PATCH`。构建只刷新同一区块里的时间戳和标题字符串，不会改这三个数字。要在每次点「构建」时刷新构建时间，把 `version/stamp_version.bat` 加到 Qt Creator 的 Make 步骤之前。
-
-打包输入需整理为完整运行目录，包含 `QQCom.exe`、Qt/MSVC 运行库和插件，排除编译中间产物。最终交付直接平铺在 `build/releases/`，只放 `QQCom-<version>-win64.zip` 和 `固件更新记录.md`；更新记录最新标题为 `# QQCom-<version>-win64`，历史保留，详见 [项目规则](AGENTS.md)。先在 `build/ota/` 生成 OTA 包和清单：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1 `
-  -BinaryDir build/release-runtime/<version> `
-  -Version <version> `
-  -BaseUrl https://gitee.com/qinjmin/qqcom/releases/download/v<version>
-```
-
-校验后仅将 ZIP 和更新记录复制到 `build/releases/`。运行目录整理、完整发布流程、清单校验和更新策略见 [OTA 方案](docs/OTA.md)。
+版本号在 `version/version.h` 里手动修改，构建只刷新时间戳。版本记录维护在根目录 [更新记录](更新记录.md)，最终交付为 `build/releases/QQCom-<version>-win64.zip` 和同目录的 `固件更新记录.md`。完整打包、附件校验及稳定版发布流程见 [OTA 方案](docs/OTA.md)，约定见 [项目规则](AGENTS.md)。
 
 ## AI 直接操作
 
 在界面点击「CLI → 复制给 AI」，把复制的整段说明粘贴给能执行本机命令的 AI，再告诉它要做什么，例如“配置 A 端口，发送查询指令并分析回复”。AI 会自行读取可用功能并操作，无需用户手动运行命令。说明中已包含程序完整路径和当前窗口标识，多开窗口时也能准确连接。
 
-发布目录附带启动脚本和 [AI 操作说明](AI_ACCESS.md)。也可在程序目录执行 `qqcom-cli.cmd describe` 读取全部能力和参数 Schema，再使用 `state`、`configure`、`open`、`send`、`traffic` 等命令。不指定窗口时，CLI 会自动连接同一用户的运行实例；没有实例时启动窗口，多个实例时使用 `--instance <UUID 或 PID>` 选择。窗口重启或返回 `no_instance` 后，AI 应先通过 `instances` 重新发现，并用 `state --instance <候选 ID> --no-start` 核对程序路径和端点参数；能够唯一确认目标时自动更新 ID，无法确认时再请用户选择窗口，必要时重新复制说明。完整流程见 [接入说明](docs/CLI.md)。
+发布目录附带 `qqcom-cli.cmd` 和 [AI 操作速查](AI_ACCESS.md)。完整命令、实例恢复和结果判断见 [CLI 接入](docs/CLI.md)。
 
 ## 文档
 
 - [架构](docs/ARCHITECTURE.md)
 - [AI / CLI 接入](docs/CLI.md)
 - [界面与使用约定](docs/UI_DESIGN.md)
-- [开发与验证](docs/DEVELOPMENT.md)
+- [开发、验证与贡献](docs/DEVELOPMENT.md)
 - [OTA 自动升级方案](docs/OTA.md)
-- [贡献指南](CONTRIBUTING.md)
 - [更新记录](更新记录.md)
 
 ## 贡献和许可
 
-提交代码前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，并确保 `git diff --check` 和相关测试通过。
+提交代码前请阅读 [开发与贡献约定](docs/DEVELOPMENT.md#贡献与提交)，并确保 `git diff --check` 和相关测试通过。
 
 当前仓库尚未声明开源许可证。除维护者明确授权的范围外，不应将源码或构建产物用于再分发。

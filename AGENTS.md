@@ -1,5 +1,11 @@
 # QQCom 项目规则
 
+## 工程与文档
+
+- 所有编译、运行暂存、日志和截图放在 `build/` 下，不在源码根目录运行 qmake 或创建 `debug/`、`release/`。
+- `build/release/release/` 是主程序构建输出，`build/release-runtime/<version>/` 是打包输入，`build/releases/` 是最终交付，`build/release-verification/<version>/` 保存发布校验与测试记录。旧探针、对照源码和重复运行库验证结束后删除；清理前检查运行进程，保留正在使用的程序目录。
+- README 作为入口；架构、使用约定、开发与贡献、CLI、OTA 分别维护在 `docs/` 对应文档中。有效结论合并进现行文档，不另留一次性审查报告、重复发布规则或过时的 AI 工具规则。发布包使用的 `AI_ACCESS.md` 保留为独立接入速查。
+
 ## CLI 接入与实例恢复
 
 - 首次接入使用用户提供的程序入口和 instance ID，读取 `describe` 和 `state --instance <ID> --no-start`，记住程序路径、A/B 端点类型及设备参数，后续操作显式指定已确认的实例。

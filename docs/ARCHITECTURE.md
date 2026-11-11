@@ -12,12 +12,13 @@
 | `src/discovery` | 在线程池枚举串口，合并重叠请求，发布变化快照 | 不操作界面；网卡枚举目前仍由端口控件完成 |
 | `src/persistence` | QSettings 偏好、地址历史及旧产品配置迁移 | 显示偏好延迟落盘，地址历史显式同步 |
 | `src/automation` | 原生 CLI、同用户命名管道、能力 Schema 和参数校验 | CLI 自动发现实例；不持有控件或通信实例 |
+| `src/update` | OTA 清单解析、下载和校验、更新器启动 | 稳定清单来自 Gitee；覆盖与重启由独立更新器执行 |
 | `src/ui/common` | 编码、格式化、图标、尺寸与公共对话框 | 不重复实现业务文件格式 |
 | `src/ui/panels` | 端口、监视、发送、快捷指令、A/B 桥接 | 面板各自管理交互，主窗口接线 |
 | `resources` | QSS、图标和 Qt 资源 | 图标随资源一起提交 |
 | `tests` | core、ui、perf、stress | 与产品共享实际模块源码 |
 
-`QQCom.pro` 聚合 `src/ui/ui.pri` 和 `src/services.pri`；后者再引入 domain/transport/app/discovery/persistence 的 `.pri`。核心测试只引入服务层。根目录主窗口作为组合入口保留，无需为目录对称而搬动或创建空模块。
+`QQCom.pro` 聚合 `src/ui/ui.pri`、`src/services.pri` 和 `src/update/update.pri`；服务层引入 domain/transport/app/discovery/persistence/automation 的 `.pri`。核心测试只引入服务层。根目录主窗口作为组合入口保留，无需为目录对称而搬动或创建空模块。
 
 ## 线程与数据流
 
@@ -69,6 +70,8 @@ flowchart LR
 `PreferencesStore` 默认采用 QStandardPaths 的应用配置目录；显式传入文件路径时不自动迁移。QQCom 默认配置不存在时才复制旧配置，目标存在时优先保留新配置，迁移失败通过 `saveFailed` 上报。测试使用临时路径和独立应用身份。
 
 ## 当前边界
+
+设计参考来自 Serial Studio、BLE 调试工具及本机通信工具的阅读，采用分层、协议状态机和验证方法，不引入其框架。图标主要使用 Material Design Icons（Apache-2.0），保留资源文件中的来源与许可注释；引入外部代码前另行核对许可。
 
 AI 接入由 `src/ui/automation/windowautomation.cpp` 在主窗口组合：端口开关复用现有动作路径，发送复用运行时和 PayloadCodec，查询读取实际面板与结构化历史。原生 CLI 在创建 QApplication 前使用 QCoreApplication 执行，能力描述不依赖界面插件。窗口自动提供同用户命名管道，并在应用数据目录写入带 UUID 的实例描述；CLI 探测在线实例，必要时启动窗口，多实例要求显式选择。每条连接处理一个有大小/超时限制的 JSON 请求；正常关闭移除描述，残留文件不计作在线实例。能力描述、参数校验和操作入口由 CLI 共用，控制通道只使用本机命名管道。发布时附带 CLI 启动脚本和 AI 操作说明，不修改 AI 客户端配置。接入流程、能力边界和发现约定见 [AI 接入](CLI.md)。
 

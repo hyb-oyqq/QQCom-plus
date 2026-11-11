@@ -4,7 +4,7 @@
 
 ## 构建探针
 
-在已加载 Qt/MSVC 环境的 cmd.exe、仓库根目录执行。GUI 探针需先生成版本头，见 [开发说明](../docs/DEVELOPMENT.md)。
+在已加载 Qt/MSVC 环境的 cmd.exe、仓库根目录执行。GUI 探针使用仓库中的 `version/version.h`，构建约定见 [开发说明](../docs/DEVELOPMENT.md)。
 
 ```bat
 mkdir build\framer-perf
@@ -46,6 +46,8 @@ python tests/stress/soak_trend.py build/probe.txt --bucket 30
 ```
 
 `--auto-open` 支持 `tcp-server:<port>`、`udp:<port>`、`tcp-client:<host>:<port>`、`serial:<name>`，只作用于端点 A。UDP 发压改用 `--proto udp`；`--ramp` 将发送速率从 0 线性升至指定值。纯标准库脚本无需 Python 第三方依赖。
+
+自动换行的低速与高频观察也使用同一发压工具，例如 `--rate 20 --size 1024 --duration 10` 和 `--rate 50 --size 1024 --duration 5`，在界面开启换行后观察。报文载荷由序号确定，便于复现和对账。
 
 报文含 8 字节递增序号、8 字节毫秒时间戳和填充，脚本输出 `sent_packets / sent_bytes / actual_rate / errors`。TCP 为字节流，readyRead/组帧记录数不等于发送次数，按 RX 字节对账；UDP 还需检查来源和报文序号。仅看发送端“无错误”不能证明接收端无丢失。
 

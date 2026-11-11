@@ -53,7 +53,7 @@ powershell.exe -File qqcom-updater.ps1 \
 
 更新器执行以下步骤：
 
-1. 等待 `--pid` 退出，最多等待固定时间；超时则终止更新并记录原因。
+1. 等待 `-ProcessId` 指定的主程序退出，最多等待固定时间；超时则终止更新并记录原因。
 2. 创建唯一 staging 目录并解压 zip。
 3. 确认 staging 内存在 `QQCom.exe`，再把 staging 文件直接复制到安装目录并覆盖同名文件。
 4. 保留 `%LOCALAPPDATA%\QQCom\QQCom` 下的用户配置、日志和导出文件，不从 zip 删除这些目录。
@@ -74,6 +74,8 @@ build/releases/
 ```
 
 构建运行目录、暂存目录和 `manifest.json` 放在其他 `build/` 子目录。用户在交付目录修订更新记录后，先同步回根目录源文件，再打包。
+
+发布校验报告、线上清单/Release 快照及测试日志统一保存到 `build/release-verification/<version>/`，测试截图放在其中的 `screenshots/`。确认线上与最终 ZIP 一致后，可删除重复下载包、打包暂存和旧版本运行库；清理前检查正在运行的 QQCom 程序路径。
 
 1. 版本号直接改 `version/version.h` 里的主/次/修订号，构建只刷新时间戳。本版更新记录标题用 `# QQCom-<version>-win64`，最新记录置顶，保留原有历史标题和 `1.内容`、条目间空行的格式。
 2. 使用固定 Qt Kit 构建 Release，并运行 core/UI 测试。检查工作区并 `git fetch origin master` 核对分支差异，提交源码、规则、文档和更新记录，创建并推送 `v<version>` 标签及 `master`。不提交构建产物，不强制推送，不移动已有发布标签。
