@@ -1,15 +1,15 @@
 {
-    "schema":  1,
-    "product":  "QQCom",
-    "channel":  "stable",
-    "version":  "1.2.1",
-    "releaseDate":  "2026-11-06T12:58:46Z",
-    "mandatory":  false,
-    "download":  {
-                     "type":  "zip",
-                     "url":  "https://gitee.com/qinjmin/qqcom/releases/download/v1.2.1/QQCom-1.2.1-win64.zip",
-                     "size":  32567587,
-                     "sha256":  "195c58c922a09b5a83e7d47a63ddc3a388b7cb441926f3afb6c01adb6f13c91c"
-                 },
-    "notesUrl":  "https://gitee.com/qinjmin/qqcom/releases/tag/v1.2.1"
+  "schema": 1,
+  "product": "QQCom",
+  "channel": "stable",
+  "version": "1.2.2",
+  "releaseDate": "2026-11-11T02:12:24Z",
+  "mandatory": false,
+  "download": {
+    "type": "zip",
+    "url": "https://gitee.com/qinjmin/qqcom/releases/download/v1.2.2/QQCom-1.2.2-win64.zip",
+    "size": 32568261,
+    "sha256": "629caabd0ca322ced86a72820ba39532c8d220f7a5373006add596539a0096f8"
+  },
+  "notesUrl": "https://gitee.com/qinjmin/qqcom/releases/tag/v1.2.2"
 }
