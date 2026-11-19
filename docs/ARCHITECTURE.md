@@ -38,6 +38,8 @@ flowchart LR
 
 每次开启端点使用新的 generation，主窗口据此忽略旧会话回调。TCP 服务器的每个 peer 有独立 UUID、来源、ReceiveFramer 和按需创建的单次精确定时器。串口/TCP 客户端各用自己的组帧会话；UDP 未启用组帧时保留数据报边界，启用时按来源 IP＋端口隔离组帧会话，允许跨数据报拼接。UDP 会话在缓冲排空或空闲输出后回收定时器，避免历史来源永久占用组帧资源。
 
+UDP 来源展示集合与有缓冲的组帧会话各有每端 256 个上限。展示集合满额后停止增加元数据；组帧会话满额时按单调活动序号选出最久未活动者，先输出残留字节，再回收会话和定时器。两种上限各在本次打开时提示一次；数据接收、原始输入和桥接持续进行，记录保留实际来源。
+
 收到非空数据后重置该会话的空闲计时，缓冲清空后停止计时。peer 离线或端点关闭时输出对应残留数据并释放会话。主窗口退出先在 I/O 线程 shutdown，再处理排队的尾帧；监视面板销毁前写完尚未记录的批次。
 
 ## 消息与监视
@@ -67,11 +69,25 @@ flowchart LR
 
 `PayloadChecksum` 是文件载荷 CRC16-XMODEM 与 CRC32-IEEE 的唯一实现。协议层和发送区预览都调用它，包内校验和整文件累计使用同一套结果。
 
+RAW 发送每次只保留一块待提交数据，以 UUID 关联 I/O 线程的本地接受结果。完整接受后才递增进度、累计 CRC 和安排下一块；拒绝或部分写入会停止并报告失败，迟到的旧 UUID 结果不能推进新传输。接受结果有 10 秒等待上限，使用 `QPointer` 观察运行时生命周期。此结果与 TX 的 `LocalCompleted` 一样，仅说明本地写入接受，不代表线上的发送完成或对端确认。
+
 `PreferencesStore` 默认采用 QStandardPaths 的应用配置目录；显式传入文件路径时不自动迁移。QQCom 默认配置不存在时才复制旧配置，目标存在时优先保留新配置，迁移失败通过 `saveFailed` 上报。测试使用临时路径和独立应用身份。
 
 ## 当前边界
 
-设计参考来自 Serial Studio、BLE 调试工具及本机通信工具的阅读，采用分层、协议状态机和验证方法，不引入其框架。图标主要使用 Material Design Icons（Apache-2.0），保留资源文件中的来源与许可注释；引入外部代码前另行核对许可。
+设计参考采用分层、协议状态机和验证方法，不引入外部项目框架。2026-11-19 核对的项目及具体参考如下；仅按公开接口与行为独立实现，未复制外部实现代码。
+
+| 项目与参考入口 | 参考点及本项目决策 |
+| --- | --- |
+| [Qt SerialPort 官方终端](https://github.com/qt/qtserialport/tree/v6.10.1/examples/serialport/terminal) | 异步读写、错误处理、写出进度；区分提交、本地接受与实际写出，RAW 不再按排队动作计完成 |
+| [pySerial Windows 后端](https://github.com/pyserial/pyserial/blob/master/serial/serialwin32.py) | 显式初始化 DTR/RTS、DSR 握手；本项目清除 Qt 未覆盖的 DSR 残留标志 |
+| [Espressif IDF Monitor 串口读取](https://github.com/espressif/esp-idf-monitor/blob/master/esp_idf_monitor/base/serial_reader.py) | DTR/RTS 顺序影响自动复位；Windows 一次 DCB 更新控制线，其他平台先 RTS 后 DTR，实机仍需检查打开瞬间跳变 |
+| [tio](https://github.com/tio/tio) | 连接恢复、控制线与收发统计；保持异常、用户停止和本地接受结果分别可观察 |
+| [Serial Studio UART](https://github.com/Serial-Studio/Serial-Studio/blob/master/core/Devices/IO/Drivers/UART.cpp) | 多通信后端、显式控制线与数据处理分层；保留当前轻量分层，不引入其仪表盘或商业模块 |
+
+图标主要使用 Material Design Icons（Apache-2.0），保留资源文件中的来源与许可注释；引入外部代码前另行核对许可。
+
+后续性能改进优先处理 GUI 消费速度低于 I/O 速度时的待处理队列，以及日志写盘。当前逐条跨线程投递和 GUI 内待处理队列均无容量上限，日志仍同步写入；TCP 的 Qt 发送缓存也未设应用层上限，`SendBufferSizeSocketOption` 只影响内核缓存，不能替代应用层预算。需要统一定义背压、部分写入和退出排空策略后再调整这些路径，现有历史模型预算不代表总内存有界。
 
 AI 接入由 `src/ui/automation/windowautomation.cpp` 在主窗口组合：端口开关复用现有动作路径，发送复用运行时和 PayloadCodec，查询读取实际面板与结构化历史。原生 CLI 在创建 QApplication 前使用 QCoreApplication 执行，能力描述不依赖界面插件。窗口自动提供同用户命名管道，并在应用数据目录写入带 UUID 的实例描述；CLI 探测在线实例，必要时启动窗口，多实例要求显式选择。每条连接处理一个有大小/超时限制的 JSON 请求；正常关闭移除描述，残留文件不计作在线实例。能力描述、参数校验和操作入口由 CLI 共用，控制通道只使用本机命名管道。发布时附带 CLI 启动脚本和 AI 操作说明，不修改 AI 客户端配置。接入流程、能力边界和发现约定见 [AI 接入](CLI.md)。
 

@@ -115,7 +115,11 @@ FileTransferService::FileTransferService(QObject *parent) : QObject(parent)
 
 void FileTransferService::setRuntime(EndpointRuntime *runtime)
 {
+    if (m_runtime)
+        disconnect(m_runtime, &EndpointRuntime::filePayloadAccepted, this, &FileTransferService::rawPayloadAccepted);
     m_runtime = runtime;
+    if (runtime)
+        connect(runtime, &EndpointRuntime::filePayloadAccepted, this, &FileTransferService::rawPayloadAccepted);
 }
 
 void FileTransferService::begin(int endpoint, Mode mode, State state, const FileTransferSides &sides)
@@ -150,6 +154,8 @@ void FileTransferService::begin(int endpoint, Mode mode, State state, const File
     m_checksum.clear();
     m_inBody = false;
     m_clock.invalidate();
+    m_rawPending.clear();
+    m_rawRequest = {};
     m_nextBlock = 1;
     m_expectedBlock = 1;
     m_pendingData.clear();
@@ -259,6 +265,8 @@ void FileTransferService::reset()
 {
     m_sendTimer.stop();
     m_protocolTimer.stop();
+    m_rawPending.clear();
+    m_rawRequest = {};
     if (m_sourceFile.isOpen()) m_sourceFile.close();
     if (m_destinationFile.isOpen()) m_destinationFile.cancelWriting();
     m_input.clear();
@@ -374,19 +382,48 @@ void FileTransferService::startRawReceive(int endpoint, const QString &path, con
 
 void FileTransferService::sendRawChunk()
 {
-    if (!m_busy || m_state != State::RawSending) return;
-    const QByteArray chunk = m_sourceFile.read(m_rawChunkSize);
-    if (chunk.isEmpty()) {
-        succeed(tr("RAW 文件发送完成：%1").arg(QFileInfo(m_sourceFile).fileName()));
+    if (!m_busy || m_state != State::RawSending || !m_rawRequest.isNull()) return;
+    m_rawPending = m_sourceFile.read(m_rawChunkSize);
+    if (m_sourceFile.error() != QFileDevice::NoError) {
+        fail(tr("读取发送文件失败：%1").arg(m_sourceFile.errorString()), false);
         return;
     }
-    sendBytes(chunk);
-    noteFileBytes(chunk.constData(), chunk.size());
-    m_transferred += chunk.size();
+    if (m_rawPending.isEmpty()) {
+        fail(tr("发送文件在传输期间发生变化，文件传输已停止。"), false);
+        return;
+    }
+    // 只允许一块在途；本地 write 接受之前不累计进度，不读下一块，也不宣布完成。
+    m_rawRequest = QUuid::createUuid();
+    noteInteraction();
+    armProtocolTimeout();
+    if (!m_runtime || !QMetaObject::invokeMethod(m_runtime, "sendFilePayload", Qt::QueuedConnection,
+            Q_ARG(int, m_endpoint), Q_ARG(QByteArray, m_rawPending), Q_ARG(QUuid, m_rawRequest)))
+        fail(tr("端点运行时不可用，文件传输已停止。"), false);
+}
+
+void FileTransferService::rawPayloadAccepted(const QUuid &requestId, qint64 accepted)
+{
+    if (!m_busy || m_state != State::RawSending || requestId != m_rawRequest) return;
+    m_rawRequest = {};
+    m_protocolTimer.stop();
+    const auto size = m_rawPending.size();
+    const auto written = qBound<qint64>(0, accepted, size);
+    noteFileBytes(m_rawPending.constData(), int(written));
+    m_rawPending.clear();
+    m_transferred += written;
     emit progressChanged(m_transferred, m_total);
     publishStats();
+    if (accepted != size) {
+        fail(tr("RAW 本地写入未完整接受（%1/%2 字节），文件传输已停止；慢速设备可增大发送间隔")
+            .arg(written).arg(size), false);
+        return;
+    }
     // 最后一包后面不再空等，直接进入后置指令。间隔只落在两包之间。
     if (m_sourceFile.atEnd()) {
+        if (m_transferred != m_total) {
+            fail(tr("发送文件在传输期间发生变化，文件传输已停止。"), false);
+            return;
+        }
         succeed(tr("RAW 文件发送完成：%1").arg(QFileInfo(m_sourceFile).fileName()));
         return;
     }

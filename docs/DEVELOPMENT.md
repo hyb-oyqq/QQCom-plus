@@ -40,6 +40,8 @@ cd ..\..
 
 UI/traffic 性能工程引用主窗口版本头 `version/version.h`。qmake 后再 nmake，避免运行旧目标。测试返回非零或报告中出现 FAIL 都视为失败。无桌面环境可使用 `offscreen` 平台；字体、DPI、原生窗口布局问题仍需 Windows 平台验证。
 
+Windows 串口控制线回归默认跳过。可在上述 cmd 环境中执行 `set QQCOM_TEST_SERIAL_PORT=COM1`，指定空闲的专用测试串口（建议虚拟串口），再运行 `build\core-tests\release\QQCom_core_tests.exe serialReleasesInheritedControlLines`。用例会暂时设置该端口的 DTR、RTS/CTS 和 DSR 门控，读取真实驱动 DCB，验证默认/无流控、软件流控和硬件流控的控制线初始化及关闭行为，结束时恢复原设置。不发送数据，不使用正在调试的设备端口。
+
 测试程序使用独立应用身份或临时文件，不能把生产配置路径写入测试夹具。截图产物可通过 `QQCOM_UI_ARTIFACT_DIR` 指定到构建目录。压测仅对自有本地/测试设备执行，结果放入 `build/`。
 
 ## 验证范围
@@ -57,6 +59,8 @@ UI/traffic 性能工程引用主窗口版本头 `version/version.h`。qmake 后�
 AI 接入测试包含核心 CLI 参数/JSON 输入校验，以及 UI 中的命名管道发现、多实例选择、自动启动、真实 TCP/UDP 收发和历史查询。CLI 的跨进程 UI 用例默认调用 `build/release/release/QQCom.exe`，需先构建主程序；也可用 `QQCOM_CLI_TEST_EXECUTABLE` 指定待测程序。缺少程序会明确跳过，不能当作集成验证通过。自动启动用例使用测试程序作为短时退出的独立窗口，避免触及生产配置。
 
 人工发布检查仍包括：真实串口设备收发与拔插、非本机 TCP/UDP、防火墙、多个显示缩放比例、长网卡名、持续高负载/慢磁盘、关闭时尾帧和日志完整性。自动回环通过不代表以上场景全部验证。
+
+RAW 回归覆盖未打开端点、部分写入、停止后迟到的旧接受结果、分块和间隔，进度只计本地已接受字节。UDP 容量回归直接驱动真实传输对象的接收信号，注入 1024 个唯一来源，核对列表/定时器上限、提示次数与按来源完整的字节输出；实际 UDP 回环用例继续验证套接字和桥接。32 MiB RAW 跨线程 TCP 发送与 SHA-256 验收入口见 [性能说明](../tests/PERFORMANCE_TEST.md)，不以本地提交成功代替对端校验。
 
 `scripts/local_update_test.ps1` 使用仓库内的 `local_update_server.py`（需 Python 3），不依赖临时目录里预先准备的脚本。它在独立目录以本次构建模拟旧版本号，验证下载、覆盖、配置保留和重启，不修改用户现有实例。
 

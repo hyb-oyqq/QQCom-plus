@@ -47,7 +47,9 @@ public slots:
     // 用户取消等待。可从 GUI 线程直接调用：只写原子标志，已经排队的恢复拍会直接跳过。
     // 用户再次打开时由 openEndpoint 清掉。
     void suppressRecover(int index);
-    void sendPayload(int index, const QByteArray &payload, int origin);
+    virtual qint64 sendPayload(int index, const QByteArray &payload, int origin);
+    // RAW 文件每次只提交一块，返回带身份的本地接受结果，避免把排队当作完成。
+    void sendFilePayload(int index, const QByteArray &payload, const QUuid &requestId);
     // 后两个草稿只用于状态日志里的端口名。不替换已打开会话的配置。
     void setBridge(const BridgeLink &link, const PortDraft &endpointA = {}, const PortDraft &endpointB = {});
     void shutdown();
@@ -58,6 +60,7 @@ signals:
     // 每次底层收到的原始片段。文件传输等协议消费者使用它，不经过组帧器改写边界。
     void rawDataReceived(int index, const Traffic::Source &source, const QByteArray &payload);
     void messageReceived(const Traffic::Message &message);
+    void filePayloadAccepted(const QUuid &requestId, qint64 accepted);
     // 日志合并不丢告警次数：自动恢复重复失败只发布这个轻量事件。
     void endpointIssueReported(int index, int issue, const QString &reason);
 
@@ -67,6 +70,7 @@ private:
         ReceiveFramer framer;
         Traffic::Source source;
         QTimer *idle = nullptr;
+        quint64 lastActivity = 0;
     };
     void closeTransport(int index);
     // 异常关闭后释放传输对象，自动恢复才能在下一拍重新打开。代次照常作废。
@@ -89,6 +93,7 @@ private:
     void discardPendingInput();
     void publishDrop(int index, qint64 bytes, const QString &reason, const QString &brief = {});
     void forwardReceived(int index, const QByteArray &payload);
+    void observeUdpPeer(int index, const Traffic::Source &source);
     // 手动发送和桥接转发共用：write() 的返回值分成失败、本地完成、部分接受。
     // 没写上的字节数和原因交给调用方，先发出发送记录，再记一条丢弃错误。
     struct TransmitLoss
@@ -115,6 +120,9 @@ private:
     // UDP 没有握手。这里记录本次打开期间实际发过数据报的来源，首次见到时写一条
     // 「对端已连接」状态日志，并刷新参数区来源列表。绝不把它当成发送目标。
     QSet<QString> m_observedUdpPeers[EndpointCount];
+    bool m_udpPeerLimitReported[EndpointCount] = {};
+    bool m_udpSessionLimitReported[EndpointCount] = {};
+    quint64 m_receiveActivity = 0;
     // TCP 按连接 UUID 隔离，UDP 按来源 IP:端口隔离；串口/客户端使用各自会话。
     // 仅启用组帧并收到非空数据时创建；UDP 缓冲排空后回收会话，避免来源增长留下定时器。
     QHash<QString, ReceiveSession> m_receiveSessions[EndpointCount];

@@ -36,6 +36,8 @@ QString ReceiveFramer::triggerText(Trigger trigger, int bytes)
         return tr("端口关闭，输出残留 %1 字节").arg(bytes);
     case Reconfigured:
         return tr("组帧设置变更，输出残留 %1 字节").arg(bytes);
+    case ResourceLimit:
+        return tr("组帧来源达到上限，输出残留 %1 字节").arg(bytes);
     }
     return {};
 }

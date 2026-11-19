@@ -10,6 +10,8 @@ namespace {
 // 主窗口经队列槽把桥接开关送到 I/O 线程，类型必须在首次跨线程调用前登记。
 const int bridgeLinkMetaTypeId = qRegisterMetaType<BridgeLink>();
 const int portDraftMetaTypeId = qRegisterMetaType<PortDraft>();
+constexpr int UdpPeerLimit = 256;
+constexpr int UdpSessionLimit = 256;
 } // namespace
 
 EndpointRuntime::EndpointRuntime(QObject *parent) : QObject(parent)
@@ -97,6 +99,8 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
     if (index < 0 || index >= EndpointCount) return;
     closeTransport(index);
     m_observedUdpPeers[index].clear();
+    m_udpPeerLimitReported[index] = false;
+    m_udpSessionLimitReported[index] = false;
     // 换一次打开就是新的观察周期。无论前一个端点类型是什么，都先清掉界面的旧对端列表。
     emit endpointPeersChanged(index, {});
     m_generations[index]++;
@@ -157,20 +161,8 @@ void EndpointRuntime::openEndpoint(int index, const PortDraft &draft)
                 emit rawDataReceived(index, source, payload);
             // 来源发现独立于组帧：启用后也在首报到达时记录来源，不等待完整帧。
             // UDP 没有握手；只记来源，不改发送目标，也不算端口状态迁移。
-            if (m_drafts[index].kind == PortDraft::Udp && source.hasPeer()
-                && !m_observedUdpPeers[index].contains(source.peerAddress)) {
-                m_observedUdpPeers[index].insert(source.peerAddress);
-                QStringList peers = m_observedUdpPeers[index].values();
-                peers.sort();
-                emit endpointPeersChanged(index, peers);
-
-                auto notice = makeMessage(index, Traffic::Direction::Info,
-                    Traffic::Origin::Automatic, {}, Traffic::Framing::Message);
-                notice.source = source;
-                notice.statusText = tr("%1 · 对端 %2 已连接")
-                    .arg(endpointIdentity(index, m_drafts[index]), source.peerAddress);
-                publish(std::move(notice));
-            }
+            if (m_drafts[index].kind == PortDraft::Udp && source.hasPeer())
+                observeUdpPeer(index, source);
             const auto &config = m_drafts[index].framing;
             const bool userFraming = config.isValid() && config.mode != ReceiveFraming::Passthrough;
             // 用户规则优先于传输边界；未启用时 UDP 保持数据报（包括零长报）语义。
@@ -271,9 +263,9 @@ void EndpointRuntime::closeEndpoint(int index)
     emit endpointPeersChanged(index, {});
 }
 
-void EndpointRuntime::sendPayload(int index, const QByteArray &payload, int origin)
+qint64 EndpointRuntime::sendPayload(int index, const QByteArray &payload, int origin)
 {
-    if (index < 0 || index >= EndpointCount) return;
+    if (index < 0 || index >= EndpointCount) return -1;
     auto message = makeMessage(index, Traffic::Direction::Transmit,
         Traffic::Origin(origin), payload, Traffic::Framing::Message);
 
@@ -287,6 +279,40 @@ void EndpointRuntime::sendPayload(int index, const QByteArray &payload, int orig
         transport ? tr("写入被拒绝：端口未就绪或无可用目标") : tr("端口未打开"));
     publish(std::move(message));
     publishDrop(index, loss.bytes, loss.reason, loss.brief);
+    return accepted;
+}
+
+void EndpointRuntime::sendFilePayload(int index, const QByteArray &payload, const QUuid &requestId)
+{
+    const auto accepted = sendPayload(index, payload, int(Traffic::Origin::Manual));
+    emit filePayloadAccepted(requestId, accepted);
+}
+
+void EndpointRuntime::observeUdpPeer(int index, const Traffic::Source &source)
+{
+    auto &observed = m_observedUdpPeers[index];
+    if (observed.contains(source.peerAddress)) return;
+    if (observed.size() >= UdpPeerLimit) {
+        if (!m_udpPeerLimitReported[index]) {
+            m_udpPeerLimitReported[index] = true;
+            auto warning = makeMessage(index, Traffic::Direction::Warning, Traffic::Origin::Automatic,
+                {}, Traffic::Framing::Message);
+            warning.statusText = tr("UDP 来源列表已达 %1 个，仅保留首批来源；其他来源的数据仍正常接收并记录地址")
+                .arg(UdpPeerLimit);
+            publish(std::move(warning));
+        }
+        return;
+    }
+    observed.insert(source.peerAddress);
+    QStringList peers = observed.values();
+    peers.sort();
+    emit endpointPeersChanged(index, peers);
+    auto notice = makeMessage(index, Traffic::Direction::Info, Traffic::Origin::Automatic,
+        {}, Traffic::Framing::Message);
+    notice.source = source;
+    notice.statusText = tr("%1 · 对端 %2 已连接")
+        .arg(endpointIdentity(index, m_drafts[index]), source.peerAddress);
+    publish(std::move(notice));
 }
 
 void EndpointRuntime::setBridge(const BridgeLink &link, const PortDraft &endpointA, const PortDraft &endpointB)
@@ -445,6 +471,23 @@ void EndpointRuntime::feedFramer(int index, const Traffic::Source &source, const
     const QString key = datagram ? source.peerAddress : source.peerId.toString();
     auto it = sessions.find(key);
     if (it == sessions.end()) {
+        if (datagram && sessions.size() >= UdpSessionLimit) {
+            auto oldest = sessions.begin();
+            for (auto candidate = sessions.begin(); candidate != sessions.end(); ++candidate)
+                if (candidate->lastActivity < oldest->lastActivity) oldest = candidate;
+            // 先输出旧来源的残留，不丢数据，也不把不同来源的半帧拼在一起。
+            flushSession(index, oldest.value(), ReceiveFramer::ResourceLimit);
+            delete oldest->idle;
+            sessions.erase(oldest);
+            if (!m_udpSessionLimitReported[index]) {
+                m_udpSessionLimitReported[index] = true;
+                auto warning = makeMessage(index, Traffic::Direction::Warning, Traffic::Origin::Automatic,
+                    {}, Traffic::Framing::Message);
+                warning.statusText = tr("UDP 组帧来源已达 %1 个，最久未活动来源的残留将提前输出并回收")
+                    .arg(UdpSessionLimit);
+                publish(std::move(warning));
+            }
+        }
         ReceiveSession session;
         session.framer.setConfig(config);
         session.source = source;
@@ -467,6 +510,7 @@ void EndpointRuntime::feedFramer(int index, const Traffic::Source &source, const
         it = sessions.insert(key, std::move(session));
     }
     auto &session = it.value();
+    session.lastActivity = ++m_receiveActivity;
     const auto frames = session.framer.feed(payload);
     publishFrames(index, source, frames);
     if (session.framer.pendingBytes() > 0)

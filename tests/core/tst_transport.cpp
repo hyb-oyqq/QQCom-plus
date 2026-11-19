@@ -12,6 +12,9 @@
 #include <QTemporaryDir>
 #include <QUdpSocket>
 #include <limits>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 #include "automation/clirunner.h"
 #include "automation/commandautomation.h"
 #include "automation/capabilitycatalog.h"
@@ -40,17 +43,22 @@ public:
 
     FileTransferService *sink = nullptr;
     QList<QByteArray> sent;
+    qint64 acceptLimit = -1;
 
 public slots:
-    void sendPayload(int index, const QByteArray &payload, int origin)
+    qint64 sendPayload(int index, const QByteArray &payload, int origin) override
     {
         Q_UNUSED(origin);
-        sent.append(payload);
-        if (sink) sink->rawDataReceived(index, Traffic::Source{}, payload);
+        const auto accepted = acceptLimit < 0 ? payload.size() : qMin<qint64>(acceptLimit, payload.size());
+        const auto bytes = payload.first(accepted);
+        sent.append(bytes);
+        if (sink) sink->rawDataReceived(index, Traffic::Source{}, bytes);
+        return accepted;
     }
 };
 
-// 传输层无 UI 核心测试：全部走本机回环，不需要真实串口硬件。
+// 传输层无 UI 核心测试：默认走本机回环，不需要真实串口硬件。
+// Windows 控制线回归可用 QQCOM_TEST_SERIAL_PORT 指定专用测试/虚拟串口。
 // 覆盖四种端点的打开/关闭/收发语义，以及 EndpointRuntime 的消息装配。
 
 constexpr int PortScanBegin = 45450;
@@ -99,6 +107,96 @@ class TransportTest : public QObject
     Q_OBJECT
 
 private slots:
+    void serialReleasesInheritedControlLines_data()
+    {
+        QTest::addColumn<QString>("flow");
+        QTest::newRow("default") << QString();
+        QTest::newRow("none") << QStringLiteral("None");
+        QTest::newRow("software") << QStringLiteral("XON/XOFF");
+        QTest::newRow("hardware") << QStringLiteral("RTS/CTS");
+    }
+
+    void serialReleasesInheritedControlLines()
+    {
+#ifdef Q_OS_WIN
+        const auto portName = qEnvironmentVariable("QQCOM_TEST_SERIAL_PORT");
+        if (portName.isEmpty())
+            QSKIP("Set QQCOM_TEST_SERIAL_PORT to an unused test/virtual serial port.");
+        const auto device = QStringLiteral("\\\\.\\%1").arg(portName);
+        const auto openNative = [&device] {
+            return ::CreateFileW(reinterpret_cast<LPCWSTR>(device.utf16()),
+                GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        };
+        HANDLE seed = openNative();
+        QVERIFY2(seed != INVALID_HANDLE_VALUE, qPrintable(QString::number(::GetLastError())));
+        const auto closeSeed = qScopeGuard([&] {
+            if (seed != INVALID_HANDLE_VALUE) ::CloseHandle(seed);
+        });
+        DCB original{};
+        original.DCBlength = sizeof(original);
+        QVERIFY(::GetCommState(seed, &original));
+        const auto restore = qScopeGuard([&] {
+            const auto handle = seed != INVALID_HANDLE_VALUE ? seed : openNative();
+            if (handle != INVALID_HANDLE_VALUE) {
+                ::SetCommState(handle, &original);
+                if (handle != seed) ::CloseHandle(handle);
+            }
+        });
+        // 模拟上一个工具遗留的 DTR 有效、RTS/CTS 握手配置，检查真实驱动 DCB，
+        // 不能只比较 QSerialPort 缓存的 flowControl() 属性。
+        DCB inherited = original;
+        inherited.fDtrControl = DTR_CONTROL_ENABLE;
+        inherited.fRtsControl = RTS_CONTROL_HANDSHAKE;
+        inherited.fOutxCtsFlow = TRUE;
+        inherited.fOutxDsrFlow = TRUE;
+        inherited.fDsrSensitivity = TRUE;
+        inherited.fInX = FALSE;
+        inherited.fOutX = FALSE;
+        QVERIFY(::SetCommState(seed, &inherited));
+        ::CloseHandle(seed);
+        seed = INVALID_HANDLE_VALUE;
+
+        SerialTransport transport(0);
+        QSignalSpy states(&transport, &AbstractTransport::stateChanged);
+        QSignalSpy errors(&transport, &AbstractTransport::errorOccurred);
+        auto draft = makeDraft(PortDraft::Serial, {{"serial.port", portName}});
+        QFETCH(QString, flow);
+        if (!flow.isEmpty()) draft.values.insert("serial.flow", flow);
+        transport.start(draft, 1);
+        QVERIFY2(errors.isEmpty(), errors.isEmpty() ? "" : qPrintable(errors.first().at(1).toString()));
+        QCOMPARE(lastState(states), int(Transport::State::Open));
+        auto *port = transport.findChild<QSerialPort *>();
+        QVERIFY(port && port->isOpen());
+        DCB actual{};
+        actual.DCBlength = sizeof(actual);
+        QVERIFY(::GetCommState(port->handle(), &actual));
+        QCOMPARE(DWORD(actual.fDtrControl), DWORD(DTR_CONTROL_DISABLE));
+        QVERIFY(!actual.fOutxDsrFlow);
+        QVERIFY(!actual.fDsrSensitivity);
+        const bool hardware = flow == QLatin1String("RTS/CTS");
+        const bool software = flow == QLatin1String("XON/XOFF");
+        QCOMPARE(bool(actual.fOutxCtsFlow), hardware);
+        QCOMPARE(DWORD(actual.fRtsControl), DWORD(hardware ? RTS_CONTROL_HANDSHAKE : RTS_CONTROL_DISABLE));
+        QCOMPARE(bool(actual.fInX), software);
+        QCOMPARE(bool(actual.fOutX), software);
+
+        transport.stop();
+        seed = openNative();
+        QVERIFY(seed != INVALID_HANDLE_VALUE);
+        QVERIFY(::GetCommState(seed, &actual));
+        // 关闭时也不能恢复打开前的 DTR 有效状态，否则设备会再次受控制线影响。
+        QCOMPARE(DWORD(actual.fDtrControl), DWORD(DTR_CONTROL_DISABLE));
+        QCOMPARE(bool(actual.fOutxCtsFlow), hardware);
+        QVERIFY(!actual.fOutxDsrFlow);
+        QVERIFY(!actual.fDsrSensitivity);
+        QCOMPARE(DWORD(actual.fRtsControl), DWORD(hardware ? RTS_CONTROL_HANDSHAKE : RTS_CONTROL_DISABLE));
+        QCOMPARE(bool(actual.fInX), software);
+        QCOMPARE(bool(actual.fOutX), software);
+#else
+        QSKIP("Windows driver control-line regression test.");
+#endif
+    }
+
     void cliParsesTypedParametersAndJsonFiles()
     {
         Cli::Command command;
@@ -2487,6 +2585,129 @@ private slots:
         QCOMPARE(runtime.sent.at(2), QByteArray(2, 'A'));
     }
 
+    void rawSendDoesNotCompleteBeforeLocalAcceptance()
+    {
+        QTemporaryDir directory;
+        QFile file(directory.filePath("raw.bin"));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("payload"), qint64(7));
+        file.close();
+        EndpointRuntime runtime; // 没有打开的端点，真实运行时必须拒绝发送。
+        FileTransferService service;
+        service.setRuntime(&runtime);
+        QSignalSpy finished(&service, &FileTransferService::transferFinished);
+        QSignalSpy failed(&service, &FileTransferService::transferFailed);
+        service.startRawSend(0, file.fileName());
+        QVERIFY(service.isBusy());
+        QCOMPARE(finished.size(), 0);
+        QTRY_COMPARE(failed.size(), 1);
+        QCOMPARE(finished.size(), 0);
+        QVERIFY(!service.isBusy());
+    }
+
+    void rawPartialWriteStopsWithoutSendingNextChunk()
+    {
+        QTemporaryDir directory;
+        QFile file(directory.filePath("partial.bin"));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("123456789"), qint64(9));
+        file.close();
+        LoopbackRuntime runtime;
+        runtime.acceptLimit = 3;
+        FileTransferService service;
+        service.setRuntime(&runtime);
+        QSignalSpy failed(&service, &FileTransferService::transferFailed);
+        QSignalSpy finished(&service, &FileTransferService::transferFinished);
+        QSignalSpy stats(&service, &FileTransferService::statsChanged);
+        service.startRawSend(0, file.fileName(), {}, 4);
+        QTRY_COMPARE(failed.size(), 1);
+        QCOMPARE(finished.size(), 0);
+        QCOMPARE(runtime.sent, QList<QByteArray>{QByteArray("123")});
+        QCOMPARE(stats.last().at(0).toLongLong(), qint64(3));
+        PayloadChecksum checksum;
+        checksum.feed("123", 3);
+        QCOMPARE(stats.last().at(4).toInt(), int(checksum.crc16));
+    }
+
+    void rawRestartIgnoresPreviousAcceptance()
+    {
+        QTemporaryDir directory;
+        QFile file(directory.filePath("restart.bin"));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("payload"), qint64(7));
+        file.close();
+        LoopbackRuntime runtime;
+        FileTransferService service;
+        service.setRuntime(&runtime);
+        QSignalSpy results(&runtime, &EndpointRuntime::filePayloadAccepted);
+        QSignalSpy finished(&service, &FileTransferService::transferFinished);
+        QSignalSpy progress(&service, &FileTransferService::progressChanged);
+        // 模拟前一笔接受结果滞留在跨线程队列，停止后才到达接收方。
+        QObject::disconnect(&runtime, nullptr, &service, nullptr);
+        service.startRawSend(0, file.fileName());
+        QCoreApplication::sendPostedEvents(&runtime, QEvent::MetaCall);
+        QCOMPARE(results.size(), 1);
+        const auto previousRequest = results.first().at(0).value<QUuid>();
+        service.stop();
+        service.setRuntime(&runtime);
+        service.startRawSend(0, file.fileName());
+        emit runtime.filePayloadAccepted(previousRequest, 7);
+        QVERIFY(service.isBusy());
+        QCOMPARE(finished.size(), 0);
+        QCOMPARE(progress.size(), 0);
+        QCoreApplication::sendPostedEvents(&runtime, QEvent::MetaCall);
+        QCOMPARE(finished.size(), 1);
+        QCOMPARE(progress.last().at(0).toLongLong(), qint64(7));
+    }
+
+    void udpSourceBudgetsPreserveAllReceivedBytes()
+    {
+        EndpointRuntime runtime;
+        auto draft = makeDraft(PortDraft::Udp, {{"udp.address", "127.0.0.1"}, {"udp.port", 0}});
+        draft.framing.mode = ReceiveFraming::IdleTimeout;
+        draft.framing.idleTimeoutMs = 60000;
+        runtime.openEndpoint(0, draft);
+        auto *transport = runtime.findChild<UdpTransport *>();
+        QVERIFY(transport);
+        int largestPeerList = 0;
+        int peerUpdates = 0;
+        int warnings = 0;
+        int rawChunks = 0;
+        QMap<QString, QByteArray> received;
+        connect(&runtime, &EndpointRuntime::endpointPeersChanged, this,
+            [&](int, const QStringList &peers) {
+                largestPeerList = qMax(largestPeerList, int(peers.size()));
+                ++peerUpdates;
+            });
+        connect(&runtime, &EndpointRuntime::rawDataReceived, this,
+            [&](int, const Traffic::Source &, const QByteArray &) { ++rawChunks; });
+        connect(&runtime, &EndpointRuntime::messageReceived, this, [&](const Traffic::Message &message) {
+            if (message.direction == Traffic::Direction::Receive)
+                received[message.source.peerAddress] += message.raw;
+            if (message.direction == Traffic::Direction::Warning) ++warnings;
+            QVERIFY(message.issue != Traffic::Issue::DataLoss);
+        });
+        // 直接驱动传输层信号，稳定覆盖大量唯一来源，避免 UDP 内核丢包影响资源预算检查。
+        constexpr int Sources = 1024;
+        for (int i = 0; i < Sources; ++i) {
+            auto source = Traffic::makeSource(draft, 0);
+            source.generation = 1;
+            source.peerAddress = QStringLiteral("127.0.0.1:%1").arg(20000 + i);
+            emit transport->dataReceived(1, source, QByteArray::number(i), int(Traffic::Framing::Datagram));
+        }
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QCOMPARE(rawChunks, Sources);
+        QVERIFY(largestPeerList <= 256);
+        QVERIFY(peerUpdates <= 256);
+        QVERIFY(runtime.findChildren<QTimer *>().size() <= 256);
+        QCOMPARE(warnings, 2); // 来源列表和组帧容量各提示一次，持续来包不能刷屏。
+        runtime.closeEndpoint(0);
+        QCOMPARE(received.size(), Sources);
+        for (int i = 0; i < Sources; ++i)
+            QCOMPARE(received.value(QStringLiteral("127.0.0.1:%1").arg(20000 + i)), QByteArray::number(i));
+        QCOMPARE(runtime.findChildren<QTimer *>().size(), 0);
+    }
+
     void rawSendWaitsBetweenChunks()
     {
         QTemporaryDir dir;
@@ -2506,7 +2727,9 @@ private slots:
         QElapsedTimer clock;
         clock.start();
         service.startRawSend(0, path, {}, 4, 80);
-        QVERIFY(!progress.isEmpty());
+        QCOMPARE(progress.size(), 0);
+        QCoreApplication::sendPostedEvents(&runtime, QEvent::MetaCall);
+        QCOMPARE(progress.size(), 1);
         QVERIFY2(clock.elapsed() < 40,
             qPrintable(QStringLiteral("第一包应马上发出，实际 %1 ms").arg(clock.elapsed())));
         QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 2000);

@@ -33,8 +33,8 @@ public:
     virtual void stop() = 0;
 
     // 写数据。peerId 为空：单目标端点写默认目标，TCP 服务器写全部客户端；
-    // 非空：只写该 peer（仅 TCP 服务器支持）。返回所有目标累计接受的
-    // 字节数，-1 表示当前不可写（未打开 / 无可用目标）。真实写出进度
+    // 非空：只写该 peer（仅 TCP 服务器支持）。返回本地接受的字节数，
+    // 广播取各目标接受数的最小值；-1 表示当前不可写（未打开 / 无可用目标）。真实写出进度
     // 不在此函数内。
     virtual qint64 write(const QByteArray &payload, const QUuid &peerId) = 0;
 

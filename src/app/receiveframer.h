@@ -32,7 +32,8 @@ public:
         Threshold, // 缓冲达到阈值强制输出
         Idle,      // 空闲超时（调用方 flush）
         Closed,    // 端点关闭时的收尾输出
-        Reconfigured // 在线换规则时排空旧缓冲，不代表端口断开
+        Reconfigured, // 在线换规则时排空旧缓冲，不代表端口断开
+        ResourceLimit // 来源容量达到上限，输出最久未活动来源的残留
     };
 
     struct Frame

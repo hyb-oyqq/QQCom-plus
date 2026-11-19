@@ -22,8 +22,8 @@ private:
     void drainPort();
     void handlePortError(QSerialPort::SerialPortError error);
     QSerialPort *m_port = nullptr;
-    // open() 失败会在 open() 内部同步发出 errorOccurred；此标志让错误处理
-    // 在打开阶段退避，由 start() 统一播报，避免 close() 重入崩溃。
+    // open() 和控制线初始化失败会同步发出 errorOccurred；此标志让错误处理
+    // 在初始化阶段退避，由 start() 统一播报，避免 close() 重入崩溃。
     bool m_opening = false;
 };
 

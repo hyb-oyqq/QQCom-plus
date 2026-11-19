@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QObject>
+#include <QPointer>
 #include <QSaveFile>
 #include <QTimer>
 
@@ -113,6 +114,7 @@ private:
     void complete(const QString &text);
 
     void sendRawChunk();
+    void rawPayloadAccepted(const QUuid &requestId, qint64 accepted);
     void startYModemSendInternal(const QString &path, int blockSize);
     void startYModemReceiveInternal(const QString &directory);
     void openReceiveFile(const QString &path);
@@ -138,7 +140,7 @@ private:
     static bool crcMatches(const QByteArray &data, const QByteArray &received);
     static QString safeFileName(const QByteArray &rawName);
 
-    EndpointRuntime *m_runtime = nullptr;
+    QPointer<EndpointRuntime> m_runtime;
     State m_state = State::Idle;
     State m_bodyState = State::Idle;
     Mode m_mode = Mode::Raw;
@@ -146,6 +148,8 @@ private:
     int m_blockSize = 1024;
     int m_rawChunkSize = 16 * 1024;
     int m_rawGapMs = 0;
+    QByteArray m_rawPending;
+    QUuid m_rawRequest;
     bool m_busy = false;
     int m_retryCount = 0;
     int m_retries = 0;
