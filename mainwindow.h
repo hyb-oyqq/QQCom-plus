@@ -44,6 +44,9 @@ class MainWindow : public QMainWindow
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
+    // 程序入口在加载样式表、构造窗口之前调用一次：按窗口保存配色的同一份配置钉住亮色或暗色，
+    // 避免先按系统配色建出整个窗口，再整份换一次样式表。
+    static void restoreSavedColorScheme();
     void loadExample();
     void showRoutes();
     // --auto-open（压测/QA 专用，test-only）：把端点 A 的草稿替换为命令行给定配置，

@@ -7763,6 +7763,43 @@ private slots:
         AppTheme::setMode(AppTheme::Mode::Light);
     }
 
+    // 程序入口在建窗口之前恢复配色，读的必须是窗口写入的那份配置。
+    // 以前入口读的是另一个从没写过的 ini，重启后总是先按系统配色建窗口再换整份样式表。
+    void savedColorSchemeIsRestoredBeforeWindow()
+    {
+        {
+            MainWindow window;
+            window.setAttribute(Qt::WA_DontShowOnScreen);
+            auto *dark = window.findChild<QAction *>(QStringLiteral("colorScheme_dark"));
+            QVERIFY(dark);
+            dark->trigger();
+            QCOMPARE(AppTheme::mode(), AppTheme::Mode::Dark);
+        }
+        // 模拟下次启动：进程级外观先回到别的档位，再走入口的恢复。
+        AppTheme::setMode(AppTheme::Mode::Light);
+        QVERIFY(!AppTheme::isDark());
+        MainWindow::restoreSavedColorScheme();
+        QCOMPARE(AppTheme::mode(), AppTheme::Mode::Dark);
+        QVERIFY(AppTheme::isDark());
+        QCOMPARE(qApp->styleHints()->colorScheme(), Qt::ColorScheme::Dark);
+
+        // 窗口写进的就是入口读的这份配置。
+        {
+            const PreferencesStore store;
+            QCOMPARE(store.value(QStringLiteral("window/colorScheme")).toString(),
+                QStringLiteral("dark"));
+        }
+        // 存的是亮色时同样钉住亮色。
+        {
+            PreferencesStore store;
+            store.setValue(QStringLiteral("window/colorScheme"), QStringLiteral("light"));
+            QVERIFY(store.sync());
+        }
+        MainWindow::restoreSavedColorScheme();
+        QCOMPARE(AppTheme::mode(), AppTheme::Mode::Light);
+        QVERIFY(!AppTheme::isDark());
+    }
+
     // 三条用户反馈的契约：
     //   ① 定时发送的间隔框**始终可输入**（不必先勾选），且**只收数字**；
     //   ② 「清除过滤」按钮**带文案**（不再是个只有图标的按钮）；

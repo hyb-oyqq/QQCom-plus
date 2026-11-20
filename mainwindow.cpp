@@ -1159,6 +1159,18 @@ void MainWindow::releaseWindowSizeFloor()
             page->setSizeConstraint(QLayout::SetNoConstraint);
 }
 
+void MainWindow::restoreSavedColorScheme()
+{
+    // 必须和窗口用同一个 PreferencesStore 路径：配色只写在 preferences.ini 里。
+    // 首次启动时这里会先复制原 QQCom 的配置，迁移过来的配色同样在建窗口前生效。
+    // 复制失败的提示随这个临时对象一起取消，由窗口自己的 PreferencesStore 重试并提示。
+    const PreferencesStore preferences;
+    const QString saved = preferences.value(QStringLiteral("window/colorScheme")).toString();
+    // 跟随系统是默认模式，不需要钉住。
+    if (saved == QLatin1String("light") || saved == QLatin1String("dark"))
+        AppTheme::setMode(AppTheme::modeFromKey(saved));
+}
+
 void MainWindow::setColorScheme(const QString &key, bool persist)
 {
     const AppTheme::Mode mode = AppTheme::modeFromKey(key);
