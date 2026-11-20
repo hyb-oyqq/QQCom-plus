@@ -53,10 +53,10 @@ bool sameDirectory(const QString &a, const QString &b)
     return QDir::cleanPath(a).compare(QDir::cleanPath(b), Qt::CaseInsensitive) == 0;
 }
 
-// 没手动指定时的模板：程序目录/log/QQCom-log.txt。实际文件名另外加时间戳。
+// 没手动指定时的模板：程序目录/log/QQCom-plus-log.txt。实际文件名另外加时间戳。
 QString defaultLogTemplate()
 {
-    return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("log/QQCom-log.txt"));
+    return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("log/QQCom-plus-log.txt"));
 }
 
 // 重投影的防抖窗口。连点开关、连续切换只做一次重投影；50 ms 短于人能察觉的
@@ -754,7 +754,7 @@ bool TrafficPanel::openNewLogFile()
     // 只取模板的"目录 + 基名 + 扩展名"，实际文件名 = 基名 + -yyyyMMdd-HHmmss + 扩展名。
     // 无扩展名的模板按约定补 .txt。
     const QString dir = info.absolutePath();
-    const QString base = info.completeBaseName().isEmpty() ? QStringLiteral("QQCom-log")
+    const QString base = info.completeBaseName().isEmpty() ? QStringLiteral("QQCom-plus-log")
                                                            : info.completeBaseName();
     const QString suffix = info.suffix().isEmpty() ? QStringLiteral("txt") : info.suffix();
     const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
@@ -777,7 +777,7 @@ bool TrafficPanel::openNewLogFile()
     m_logFilePath = path;
     // 每个新文件都先写一行元信息头：日期时间 + 当前显示格式。数据行本身不带格式，
     // 有这行，事后翻日志才知道"这是哪一次会话、按什么格式记的"。
-    writeLogText(tr("# QQCom %1 格式=%2")
+    writeLogText(tr("# QQCom-plus %1 格式=%2")
                       .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
                           PayloadCodec::formatName(currentDisplayFormat()))
                   + QLatin1Char('\n')
@@ -873,7 +873,7 @@ void TrafficPanel::setLogDirectory(const QString &directory)
     const QString dir = QDir::cleanPath(directory.trimmed());
     if (dir.isEmpty()) return;
     const QFileInfo info(logTemplatePath());
-    const QString base = info.completeBaseName().isEmpty() ? QStringLiteral("QQCom-log")
+    const QString base = info.completeBaseName().isEmpty() ? QStringLiteral("QQCom-plus-log")
                                                            : info.completeBaseName();
     const QString suffix = info.suffix().isEmpty() ? QStringLiteral("txt") : info.suffix();
     const QString next = QDir(dir).filePath(base + QLatin1Char('.') + suffix);
@@ -1463,11 +1463,11 @@ void TrafficPanel::reportSummary(const QString &text)
 void TrafficPanel::exportVisible()
 {
     if (!m_model->rowCount()) { reportSummary(tr("当前没有可导出的记录")); return; }
-    const auto path = StyleDialogs::getSaveFileName(this, tr("导出记录"), "QQCom-preview.tsv", tr("制表符文件 (*.tsv)"));
+    const auto path = StyleDialogs::getSaveFileName(this, tr("导出记录"), "QQCom-plus-preview.tsv", tr("制表符文件 (*.tsv)"));
     if (path.isEmpty()) return;
     // 导出列与显示列解耦：导出的是完整的结构化事实。
     // 时间用 ISO 格式带毫秒，方向/边界/来源用稳定名称，HEX 用大写无分隔。
-    QByteArray output("# QQCom traffic preview\n"
+    QByteArray output("# QQCom-plus traffic preview\n"
                       "Time\tPort\tPeer\tDirection\tOrigin\tFraming\tState\tBytes\tTruncated\tHEX\n");
     for (int i = 0; i < m_model->rowCount(); ++i) {
         const auto &r = m_model->record(i);

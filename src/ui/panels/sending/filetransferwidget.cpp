@@ -93,7 +93,7 @@ bool pathIsDirectory(const QString &path)
 QString defaultReceiveDirectory()
 {
     const QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-    const QString folder = QDir(docs.isEmpty() ? QDir::homePath() : docs).filePath(QStringLiteral("QQCom"));
+    const QString folder = QDir(docs.isEmpty() ? QDir::homePath() : docs).filePath(QStringLiteral("QQCom-plus"));
     QDir().mkpath(folder);
     return QDir::cleanPath(folder);
 }

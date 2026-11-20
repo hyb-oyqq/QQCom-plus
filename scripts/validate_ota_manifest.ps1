@@ -10,7 +10,7 @@ $manifestFile = (Resolve-Path -LiteralPath $ManifestPath).Path
 $manifest = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
 
 if ([int]$manifest.schema -ne 1) { throw 'Unsupported OTA manifest schema.' }
-if ([string]$manifest.product -ne 'QQCom') { throw 'Manifest product must be QQCom.' }
+if ([string]$manifest.product -ne 'QQCom-plus') { throw 'Manifest product must be QQCom-plus.' }
 if ([string]$manifest.channel -notmatch '^(stable|beta)$') { throw 'Invalid channel.' }
 if ([string]$manifest.version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version.' }
 

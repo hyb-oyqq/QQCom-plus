@@ -73,7 +73,7 @@ $buildText = "v$version Build:$timestamp"
 $block = Set-DefineString $block "QQCOM_VERSION_STR" $version
 $block = Set-DefineString $block "QQCOM_BUILD_TIMESTAMP" $timestamp
 $block = Set-DefineString $block "QQCOM_BUILD_STR" $buildText
-$block = Set-DefineString $block "QQCOM_APP_TITLE" "QQCom $buildText"
+$block = Set-DefineString $block "QQCOM_APP_TITLE" "QQCom-plus $buildText"
 
 $text = $text.Remove($blockMatch.Index, $blockMatch.Length).Insert($blockMatch.Index, $block)
 

@@ -1,3 +1,3 @@
 @echo off
-"%~dp0QQCom.exe" --cli %*
+"%~dp0QQCom-plus.exe" --cli %*
 exit /b %errorlevel%

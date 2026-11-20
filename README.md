@@ -2,9 +2,9 @@
 
 [![Build & Release](https://github.com/hyb-oyqq/QQCom-plus/actions/workflows/build-release.yml/badge.svg)](https://github.com/hyb-oyqq/QQCom-plus/actions/workflows/build-release.yml)
 
-QQCom 是一个基于 Qt Widgets 的 Windows 通信调试工作台，支持串口、TCP 客户端、TCP 服务器和 UDP，并提供收发监视、组帧、过滤、编码、日志和快捷指令管理。
+QQCom-plus 是一个基于 Qt Widgets 的 Windows 通信调试工作台，支持串口、TCP 客户端、TCP 服务器和 UDP，并提供收发监视、组帧、过滤、编码、日志和快捷指令管理。
 
-本仓库 QQCom-plus 由 QQCom 原仓库迁移而来，保留完整的提交历史和版本标签。
+本项目原名 QQCom。本仓库 QQCom-plus 由 QQCom 原仓库迁移而来，保留完整的提交历史和版本标签。
 
 - 原仓库地址：<https://gitee.com/qinjmin/qqcom>
 - 本仓库地址：<https://github.com/hyb-oyqq/QQCom-plus>
@@ -15,7 +15,7 @@ QQCom 是一个基于 Qt Widgets 的 Windows 通信调试工作台，支持串�
 - 串口/TCP/UDP 均支持用户自定义空闲超时和结束符组帧，连接中可修改；UDP 按来源隔离，未启用时保留数据报边界。
 - 多种显示与发送编码、关键词/正则过滤、文本日志和 TSV 预览导出。
 - 手动/定时发送、快捷指令分组、勾选/选中指令跨组移动、拖动排序和 QQCom/JCom/BLE 文件导入导出。
-- 原生 JSON CLI AI 接入：可自动发现/启动 QQCom，查询能力，配置和开关端口、发送数据、读取状态与历史/界面文本，以及编辑快捷指令分组和指令；见 [接入说明](docs/CLI.md)。
+- 原生 JSON CLI AI 接入：可自动发现/启动 QQCom-plus，查询能力，配置和开关端口、发送数据、读取状态与历史/界面文本，以及编辑快捷指令分组和指令；见 [接入说明](docs/CLI.md)。
 - 文件收发面板：RAW 直接字节流收发，兼容 CRC 与经典校验和的 XMODEM 单文件收发，以及兼容常见 BLE 调试助手的 YMODEM 文件收发。
 - Windows x64 发布目录自动部署 Qt DLL 和插件，版本在 `version/version.h` 里改。
 
@@ -23,7 +23,7 @@ A/B 桥接把一端收到的字节原样写到另一端。后台日志轮转仍�
 
 ## 快速开始
 
-直接使用请从本仓库的 [GitHub Releases](https://github.com/hyb-oyqq/QQCom-plus/releases) 或原仓库的 [Gitee Release](https://gitee.com/qinjmin/qqcom/releases) 下载 Windows x64 ZIP，解压后运行 `QQCom.exe`，保留同目录的 DLL、插件和更新器。端口、显示过滤及 RAW/XMODEM/YMODEM 文件收发的操作见 [使用约定](docs/UI_DESIGN.md)。
+直接使用请从 [GitHub Releases](https://github.com/hyb-oyqq/QQCom-plus/releases) 下载 Windows x64 ZIP，解压后运行 `QQCom-plus.exe`，保留同目录的 DLL、插件和更新器。端口、显示过滤及 RAW/XMODEM/YMODEM 文件收发的操作见 [使用约定](docs/UI_DESIGN.md)。
 
 ### 开发环境
 
@@ -36,7 +36,7 @@ Qt Creator 直接打开 [QQCom.pro](QQCom.pro) 即可。命令行构建：
 
 ```powershell
 .\build.bat
-.\build\release\release\QQCom.exe
+.\build\release\release\QQCom-plus.exe
 ```
 
 脚本默认使用 `C:\MyProgram\Qt\6.10.1\msvc2022_64\bin` 和 Visual Studio 2022 Community。安装路径不同可以覆盖：
@@ -73,7 +73,7 @@ git diff --check
 
 ## 版本和发布
 
-版本号在 `version/version.h` 里手动修改，构建只刷新时间戳。版本记录维护在根目录 [更新记录](更新记录.md)，最终交付为 `build/releases/QQCom-<version>-win64.zip` 和同目录的 `固件更新记录.md`。完整打包、附件校验及稳定版发布流程见 [OTA 方案](docs/OTA.md)，约定见 [项目规则](AGENTS.md)。
+版本号在 `version/version.h` 里手动修改，构建只刷新时间戳。版本记录维护在根目录 [更新记录](更新记录.md)，最终交付为 `build/releases/QQCom-plus-<version>-win64.zip` 和同目录的 `固件更新记录.md`。完整打包、附件校验及稳定版发布流程见 [OTA 方案](docs/OTA.md)，约定见 [项目规则](AGENTS.md)。
 
 GitHub Actions 会在每次推送和 PR 时构建 Release、运行核心测试并上传 ZIP 构建产物；推送与 `version/version.h` 一致的 `v<version>` 标签后，自动创建同名 GitHub Release 并附上 ZIP。触发条件和补发方式见 [开发与验证](docs/DEVELOPMENT.md#github-actions-自动构建与发布)。
 
@@ -81,7 +81,7 @@ GitHub Actions 会在每次推送和 PR 时构建 Release、运行核心测试�
 
 在界面点击「CLI → 复制给 AI」，把复制的整段说明粘贴给能执行本机命令的 AI，再告诉它要做什么，例如“配置 A 端口，发送查询指令并分析回复”。AI 会自行读取可用功能并操作，无需用户手动运行命令。说明中已包含程序完整路径和当前窗口标识，多开窗口时也能准确连接。
 
-发布目录附带 `qqcom-cli.cmd` 和 [AI 操作速查](AI_ACCESS.md)。完整命令、实例恢复和结果判断见 [CLI 接入](docs/CLI.md)。
+发布目录附带 `qqcom-plus-cli.cmd` 和 [AI 操作速查](AI_ACCESS.md)。完整命令、实例恢复和结果判断见 [CLI 接入](docs/CLI.md)。
 
 ## 文档
 

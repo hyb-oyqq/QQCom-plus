@@ -29,28 +29,28 @@ const QMap<QString, QString> Tools{
     {"commands delete", "qqcom_delete_command"}};
 
 const char *Usage =
-    "QQCom native JSON CLI\n"
-    "  qqcom-cli.cmd describe                      List capabilities and schemas\n"
-    "  qqcom-cli.cmd instances                     List live QQCom windows\n"
-    "  qqcom-cli.cmd state                         Read the current window\n"
-    "  qqcom-cli.cmd ports --refresh               Refresh/list serial ports\n"
-    "  qqcom-cli.cmd configure A --type serial --param serial.port=COM3 --param serial.baud=115200\n"
-    "  qqcom-cli.cmd open A                        Submit endpoint open\n"
-    "  qqcom-cli.cmd send A --format hex --data \"AA 55\"\n"
-    "  qqcom-cli.cmd traffic --endpoint A --limit 50\n"
-    "  qqcom-cli.cmd ui-text --max-chars 8000\n"
-    "  qqcom-cli.cmd commands | close A | clear\n"
-    "  qqcom-cli.cmd commands get <group-uuid> [--offset 0 --limit 50]\n"
-    "  qqcom-cli.cmd commands create-group --name <name> [--notes <notes>]\n"
-    "  qqcom-cli.cmd commands update-group <group-uuid> [--name <name> --notes <notes>]\n"
-    "  qqcom-cli.cmd commands delete-group <group-uuid>\n"
-    "  qqcom-cli.cmd commands add <group-uuid> --content <payload> [command options]\n"
-    "  qqcom-cli.cmd commands update <group-uuid> <command-uuid> [command options]\n"
-    "  qqcom-cli.cmd commands delete <group-uuid> <command-uuid>\n"
+    "QQCom-plus native JSON CLI\n"
+    "  qqcom-plus-cli.cmd describe                      List capabilities and schemas\n"
+    "  qqcom-plus-cli.cmd instances                     List live QQCom-plus windows\n"
+    "  qqcom-plus-cli.cmd state                         Read the current window\n"
+    "  qqcom-plus-cli.cmd ports --refresh               Refresh/list serial ports\n"
+    "  qqcom-plus-cli.cmd configure A --type serial --param serial.port=COM3 --param serial.baud=115200\n"
+    "  qqcom-plus-cli.cmd open A                        Submit endpoint open\n"
+    "  qqcom-plus-cli.cmd send A --format hex --data \"AA 55\"\n"
+    "  qqcom-plus-cli.cmd traffic --endpoint A --limit 50\n"
+    "  qqcom-plus-cli.cmd ui-text --max-chars 8000\n"
+    "  qqcom-plus-cli.cmd commands | close A | clear\n"
+    "  qqcom-plus-cli.cmd commands get <group-uuid> [--offset 0 --limit 50]\n"
+    "  qqcom-plus-cli.cmd commands create-group --name <name> [--notes <notes>]\n"
+    "  qqcom-plus-cli.cmd commands update-group <group-uuid> [--name <name> --notes <notes>]\n"
+    "  qqcom-plus-cli.cmd commands delete-group <group-uuid>\n"
+    "  qqcom-plus-cli.cmd commands add <group-uuid> --content <payload> [command options]\n"
+    "  qqcom-plus-cli.cmd commands update <group-uuid> <command-uuid> [command options]\n"
+    "  qqcom-plus-cli.cmd commands delete <group-uuid> <command-uuid>\n"
     "Command options: --description, --format text|hex, --line-ending none|cr|lf|crlf,\n"
     "  --delay <0..10000 ms>, --enabled true|false, --packed true|false, --position <0-based>\n"
     "Updates patch only specified fields; edits never send. At least one group must remain.\n"
-    "  qqcom-cli.cmd call <tool-name> --input-file <arguments.json or ->\n"
+    "  qqcom-plus-cli.cmd call <tool-name> --input-file <arguments.json or ->\n"
     "Options: --instance <UUID or PID>, --no-start, --timeout <100..30000 ms>\n"
     "An absent GUI is started automatically. Multiple windows require --instance.\n"
     "Open/close/send report submission, not device acknowledgement.\n";
@@ -89,7 +89,7 @@ bool parse(const QStringList &arguments, Command &command, QString &error)
         {"position", "Zero-based position in resulting command list", "index"},
         {"offset", "Zero-based full-read offset", "index"}};
     parser.addOptions(options);
-    if (!parser.parse(QStringList{"qqcom-cli"} + arguments)) { error = parser.errorText(); return false; }
+    if (!parser.parse(QStringList{"qqcom-plus-cli"} + arguments)) { error = parser.errorText(); return false; }
     auto positional = parser.positionalArguments();
     command = {};
     command.name = parser.isSet("help") || positional.isEmpty() ? "help"
@@ -241,7 +241,7 @@ int run(const QStringList &arguments, const QString &version)
     QString error;
     if (!parse(arguments, command, error)) return output(CapabilityCatalog::failure("usage_error", error), 2);
     if (command.name == "help") { QTextStream(stdout) << Usage; return 0; }
-    if (command.name == "version") return output({{"application", "QQCom"}, {"version", version}}, 0);
+    if (command.name == "version") return output({{"application", "QQCom-plus"}, {"version", version}}, 0);
     if (command.name == "describe") {
         auto description = CapabilityCatalog::capabilities();
         QJsonObject commands;
@@ -262,7 +262,7 @@ int run(const QStringList &arguments, const QString &version)
         launcher.setStandardOutputFile(QProcess::nullDevice());
         launcher.setStandardErrorFile(QProcess::nullDevice());
         if (!launcher.startDetached())
-            return output(CapabilityCatalog::failure("start_failed", "Cannot start the QQCom window"), 3);
+            return output(CapabilityCatalog::failure("start_failed", "Cannot start the QQCom-plus window"), 3);
         QElapsedTimer clock;
         clock.start();
         while (instances.isEmpty() && clock.elapsed() < 10000) {
@@ -270,7 +270,7 @@ int run(const QStringList &arguments, const QString &version)
             instances = LocalControl::instances();
         }
     }
-    if (instances.isEmpty()) return output(CapabilityCatalog::failure("no_instance", "No live QQCom window found"), 3);
+    if (instances.isEmpty()) return output(CapabilityCatalog::failure("no_instance", "No live QQCom-plus window found"), 3);
     if (instances.size() != 1) {
         auto result = CapabilityCatalog::failure("multiple_instances", "Choose a window using --instance <UUID or PID>");
         result.insert("instances", instances);

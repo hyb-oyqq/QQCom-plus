@@ -1,16 +1,16 @@
-# QQCom 开发与验证
+# QQCom-plus 开发与验证
 
 ## 工具链与构建
 
 主要验证环境为 Windows x64、Qt 6.10.1 MSVC 2022、C++17 和 qmake。Qt 需安装 Widgets、Network、SerialPort、Concurrent、Core5Compat 和 Test。其他平台/MinGW 尚未完成发布验证。
 
-仓库根目录执行 `build.bat`，或用 Qt Creator 打开 `QQCom.pro`。脚本默认使用当前开发机路径，可通过环境变量 `QT_BIN` 和 `VCVARS64` 指定其他匹配的 Kit。构建结果在 `build/release/release/QQCom.exe`，生成物不会进入 Git。
+仓库根目录执行 `build.bat`，或用 Qt Creator 打开 `QQCom.pro`。脚本默认使用当前开发机路径，可通过环境变量 `QT_BIN` 和 `VCVARS64` 指定其他匹配的 Kit。构建结果在 `build/release/release/QQCom-plus.exe`，生成物不会进入 Git。
 
 统一使用 `build/` 下的独立构建目录，不在源码根目录执行 qmake。Qt Creator 的构建目录也应设在 `build/` 下；`.qtcreator/QQCom.pro.user` 是本机 Kit 和运行配置，不提交。根目录不需要 `debug/`、`release/` 或 `.qmake.stash`，它们是早期在源码目录配置工程留下的产物，可以删除。
 
 | 路径 | 内容与清理方式 |
 | --- | --- |
-| `build/release/` | 主程序 Makefile、中间文件及 `release/QQCom.exe`；可重新构建 |
+| `build/release/` | 主程序 Makefile、中间文件及 `release/QQCom-plus.exe`；可重新构建 |
 | `build/core-tests/`、`build/ui-tests/`、`build/update-tests/` | 当前测试构建；可重新构建 |
 | `build/release-runtime/<version>/` | 完整打包输入，仅保留仍需使用的版本 |
 | `build/releases/` | 最终 ZIP 与定稿更新记录；不放解压目录、日志或清单 |
@@ -56,7 +56,7 @@ Windows 串口控制线回归默认跳过。可在上述 cmd 环境中执行 `se
 
 修改共享运行时、消息或持久化时执行核心和 UI 全套；窄范围布局修改执行对应 UI 用例并检查实际文本绘制区域。测试数量随用例增长，以当前执行报告为准，历史计数只保留在归档记录。
 
-AI 接入测试包含核心 CLI 参数/JSON 输入校验，以及 UI 中的命名管道发现、多实例选择、自动启动、真实 TCP/UDP 收发和历史查询。CLI 的跨进程 UI 用例默认调用 `build/release/release/QQCom.exe`，需先构建主程序；也可用 `QQCOM_CLI_TEST_EXECUTABLE` 指定待测程序。缺少程序会明确跳过，不能当作集成验证通过。自动启动用例使用测试程序作为短时退出的独立窗口，避免触及生产配置。
+AI 接入测试包含核心 CLI 参数/JSON 输入校验，以及 UI 中的命名管道发现、多实例选择、自动启动、真实 TCP/UDP 收发和历史查询。CLI 的跨进程 UI 用例默认调用 `build/release/release/QQCom-plus.exe`，需先构建主程序；也可用 `QQCOM_CLI_TEST_EXECUTABLE` 指定待测程序。缺少程序会明确跳过，不能当作集成验证通过。自动启动用例使用测试程序作为短时退出的独立窗口，避免触及生产配置。
 
 人工发布检查仍包括：真实串口设备收发与拔插、非本机 TCP/UDP、防火墙、多个显示缩放比例、长网卡名、持续高负载/慢磁盘、关闭时尾帧和日志完整性。自动回环通过不代表以上场景全部验证。
 
@@ -70,7 +70,7 @@ RAW 回归覆盖未打开端点、部分写入、停止后迟到的旧接受结�
 
 ## 版本与发布
 
-版本号改 `version/version.h` 里 `VER MANAGER` 区块的 `QQCOM_VERSION_MAJOR`、`QQCOM_VERSION_MINOR`、`QQCOM_VERSION_PATCH`。qmake 在 Windows 配置时调用 `version/update_version.ps1`，只刷新同一区块的时间戳和 `QQCom v主.次.修订 Build:yyyyMMddHHmm` 标题，不改这三个数字。Qt Creator 的「构建」不会每次重跑 qmake，所以日常构建要把 `version/stamp_version.bat` 加到 Make 之前：项目设置、构建和运行、构建步骤、添加构建步骤、自定义过程步骤。命令填 `%{sourceDir}\version\stamp_version.bat`，工作目录填 `%{sourceDir}`，再用向上箭头把它移到 Make 上面。Make 会因 `version.h` 变新而重编引用它的源文件。
+版本号改 `version/version.h` 里 `VER MANAGER` 区块的 `QQCOM_VERSION_MAJOR`、`QQCOM_VERSION_MINOR`、`QQCOM_VERSION_PATCH`。qmake 在 Windows 配置时调用 `version/update_version.ps1`，只刷新同一区块的时间戳和 `QQCom-plus v主.次.修订 Build:yyyyMMddHHmm` 标题，不改这三个数字。Qt Creator 的「构建」不会每次重跑 qmake，所以日常构建要把 `version/stamp_version.bat` 加到 Make 之前：项目设置、构建和运行、构建步骤、添加构建步骤、自定义过程步骤。命令填 `%{sourceDir}\version\stamp_version.bat`，工作目录填 `%{sourceDir}`，再用向上箭头把它移到 Make 上面。Make 会因 `version.h` 变新而重编引用它的源文件。
 
 主工程链接后通过 `scripts/deploy_qt_windows.pri` 部署同一 Kit 的运行库。手动部署测试或交付目录：
 
@@ -87,9 +87,9 @@ powershell -NoProfile -File scripts/deploy_qt_windows.ps1 -Binary build/ui-tests
 
 | 触发 | 执行内容 |
 | --- | --- |
-| 推送任意分支、提交 PR | 构建 Release，运行核心测试，按 `build/release-runtime/<version>/` 整理运行文件（含 MSVC 运行库），用 `scripts/package_release.ps1` 打包并以 `validate_ota_manifest.ps1` 校验，ZIP 和 `固件更新记录.md` 作为构建产物保留 30 天 |
-| 推送 `v<version>` 标签 | 先确认标签等于 `version/version.h` 的版本、`更新记录.md` 含 `# QQCom-<version>-win64` 一节，再执行上述构建；通过后创建同名 GitHub Release，标题为 `QQCom-<version>-win64`，说明取该节内容并附 ZIP 大小和 SHA-256 |
-| 手动运行并填写已有标签 | 用当前工作流构建该标签的源码并补发 Release；同名 Release 已存在时更新说明并覆盖附件 |
+| 推送任意分支、提交 PR | 构建 Release，运行核心、升级和 UI 测试（UI 测试关闭自动检查更新，跨进程 CLI 用例使用本次构建的主程序；失败时上传测试结果），按 `build/release-runtime/<version>/` 整理运行文件（含 MSVC 运行库），用 `scripts/package_release.ps1` 打包并以 `validate_ota_manifest.ps1` 校验，ZIP 和 `固件更新记录.md` 作为构建产物保留 30 天 |
+| 推送 `v<version>` 标签 | 先确认标签等于 `version/version.h` 的版本、`更新记录.md` 含 `# QQCom-plus-<version>-win64` 一节，再执行上述构建；通过后创建同名 GitHub Release，标题为 `QQCom-plus-<version>-win64`，说明取该节内容并附 ZIP 大小和 SHA-256 |
+| 手动运行并填写已有标签 | 用当前工作流构建该标签的源码并补发 Release；产品名取自该标签 `QQCom.pro` 的 `TARGET`，改名前的标签仍按 `QQCom-<version>-win64` 发布。同名 Release 已存在时只补传缺少的附件并更新说明；已有同名附件时直接失败，不覆盖已发布附件 |
 
 发新版仍按上文顺序：改版本号和更新记录，提交后创建 `v<version>` 标签，推送到 GitHub 即触发发布。标签与版本头不一致或缺少更新记录时工作流直接失败，不生成 Release。GitHub Release 只提供下载；客户端自动升级仍读取 `ota/stable.json`，是否切换稳定版按 [OTA 发布流程](OTA.md#发布流程) 单独核验。
 

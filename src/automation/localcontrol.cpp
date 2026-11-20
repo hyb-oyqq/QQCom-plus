@@ -41,8 +41,8 @@ QJsonArray instances(const QString &directory, const QString &selector)
         const auto instance = QJsonDocument::fromJson(file.readAll()).object();
         const auto id = instance.value("instanceId").toString();
         const auto pipe = instance.value("pipe").toString();
-        if (instance.value("application") != "QQCom" || instance.value("apiVersion").toInt() != 1
-            || QUuid(id).isNull() || pipe != "qqcom-control-" + id) continue;
+        if (instance.value("application") != "QQCom-plus" || instance.value("apiVersion").toInt() != 1
+            || QUuid(id).isNull() || pipe != "qqcom-plus-control-" + id) continue;
         if (!selector.isEmpty() && selector != id
             && selector != QString::number(instance.value("pid").toInteger())) continue;
         QLocalSocket probe;
@@ -85,7 +85,7 @@ QJsonObject call(const QJsonObject &instance, const QString &tool, const QJsonOb
         }
         if (remaining() == 0 || !socket.waitForReadyRead(remaining())) {
             if (socket.bytesAvailable() > 0) continue;
-            return fail("No response from QQCom before timeout; an operation may already have been submitted. Do not blindly retry writes.");
+            return fail("No response from QQCom-plus before timeout; an operation may already have been submitted. Do not blindly retry writes.");
         }
     }
 }
@@ -103,9 +103,9 @@ void LocalControlServer::setHandler(Handler handler) { m_handler = std::move(han
 
 QJsonObject LocalControlServer::descriptor() const
 {
-    return {{"application", "QQCom"}, {"apiVersion", 1}, {"version", m_version},
+    return {{"application", "QQCom-plus"}, {"apiVersion", 1}, {"version", m_version},
         {"pid", QCoreApplication::applicationPid()}, {"instanceId", m_id},
-        {"pipe", "qqcom-control-" + m_id}, {"startedAt", m_startedAt},
+        {"pipe", "qqcom-plus-control-" + m_id}, {"startedAt", m_startedAt},
         {"executable", QCoreApplication::applicationFilePath()}};
 }
 
@@ -114,7 +114,7 @@ bool LocalControlServer::start(const QString &directory)
     if (isListening()) return true;
     // Restrict the Windows named pipe to the current user account.
     m_server.setSocketOptions(QLocalServer::UserAccessOption);
-    if (!m_server.listen("qqcom-control-" + m_id)) { m_error = m_server.errorString(); return false; }
+    if (!m_server.listen("qqcom-plus-control-" + m_id)) { m_error = m_server.errorString(); return false; }
     const QDir root(directory.isEmpty() ? LocalControl::directory() : directory);
     if (!QDir().mkpath(root.absolutePath())) {
         m_error = "Cannot create local control discovery directory"; m_server.close(); return false;

@@ -45,10 +45,10 @@ QToolButton *MainWindow::setupAutomation(QWidget *parent)
     auto *menu = new QMenu(button);
     const auto copyForAi = [this] {
         if (!m_controlServer->isListening()) {
-            StyleDialogs::warning(this, tr("CLI"), tr("当前窗口的 CLI 未启动，请重启 QQCom 后重试。"));
+            StyleDialogs::warning(this, tr("CLI"), tr("当前窗口的 CLI 未启动，请重启 QQCom-plus 后重试。"));
             return;
         }
-        const auto launcher = QCoreApplication::applicationDirPath() + "/qqcom-cli.cmd";
+        const auto launcher = QCoreApplication::applicationDirPath() + "/qqcom-plus-cli.cmd";
         const bool hasLauncher = QFile::exists(launcher);
         const auto path = QDir::toNativeSeparators(hasLauncher ? launcher : QCoreApplication::applicationFilePath());
         // PowerShell single-quoted literal; a path containing apostrophes remains literal.
@@ -58,10 +58,10 @@ QToolButton *MainWindow::setupAutomation(QWidget *parent)
         const auto instance = m_controlServer->descriptor().value("instanceId").toString();
         // The pipeline also waits for the GUI-subsystem executable when no launcher is present.
         QApplication::clipboard()->setText(tr(
-            "请通过本机 CLI 操作 QQCom，根据我接下来的要求完成任务。\n\n"
+            "请通过本机 CLI 操作 QQCom-plus，根据我接下来的要求完成任务。\n\n"
             "先在 PowerShell 中运行以下命令，读取可用功能和参数说明（JSON）：\n"
             "%1 describe | Out-String\n\n"
-            "再读取我当前 QQCom 窗口的状态：\n"
+            "再读取我当前 QQCom-plus 窗口的状态：\n"
             "%1 state --instance '%2' --no-start | Out-String\n\n"
             "先记住 state 返回的程序路径、A/B 端点类型和设备参数。"
             "后续操作均使用上述入口，并带上 --instance '%2'，只操作已确认的目标窗口；重新确认窗口后使用新的 instance ID。"
@@ -72,7 +72,7 @@ QToolButton *MainWindow::setupAutomation(QWidget *parent)
             "%1 instances | Out-String\n"
             "对候选窗口使用 state --instance '<候选 ID>' --no-start 只读查询，结合程序路径、端点类型和设备参数核对目标。"
             "能够唯一确认目标时，自动改用新的 instance ID 继续；不能仅因只有一个在线窗口就认定它是原目标。"
-            "没有在线窗口时，先检查程序进程及 describe 返回的发现目录，仍找不到时请我打开目标 QQCom。"
+            "没有在线窗口时，先检查程序进程及 describe 返回的发现目录，仍找不到时请我打开目标 QQCom-plus。"
             "只有无法唯一确认目标窗口时，才请我选择窗口，必要时从目标窗口重新复制说明。"
             "确认目标前仅执行发现和只读查询。\n"
         ).arg(entry, instance));
@@ -114,7 +114,7 @@ QJsonObject MainWindow::automationState() const
         endpoints.append(endpoint);
     }
     const auto link = m_bridge->link();
-    return {{"application", "QQCom"}, {"version", QQCOM_VERSION_STR}, {"title", windowTitle()},
+    return {{"application", "QQCom-plus"}, {"version", QQCOM_VERSION_STR}, {"title", windowTitle()},
         {"endpoints", endpoints},
         {"localControl", m_controlServer->descriptor()},
         {"counters", QJsonObject{{"rxBytes", QString::number(m_rxBytes)}, {"txBytes", QString::number(m_txBytes)},

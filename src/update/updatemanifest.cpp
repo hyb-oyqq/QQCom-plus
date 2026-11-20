@@ -145,8 +145,8 @@ ManifestStatus evaluateUpdateManifest(const QByteArray &json, const QString &cur
         reject(reason, QStringLiteral("不支持的清单协议版本。"), &status);
         return status;
     }
-    if (root.value(QStringLiteral("product")).toString() != QStringLiteral("QQCom")) {
-        reject(reason, QStringLiteral("清单产品不是 QQCom。"), &status);
+    if (root.value(QStringLiteral("product")).toString() != QStringLiteral("QQCom-plus")) {
+        reject(reason, QStringLiteral("清单产品不是 QQCom-plus。"), &status);
         return status;
     }
     const QString channel = root.value(QStringLiteral("channel")).toString();

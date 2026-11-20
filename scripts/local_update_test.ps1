@@ -1,5 +1,5 @@
-﻿# Run the real QQCom OTA flow against a loopback fixture.
-# Does not contact Gitee and does not touch the real user profile.
+﻿# Run the real QQCom-plus OTA flow against a loopback fixture.
+# Does not contact GitHub and does not touch the real user profile.
 param(
     [Parameter(Mandatory = $true)]
     [string] $BinaryDir,
@@ -13,9 +13,9 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $packageScript = Join-Path $PSScriptRoot 'package_release.ps1'
 $binaryRoot = (Resolve-Path -LiteralPath $BinaryDir).Path
-$sourceExe = Join-Path $binaryRoot 'QQCom.exe'
+$sourceExe = Join-Path $binaryRoot 'QQCom-plus.exe'
 if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
-    throw "QQCom.exe was not found: $sourceExe"
+    throw "QQCom-plus.exe was not found: $sourceExe"
 }
 
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ('qqcom-local-update-' + [Guid]::NewGuid().ToString('N'))
@@ -42,10 +42,10 @@ try {
     Copy-Item -Path (Join-Path $binaryRoot '*') -Destination $install -Recurse -Force
     $oldMarker = Join-Path $install 'ota-old.txt'
     Set-Content -LiteralPath $oldMarker -Value 'OLD' -Encoding ascii -NoNewline
-    $oldHash = (Get-FileHash -LiteralPath (Join-Path $install 'QQCom.exe') -Algorithm SHA256).Hash
+    $oldHash = (Get-FileHash -LiteralPath (Join-Path $install 'QQCom-plus.exe') -Algorithm SHA256).Hash
 
-    & $packageScript -BinaryDir $binaryRoot -Version $TargetVersion -BaseUrl "https://gitee.com/qinjmin/qqcom/releases/download/v$TargetVersion" -OutputDir $packageDir
-    $package = Join-Path $packageDir "QQCom-$TargetVersion-win64.zip"
+    & $packageScript -BinaryDir $binaryRoot -Version $TargetVersion -BaseUrl "https://github.com/hyb-oyqq/QQCom-plus/releases/download/v$TargetVersion" -OutputDir $packageDir
+    $package = Join-Path $packageDir "QQCom-plus-$TargetVersion-win64.zip"
     if (-not (Test-Path -LiteralPath $package)) { throw "Package was not created: $package" }
 
     $server = Start-Process -FilePath 'python' -ArgumentList @(('"' + $serverScript + '"'), ('"' + $package + '"'), $TargetVersion) -WorkingDirectory $work -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $work 'server.out') -RedirectStandardError (Join-Path $work 'server.err')
@@ -68,7 +68,7 @@ try {
     $env:QQCOM_UPDATE_LOG = $logPath
     $env:QQCOM_UPDATE_USER_DATA = $userData
     $env:QQCOM_DISABLE_UPDATE = $null
-    $app = Start-Process -FilePath (Join-Path $install 'QQCom.exe') -ArgumentList @(
+    $app = Start-Process -FilePath (Join-Path $install 'QQCom-plus.exe') -ArgumentList @(
         '--local-update-source', $origin,
         '--local-update-current-version', $CurrentVersion,
         '--accept-update') -WorkingDirectory $install -PassThru -WindowStyle Hidden
@@ -92,28 +92,28 @@ try {
         throw "Update did not finish. log=$log server=$serverErr"
     }
 
-    $newHash = (Get-FileHash -LiteralPath (Join-Path $install 'QQCom.exe') -Algorithm SHA256).Hash
+    $newHash = (Get-FileHash -LiteralPath (Join-Path $install 'QQCom-plus.exe') -Algorithm SHA256).Hash
     $expected = (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash
-    if ($newHash -ne $expected) { throw "Installed QQCom.exe hash changed unexpectedly: $newHash" }
+    if ($newHash -ne $expected) { throw "Installed QQCom-plus.exe hash changed unexpectedly: $newHash" }
     if ($newHash -ne $oldHash) { throw "Same-build replacement should keep the executable bytes." }
     if ((Get-Content -LiteralPath $oldMarker -Raw) -ne 'OLD') { throw 'A file outside the package was removed.' }
     if ((Get-Content -LiteralPath (Join-Path $userData 'preferences.ini') -Raw) -ne 'ota-test=kept') {
         throw 'User preferences were modified.'
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $install 'qqcom-updater.ps1'))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $install 'qqcom-plus-updater.ps1'))) {
         throw 'Updater script was not installed.'
     }
 
     $restarted = $false
     $deadline = (Get-Date).AddSeconds(20)
     while ((Get-Date) -lt $deadline) {
-        $running = Get-CimInstance Win32_Process -Filter "Name = 'QQCom.exe'" | Where-Object {
-            $_.ExecutablePath -and ($_.ExecutablePath -ieq (Join-Path $install 'QQCom.exe')) -and $_.ProcessId -ne $app.Id
+        $running = Get-CimInstance Win32_Process -Filter "Name = 'QQCom-plus.exe'" | Where-Object {
+            $_.ExecutablePath -and ($_.ExecutablePath -ieq (Join-Path $install 'QQCom-plus.exe')) -and $_.ProcessId -ne $app.Id
         }
         if ($running) { $restarted = $true; break }
         Start-Sleep -Milliseconds 200
     }
-    if (-not $restarted) { throw 'Updated QQCom.exe did not restart.' }
+    if (-not $restarted) { throw 'Updated QQCom-plus.exe did not restart.' }
 
     $report = [ordered]@{
         success = $true
@@ -129,7 +129,7 @@ try {
     Write-Host 'OTA_SUCCESS'
     Write-Host ($report | ConvertTo-Json -Compress)
 } finally {
-    Get-CimInstance Win32_Process -Filter "Name = 'QQCom.exe'" -ErrorAction SilentlyContinue | Where-Object {
+    Get-CimInstance Win32_Process -Filter "Name = 'QQCom-plus.exe'" -ErrorAction SilentlyContinue | Where-Object {
         $_.ExecutablePath -and $_.ExecutablePath.StartsWith($install, [System.StringComparison]::OrdinalIgnoreCase)
     } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Stop-Tree $app

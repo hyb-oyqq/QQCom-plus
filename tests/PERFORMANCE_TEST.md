@@ -1,4 +1,4 @@
-# QQCom 性能验证
+# QQCom-plus 性能验证
 
 性能结论必须附工具链、载荷、速率、历史规模和测量口径。先通过功能回归，再单独运行探针；避免与构建/其他压测同时执行。硬件和长时间测试不能由一次微基准替代。
 
@@ -41,7 +41,7 @@ cd ..\..
 以测试配置运行程序，不要用含定时发送、自动记录等设置的日常工作配置做吞吐比较。探针只在显式传参时启用，每轮使用新的输出文件：
 
 ```powershell
-.\build\release\release\QQCom.exe --auto-open tcp-server:9000 --latency-probe build/probe.txt
+.\build\release\release\QQCom-plus.exe --auto-open tcp-server:9000 --latency-probe build/probe.txt
 python tests/stress/traffic_stress.py --proto tcp --host 127.0.0.1 --port 9000 --rate 500 --size 256 --duration 30
 python tests/stress/analyze_probe.py build/probe.txt
 python tests/stress/soak_trend.py build/probe.txt --bucket 30

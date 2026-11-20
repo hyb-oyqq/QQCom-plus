@@ -1,4 +1,4 @@
-# QQCom 项目规则
+# QQCom-plus 项目规则
 
 ## 工程与文档
 
@@ -17,21 +17,20 @@
 
 以下规则来自用户于 2026-11-06 手工整理的 `build/releases`，后续发布沿用。
 
-- 最终交付文件直接平铺在仓库根目录下的 `build/releases/`：`QQCom-<version>-win64.zip` 和 `固件更新记录.md`，例如 `QQCom-1.2.0-win64.zip`。不再套版本号子目录。
+- 最终交付文件直接平铺在仓库根目录下的 `build/releases/`：`QQCom-plus-<version>-win64.zip` 和 `固件更新记录.md`，例如 `QQCom-plus-1.2.4-win64.zip`。改名 QQCom-plus 之前的版本沿用 `QQCom-<version>-win64.zip`。不再套版本号子目录。
 - `build/releases/` 只放最终交付文件。解压后的程序目录、打包暂存目录、`manifest.json`、测试日志、截图和编译中间产物放在其他 `build/` 子目录。打包脚本可先输出到 `build/ota/`，验证后只把 ZIP 和更新记录复制到 `build/releases/`。
-- 更新记录最新一节的一级标题与 ZIP 文件名去掉 `.zip` 后一致：`# QQCom-<version>-win64`，例如 `# QQCom-1.2.0-win64`。不再使用 `# V<version>（日期）` 形式。
+- 更新记录最新一节的一级标题与 ZIP 文件名去掉 `.zip` 后一致：`# QQCom-plus-<version>-win64`，例如 `# QQCom-plus-1.2.4-win64`。不再使用 `# V<version>（日期）` 形式。
 - 最新版本记录放在文首，保留完整历史。条目沿用 `1.内容`、`2.内容` 的格式，条目之间空一行；既有历史标题保持原样。
 - 仓库根目录的 `更新记录.md` 是打包来源。用户在交付目录修订的更新记录优先，先把修订同步到源文件，再进行后续打包，避免旧内容覆盖用户定稿。
-- 下次生成 ZIP 时，包内根目录的 `固件更新记录.md` 与交付目录外置记录使用同一份定稿。ZIP 根目录直接包含 `QQCom.exe`、Qt/MSVC 运行库、插件目录、更新器和 CLI 入口及说明，不套一层程序目录，不包含 obj/moc 等构建文件。
+- 下次生成 ZIP 时，包内根目录的 `固件更新记录.md` 与交付目录外置记录使用同一份定稿。ZIP 根目录直接包含 `QQCom-plus.exe`、Qt/MSVC 运行库、插件目录、更新器和 CLI 入口及说明，不套一层程序目录，不包含 obj/moc 等构建文件。
 - ZIP 校验通过后记录大小和 SHA-256。线上发布按 `docs/OTA.md` 执行，附件上传并验证后再更新稳定清单。
 
 ## 推送与线上发布
 
-- 本项目远端为 `origin`（`https://gitee.com/qinjmin/qqcom.git`），发布分支为 `master`。推送前检查工作区、拉取远端引用并核对分支差异，保留用户已有修改；不强制推送。
-- GitHub 仓库 QQCom-plus 的远端为 `github`（`https://github.com/hyb-oyqq/QQCom-plus.git`），保留完整历史和标签。推送 `v<version>` 标签后由 GitHub Actions 自动构建并创建同名 Release，工作流约定见 `docs/DEVELOPMENT.md`。
+- 本项目远端为 `origin`（`https://github.com/hyb-oyqq/QQCom-plus.git`），发布分支为 `master`。推送前检查工作区、拉取远端引用并核对分支差异，保留用户已有修改；不强制推送。项目已与 Gitee 原仓库脱离，不再向 Gitee 推送、发布或读取清单。
 - 源码、规则、文档、根目录更新记录及 `ota/stable.json` 入 Git；`build/` 下的 ZIP、运行目录、校验记录和日志不入 Git。
-- 新版先完成版本号、更新记录、构建和测试，提交对应源码，创建并推送 `v<version>` 标签。标签固定发布源码；已经存在的发布标签不移动、不重建。后续规则、文档及稳定清单修订提交到 `master`。
-- 用户已上传 Gitee 固件时，直接读取现有 Release 的版本、名称、标签、说明和附件链接，并下载附件校验，不重复上传或要求上传令牌。
-- 线上附件必须与用户定稿的本地 ZIP 核对大小和 SHA-256，并检查 ZIP 完整性及程序和运行库。若不一致，先查明是否是用户替换过的定稿，不用旧包或旧清单覆盖。
+- 新版先完成版本号、更新记录、构建和测试，提交对应源码，创建并推送 `v<version>` 标签。推送标签后 GitHub Actions 自动构建并创建同名 Release（标题与附件为 `QQCom-plus-<version>-win64`），工作流约定见 `docs/DEVELOPMENT.md`。标签固定发布源码；已经存在的发布标签不移动、不重建。后续规则、文档及稳定清单修订提交到 `master`。
+- Release 由工作流生成，不手工重复上传。需要为已有标签补发时手动运行工作流并填写标签；同名 Release 已存在时工作流只补传缺少的附件；已发布的附件不覆盖，避免稳定清单里的 SHA-256 失效。
+- 以 GitHub Release 的实际附件为准：下载附件核对大小、SHA-256 与 Release 说明一致，并检查 ZIP 完整性及程序和运行库。若附件被用户替换过，先查明定稿，不用旧包或旧清单覆盖。
 - `ota/stable.json` 使用实际已发布附件的 HTTPS 下载地址、字节数、SHA-256、版本、Release 日期和说明页地址；不得仅凭本地已打包就切换稳定版。更新验证完成后提交并推送清单，让客户端发现新版本。
-- 推送完成后核对远端分支提交、标签和客户端使用的 Gitee Contents API 清单，确认版本、链接、大小和哈希均正确。交付时说明源码推送与稳定版发布的实际结果。
+- 推送完成后核对远端分支提交、标签和客户端使用的 GitHub Contents API 清单（`https://api.github.com/repos/hyb-oyqq/QQCom-plus/contents/ota/stable.json?ref=master`），确认产品名、版本、链接、大小和哈希均正确。交付时说明源码推送与稳定版发布的实际结果。

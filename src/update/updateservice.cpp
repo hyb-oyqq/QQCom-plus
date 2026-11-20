@@ -29,8 +29,8 @@
 
 namespace {
 
-// 清单检查必须很快结束。下载连续 10 秒没有新字节就视为断流：Gitee 不接受 Range，
-// 只能丢掉已下内容并从头再试。次数用尽才向用户报失败。
+// 清单检查必须很快结束。下载连续 10 秒没有新字节就视为断流：不依赖下载主机支持 Range，
+// 直接丢掉已下内容并从头再试。次数用尽才向用户报失败。
 constexpr int ManifestTimeoutMs = 10 * 1000;
 constexpr int DownloadStallMs = 10 * 1000;
 constexpr int DownloadMaxAttempts = 4;
@@ -55,7 +55,7 @@ QString updateLogPath()
     const QString overridePath = qEnvironmentVariable("QQCOM_UPDATE_LOG");
     if (!overridePath.isEmpty()) return overridePath;
     return QStandardPaths::writableLocation(QStandardPaths::TempLocation)
-           + QStringLiteral("/QQCom-update/update.log");
+           + QStringLiteral("/QQCom-plus-update/update.log");
 }
 
 QMutex &updateLogMutex()
@@ -68,7 +68,7 @@ QMutex &updateLogMutex()
 void logUpdateProblem(const QString &detail)
 {
     if (detail.isEmpty()) return;
-    qWarning().noquote() << "QQCom update:" << detail;
+    qWarning().noquote() << "QQCom-plus update:" << detail;
     const QString path = updateLogPath();
     QDir().mkpath(QFileInfo(path).absolutePath());
     const QString line = QDateTime::currentDateTime().toString(Qt::ISODateWithMs)
@@ -140,7 +140,7 @@ public:
 // 不调用 exec()：事件循环继续跑，超时定时器才能把卡住的传输掐掉。
 void showNotice(QMessageBox::Icon icon, const QString &message)
 {
-    auto *box = new QMessageBox(icon, QObject::tr("QQCom 更新"), message, QMessageBox::Ok);
+    auto *box = new QMessageBox(icon, QObject::tr("QQCom-plus 更新"), message, QMessageBox::Ok);
     box->setAttribute(Qt::WA_DeleteOnClose);
     box->setWindowModality(Qt::NonModal);
     box->show();
@@ -177,7 +177,7 @@ void UpdateService::checkForUpdates(const QUrl &manifestUrl, CheckMode mode)
                          .arg(safeUrl(manifestUrl), m_currentVersion));
     emit advisory(tr("正在检查更新"), ManifestTimeoutMs + StatusNoteMs);
     QNetworkRequest request = httpsRequest(manifestUrl,
-                                           QStringLiteral("QQCom/%1").arg(m_currentVersion),
+                                           QStringLiteral("QQCom-plus/%1").arg(m_currentVersion),
                                            ManifestTimeoutMs);
     // contents 接口按 Accept 决定返回 JSON 还是网页。不声明的话解出来的不是清单。
     request.setRawHeader("Accept", "application/json");
@@ -254,12 +254,12 @@ void UpdateService::setAcceptUpdatesWithoutPrompt(bool accept)
 void UpdateService::startDownload(const UpdateOffer &offer)
 {
     const QString root = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
-                         + QStringLiteral("/QQCom-update/") + offer.version;
+                         + QStringLiteral("/QQCom-plus-update/") + offer.version;
     if (!QDir().mkpath(root)) {
         fail(tr("无法保存更新文件。"));
         return;
     }
-    m_downloadPath = root + QStringLiteral("/QQCom-%1-win64.zip").arg(offer.version);
+    m_downloadPath = root + QStringLiteral("/QQCom-plus-%1-win64.zip").arg(offer.version);
     m_expectedSize = offer.size;
     m_expectedSha256 = offer.sha256;
     m_offer = offer;
@@ -274,7 +274,7 @@ void UpdateService::startDownload(const UpdateOffer &offer)
     QWidget *host = qobject_cast<QWidget *>(parent());
     m_progress = new QProgressDialog(tr("正在下载更新"), tr("取消"), 0, 100,
                                      host ? host : QApplication::activeWindow());
-    m_progress->setWindowTitle(tr("QQCom 更新"));
+    m_progress->setWindowTitle(tr("QQCom-plus 更新"));
     // 只挡住主窗口，不挡住整个进程。不 exec()，事件循环仍能处理超时和取消。
     m_progress->setWindowModality(Qt::WindowModal);
     m_progress->setAutoClose(false);
@@ -323,7 +323,7 @@ void UpdateService::beginDownloadAttempt()
     // 先接上信号再显示。模态进度框一旦 setValue() 就会 processEvents()，
     // 不能在下载回调里走那条路径。
     m_reply = m_network->get(httpsRequest(m_offer.packageUrl,
-                                          QStringLiteral("QQCom/%1").arg(m_currentVersion),
+                                          QStringLiteral("QQCom-plus/%1").arg(m_currentVersion),
                                           DownloadStallMs));
     armStallTimer(DownloadStallMs);
     connect(m_reply, &QNetworkReply::readyRead, this, [this] {
@@ -590,8 +590,8 @@ void UpdateService::fail(const QString &message, bool quietOnAutomatic)
 QString UpdateService::updaterScriptPath() const
 {
     const QStringList candidates = {
-        QCoreApplication::applicationDirPath() + QStringLiteral("/qqcom-updater.ps1"),
-        QCoreApplication::applicationDirPath() + QStringLiteral("/scripts/qqcom-updater.ps1")};
+        QCoreApplication::applicationDirPath() + QStringLiteral("/qqcom-plus-updater.ps1"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/scripts/qqcom-plus-updater.ps1")};
     for (const QString &path : candidates) {
         if (QFileInfo::exists(path)) return QDir::toNativeSeparators(path);
     }

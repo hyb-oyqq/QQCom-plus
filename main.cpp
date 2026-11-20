@@ -86,21 +86,21 @@ int main(int argc, char *argv[])
     // initialization is needed to discover capabilities or call a running window.
     if (argc > 1 && QByteArray(argv[1]) == "--cli") {
         QCoreApplication cli(argc, argv);
-        cli.setApplicationName("QQCom");
-        cli.setOrganizationName("QQCom");
+        cli.setApplicationName("QQCom-plus");
+        cli.setOrganizationName("QQCom-plus");
         cli.setApplicationVersion(QStringLiteral(QQCOM_VERSION_STR));
         return Cli::run(cli.arguments().mid(2), QStringLiteral(QQCOM_VERSION_STR));
     }
     QApplication a(argc, argv);
-    a.setApplicationName("QQCom");
-    a.setOrganizationName("QQCom");
+    a.setApplicationName("QQCom-plus");
+    a.setOrganizationName("QQCom-plus");
     a.setApplicationVersion(QStringLiteral(QQCOM_VERSION_STR));
     a.setStyle("Fusion");
     // 样式表写死了颜色，必须按明暗换整份。用户选过亮色或暗色时先钉住，再加载对应样式表，
     // 避免先按系统画一遍再跳过去。没选过则跟随系统。
     {
         QSettings appearance(QSettings::IniFormat, QSettings::UserScope,
-            QStringLiteral("QQCom"), QStringLiteral("QQCom"));
+            QStringLiteral("QQCom-plus"), QStringLiteral("QQCom-plus"));
         const QString saved = appearance.value(QStringLiteral("window/colorScheme")).toString();
         if (saved == QLatin1String("light") || saved == QLatin1String("dark"))
             AppTheme::setMode(AppTheme::modeFromKey(saved));
@@ -111,7 +111,7 @@ int main(int argc, char *argv[])
     a.setWindowIcon(QIcon(":/icons/app.ico"));
 
     QCommandLineParser parser;
-    parser.setApplicationDescription("QQCom communication workbench");
+    parser.setApplicationDescription("QQCom-plus communication workbench");
     parser.addHelpOption();
     parser.addOption({"cli", "Native JSON command interface (must be the first option); use --cli --help."});
     parser.addOption({"sample", "Show clearly labelled example traffic."});
@@ -134,7 +134,7 @@ int main(int argc, char *argv[])
         "Download an available update without asking (test-only)."});
     parser.process(a);
     if (parser.isSet("cli")) {
-        QTextStream(stderr) << "--cli must be the first option; use QQCom.exe --cli --help\n";
+        QTextStream(stderr) << "--cli must be the first option; use QQCom-plus.exe --cli --help\n";
         return 2;
     }
     MainWindow w;
@@ -168,7 +168,7 @@ int main(int argc, char *argv[])
                                            : simulatedVersion;
         auto *updates = new UpdateService(currentVersion, &w);
         QUrl manifestUrl(QStringLiteral(
-            "https://gitee.com/api/v5/repos/qinjmin/qqcom/contents/ota/stable.json?ref=master"));
+            "https://api.github.com/repos/hyb-oyqq/QQCom-plus/contents/ota/stable.json?ref=master"));
         const QString localSource = parser.value("local-update-source");
         if (!localSource.isEmpty()) {
             const QUrl origin(localSource);

@@ -267,7 +267,7 @@ private:
     QFile *m_logFile = nullptr;   // 打开期间持续写入；关闭开关、重开或析构时收口
     QTextStream *m_logStream = nullptr; // 与 m_logFile 同寿命，避免每批重建编码器
     // 用户选定的**模板**路径（不含时间戳）。空表示还没手动指定，用程序目录下的
-    // log/QQCom-log.txt。它只用来定"目录 + 基名 + 扩展名"，实际文件名每次带时间戳另起。
+    // log/QQCom-plus-log.txt。它只用来定"目录 + 基名 + 扩展名"，实际文件名每次带时间戳另起。
     // 存模板而不是实际路径，是为了避免重启后时间戳层层叠加。
     QString m_logPath;
     // 本次实际写入的完整路径（带时间戳），仅供 tooltip 显示"正在写哪个文件"。

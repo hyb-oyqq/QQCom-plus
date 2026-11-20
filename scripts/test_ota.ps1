@@ -5,7 +5,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $notesName = -join ([char]0x56FA, [char]0x4EF6, [char]0x66F4, [char]0x65B0, [char]0x8BB0, [char]0x5F55) + '.md'
 $packageScript = Join-Path $PSScriptRoot 'package_release.ps1'
 $validateScript = Join-Path $PSScriptRoot 'validate_ota_manifest.ps1'
-$updaterScript = Join-Path $PSScriptRoot 'qqcom-updater.ps1'
+$updaterScript = Join-Path $PSScriptRoot 'qqcom-plus-updater.ps1'
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ('qqcom-ota-test-' + [Guid]::NewGuid().ToString('N'))
 $failures = New-Object System.Collections.Generic.List[string]
 
@@ -44,18 +44,18 @@ try {
     } catch {
         $missingExeFailed = $true
     }
-    Assert-True $missingExeFailed '打包目录没有 QQCom.exe 时失败'
+    Assert-True $missingExeFailed '打包目录没有 QQCom-plus.exe 时失败'
 
     $binaryDir = Join-Path $work 'binary'
     New-Item -ItemType Directory -Force -Path (Join-Path $binaryDir 'plugins\platforms') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $binaryDir 'plugins\imageformats') | Out-Null
-    Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\whoami.exe') -Destination (Join-Path $binaryDir 'QQCom.exe') -Force
+    Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\whoami.exe') -Destination (Join-Path $binaryDir 'QQCom-plus.exe') -Force
     Set-Content -LiteralPath (Join-Path $binaryDir 'plugins\platforms\old.txt') -Value 'NEW' -Encoding ascii -NoNewline
     Set-Content -LiteralPath (Join-Path $binaryDir 'plugins\imageformats\extra.txt') -Value 'EXTRA' -Encoding ascii -NoNewline
 
     $outputDir = Join-Path $work 'ota'
-    & $packageScript -BinaryDir $binaryDir -Version 0.2.0 -BaseUrl 'https://gitee.com/qinjmin/qqcom/releases/download/v0.2.0' -OutputDir $outputDir
-    $package = Join-Path $outputDir 'QQCom-0.2.0-win64.zip'
+    & $packageScript -BinaryDir $binaryDir -Version 0.2.0 -BaseUrl 'https://github.com/hyb-oyqq/QQCom-plus/releases/download/v0.2.0' -OutputDir $outputDir
+    $package = Join-Path $outputDir 'QQCom-plus-0.2.0-win64.zip'
     $manifest = Join-Path $outputDir 'manifest.json'
     Assert-True (Test-Path -LiteralPath $package) '生成 Release zip'
     Assert-True (Test-Path -LiteralPath $manifest) '生成 manifest.json'
@@ -74,8 +74,8 @@ try {
     } finally {
         $zip.Dispose()
     }
-    Assert-True ($entries -contains 'QQCom.exe') '压缩包根目录有 QQCom.exe'
-    Assert-True ($entries -contains 'qqcom-updater.ps1') '压缩包带有更新器'
+    Assert-True ($entries -contains 'QQCom-plus.exe') '压缩包根目录有 QQCom-plus.exe'
+    Assert-True ($entries -contains 'qqcom-plus-updater.ps1') '压缩包带有更新器'
     Assert-True ($entries -contains $notesName) '压缩包根目录有版本说明'
     Assert-True (($entries -contains 'plugins/platforms/old.txt') -or ($entries -contains 'plugins\platforms\old.txt')) '压缩包保留 plugins 目录'
     $recordName = -join ([char]0x66F4, [char]0x65B0, [char]0x8BB0, [char]0x5F55) + '.md'
@@ -109,7 +109,7 @@ try {
     $userData = Join-Path $work 'user-data'
     New-Item -ItemType Directory -Force -Path (Join-Path $install 'plugins\platforms') | Out-Null
     New-Item -ItemType Directory -Force -Path $userData | Out-Null
-    Set-Content -LiteralPath (Join-Path $install 'QQCom.exe') -Value 'OLD-EXE' -Encoding ascii -NoNewline
+    Set-Content -LiteralPath (Join-Path $install 'QQCom-plus.exe') -Value 'OLD-EXE' -Encoding ascii -NoNewline
     Set-Content -LiteralPath (Join-Path $install 'plugins\platforms\old.txt') -Value 'OLD' -Encoding ascii -NoNewline
     Set-Content -LiteralPath (Join-Path $install 'plugins\platforms\keep.txt') -Value 'KEEP' -Encoding ascii -NoNewline
     Set-Content -LiteralPath (Join-Path $install 'notes.txt') -Value 'LOCAL' -Encoding ascii -NoNewline
@@ -121,19 +121,19 @@ try {
         '-ProcessId', "$PID",
         '-Package', $package,
         '-InstallDir', $userData,
-        '-Restart', (Join-Path $userData 'QQCom.exe'),
+        '-Restart', (Join-Path $userData 'QQCom-plus.exe'),
         '-LogPath', $overlapLog,
         '-WaitSeconds', '2',
         '-UserDataDir', $userData)
     Assert-True ($overlapCode -eq 1) '安装目录与用户数据重叠时拒绝更新'
     Assert-True ((Read-Log $overlapLog) -match 'overlaps user data') '重叠失败写入 update.log'
     Assert-True ((Get-Content -LiteralPath (Join-Path $userData 'preferences.ini') -Raw) -eq 'preferences=1') '拒绝更新时不改用户配置'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $userData 'QQCom.exe'))) '拒绝更新时不写入用户数据目录'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $userData 'QQCom-plus.exe'))) '拒绝更新时不写入用户数据目录'
 
     $slipZip = Join-Path $work 'slip.zip'
     $archive = [System.IO.Compression.ZipFile]::Open($slipZip, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
-        $exeEntry = $archive.CreateEntry('QQCom.exe')
+        $exeEntry = $archive.CreateEntry('QQCom-plus.exe')
         $exeWriter = New-Object System.IO.StreamWriter($exeEntry.Open())
         $exeWriter.Write('not-run')
         $exeWriter.Dispose()
@@ -149,13 +149,13 @@ try {
         '-ProcessId', "$(New-ExitedProcessId)",
         '-Package', $slipZip,
         '-InstallDir', $install,
-        '-Restart', (Join-Path $install 'QQCom.exe'),
+        '-Restart', (Join-Path $install 'QQCom-plus.exe'),
         '-LogPath', $slipLog,
         '-WaitSeconds', '2',
         '-UserDataDir', $userData)
     Assert-True ($slipCode -eq 1) '压缩包路径穿越时更新失败'
     Assert-True ((Read-Log $slipLog) -match 'Unsafe zip entry') '路径穿越原因写入日志'
-    Assert-True ((Get-Content -LiteralPath (Join-Path $install 'QQCom.exe') -Raw) -eq 'OLD-EXE') '路径穿越时不覆盖安装目录'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $install 'QQCom-plus.exe') -Raw) -eq 'OLD-EXE') '路径穿越时不覆盖安装目录'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $work 'escaped.txt'))) '路径穿越文件没有落盘'
 
     $missingZip = Join-Path $work 'missing-exe.zip'
@@ -173,13 +173,13 @@ try {
         '-ProcessId', "$(New-ExitedProcessId)",
         '-Package', $missingZip,
         '-InstallDir', $install,
-        '-Restart', (Join-Path $install 'QQCom.exe'),
+        '-Restart', (Join-Path $install 'QQCom-plus.exe'),
         '-LogPath', $missingLog,
         '-WaitSeconds', '2',
         '-UserDataDir', $userData)
-    Assert-True ($missingCode -eq 1) '压缩包没有 QQCom.exe 时更新失败'
-    Assert-True ((Read-Log $missingLog) -match 'does not contain QQCom.exe') '缺少主程序的原因写入日志'
-    Assert-True ((Get-Content -LiteralPath (Join-Path $install 'QQCom.exe') -Raw) -eq 'OLD-EXE') '失败时保留原主程序'
+    Assert-True ($missingCode -eq 1) '压缩包没有 QQCom-plus.exe 时更新失败'
+    Assert-True ((Read-Log $missingLog) -match 'does not contain QQCom-plus.exe') '缺少主程序的原因写入日志'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $install 'QQCom-plus.exe') -Raw) -eq 'OLD-EXE') '失败时保留原主程序'
 
     $sleeper = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -WindowStyle Hidden -PassThru
     $timeoutLog = Join-Path $work 'timeout.log'
@@ -188,7 +188,7 @@ try {
             '-ProcessId', "$($sleeper.Id)",
             '-Package', $package,
             '-InstallDir', $install,
-            '-Restart', (Join-Path $install 'QQCom.exe'),
+            '-Restart', (Join-Path $install 'QQCom-plus.exe'),
             '-LogPath', $timeoutLog,
             '-WaitSeconds', '2',
             '-UserDataDir', $userData)
@@ -206,7 +206,7 @@ try {
         '-ProcessId', "$($finished.Id)",
         '-Package', $package,
         '-InstallDir', $install,
-        '-Restart', (Join-Path $install 'QQCom.exe'),
+        '-Restart', (Join-Path $install 'QQCom-plus.exe'),
         '-LogPath', $successLog,
         '-WaitSeconds', '5',
         '-UserDataDir', $userData)
@@ -215,21 +215,21 @@ try {
     Assert-True ($successText -match 'files replaced') '成功日志记录文件覆盖'
     Assert-True ($successText -match 'restart requested') '成功日志记录重新启动'
     Assert-True (-not (Test-Path -LiteralPath $package)) '安装成功后删除临时压缩包'
-    $expectedExe = Get-FileHash -LiteralPath (Join-Path $binaryDir 'QQCom.exe') -Algorithm SHA256
-    $updatedExe = Get-FileHash -LiteralPath (Join-Path $install 'QQCom.exe') -Algorithm SHA256
-    Assert-True ($expectedExe.Hash -eq $updatedExe.Hash) '安装目录中的 QQCom.exe 已替换'
+    $expectedExe = Get-FileHash -LiteralPath (Join-Path $binaryDir 'QQCom-plus.exe') -Algorithm SHA256
+    $updatedExe = Get-FileHash -LiteralPath (Join-Path $install 'QQCom-plus.exe') -Algorithm SHA256
+    Assert-True ($expectedExe.Hash -eq $updatedExe.Hash) '安装目录中的 QQCom-plus.exe 已替换'
     Assert-True ((Get-Content -LiteralPath (Join-Path $install 'plugins\platforms\old.txt') -Raw) -eq 'NEW') '同名插件文件被覆盖而不是嵌套'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $install 'plugins\platforms\platforms'))) '已有 plugins 目录没有被套一层'
     Assert-True ((Get-Content -LiteralPath (Join-Path $install 'plugins\platforms\keep.txt') -Raw) -eq 'KEEP') '发布包没有的文件被保留'
     Assert-True ((Get-Content -LiteralPath (Join-Path $install 'plugins\imageformats\extra.txt') -Raw) -eq 'EXTRA') '新的子目录被复制进来'
     Assert-True ((Get-Content -LiteralPath (Join-Path $install 'notes.txt') -Raw) -eq 'LOCAL') '安装目录里的本地文件被保留'
     Assert-True ((Get-Content -LiteralPath (Join-Path $userData 'preferences.ini') -Raw) -eq 'preferences=1') '用户配置目录保持不变'
-    Assert-True (Test-Path -LiteralPath (Join-Path $install 'qqcom-updater.ps1')) '新的更新器脚本已写入安装目录'
+    Assert-True (Test-Path -LiteralPath (Join-Path $install 'qqcom-plus-updater.ps1')) '新的更新器脚本已写入安装目录'
     $installedNotes = [System.IO.File]::ReadAllText((Join-Path $install $notesName)).Replace("`r`n", "`n").TrimEnd()
     Assert-True ($installedNotes -eq $expectedNotes) '版本说明随更新写入安装目录'
 } finally {
     if ($failures.Count -eq 0) {
-        # 更新器会立刻启动新的 QQCom.exe，文件句柄可能晚几百毫秒才放开。
+        # 更新器会立刻启动新的 QQCom-plus.exe，文件句柄可能晚几百毫秒才放开。
         for ($attempt = 0; $attempt -lt 15; $attempt++) {
             Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
             if (-not (Test-Path -LiteralPath $work)) { break }

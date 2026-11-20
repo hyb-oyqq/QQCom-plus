@@ -1,4 +1,4 @@
-# QQCom updater. After the main process exits, extract the Release zip,
+# QQCom-plus updater. After the main process exits, extract the Release zip,
 # replace files in the install directory, and restart. No rollback, no
 # scripts from the archive, and no changes to the user-data directory.
 param(
@@ -18,10 +18,10 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if ([string]::IsNullOrWhiteSpace($LogPath)) {
-    $LogPath = Join-Path ([System.IO.Path]::GetTempPath()) 'QQCom-update\update.log'
+    $LogPath = Join-Path ([System.IO.Path]::GetTempPath()) 'QQCom-plus-update\update.log'
 }
 if ([string]::IsNullOrWhiteSpace($UserDataDir)) {
-    $UserDataDir = Join-Path $env:LOCALAPPDATA 'QQCom\QQCom'
+    $UserDataDir = Join-Path $env:LOCALAPPDATA 'QQCom-plus\QQCom-plus'
 }
 
 $logDirectory = Split-Path -Parent $LogPath
@@ -104,7 +104,7 @@ try {
         Start-Sleep -Milliseconds 200
         $stillRunning = $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
     }
-    if ($stillRunning) { throw "QQCom did not exit within $WaitSeconds seconds." }
+    if ($stillRunning) { throw "QQCom-plus did not exit within $WaitSeconds seconds." }
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $Package).Path)
@@ -116,7 +116,7 @@ try {
         $zip.Dispose()
     }
 
-    $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("QQCom-stage-" + [Guid]::NewGuid().ToString('N'))
+    $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("QQCom-plus-stage-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Expand-Archive -LiteralPath $Package -DestinationPath $stage -Force
     $stageFull = [System.IO.Path]::GetFullPath($stage).TrimEnd('\') + '\'
@@ -126,8 +126,8 @@ try {
             throw "Extracted file escaped staging: $full"
         }
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $stage 'QQCom.exe') -PathType Leaf)) {
-        throw 'The update package does not contain QQCom.exe.'
+    if (-not (Test-Path -LiteralPath (Join-Path $stage 'QQCom-plus.exe') -PathType Leaf)) {
+        throw 'The update package does not contain QQCom-plus.exe.'
     }
 
     Copy-ReleaseTree -Source $stage -Destination $InstallDir

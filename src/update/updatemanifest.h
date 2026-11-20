@@ -25,7 +25,7 @@ enum class ManifestStatus {
 ManifestStatus evaluateUpdateManifest(const QByteArray &json, const QString &currentVersion,
                                       UpdateOffer *offer, QString *reason = nullptr);
 
-// Gitee 的 contents 接口把文件正文放在 base64 的 content 字段里，并带换行。
+// GitHub 的 contents 接口把文件正文放在 base64 的 content 字段里，并带换行。
 // 正文本身就是清单 JSON 时原样返回，方便清单地址指向一个普通的 JSON 文件。
 QByteArray unwrapManifestBody(const QByteArray &body);
 

@@ -21,11 +21,14 @@ PreferencesStore::PreferencesStore(QObject *parent, const QString &fileName) : Q
     const auto path = fileName.isEmpty()
         ? QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/preferences.ini"
         : fileName;
-    if (fileName.isEmpty() && QCoreApplication::applicationName() == QLatin1String("QQCom")
-        && QCoreApplication::organizationName() == QLatin1String("QQCom")) {
+    if (fileName.isEmpty() && QCoreApplication::applicationName() == QLatin1String("QQCom-plus")
+        && QCoreApplication::organizationName() == QLatin1String("QQCom-plus")) {
         const QDir configRoot(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation));
         // Qt uses organization/application on Windows and application on Linux.
-        const QStringList legacyPaths = {QStringLiteral("easyDebug/easyDebug/preferences.ini"),
+        // The original QQCom comes first; easyDebug is the older name. Migration only copies.
+        const QStringList legacyPaths = {QStringLiteral("QQCom/QQCom/preferences.ini"),
+                                         QStringLiteral("QQCom/preferences.ini"),
+                                         QStringLiteral("easyDebug/easyDebug/preferences.ini"),
                                          QStringLiteral("easyDebug/preferences.ini")};
         for (const auto &relativePath : legacyPaths) {
             const auto legacy = configRoot.filePath(relativePath);

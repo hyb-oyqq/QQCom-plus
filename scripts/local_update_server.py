@@ -47,7 +47,7 @@ def main():
         origin = f"http://127.0.0.1:{server.server_port}"
         manifest = {
             "schema": 1,
-            "product": "QQCom",
+            "product": "QQCom-plus",
             "channel": "stable",
             "version": args.version,
             "mandatory": False,

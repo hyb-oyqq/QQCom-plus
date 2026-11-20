@@ -111,7 +111,7 @@ QJsonArray tools()
             {"annotations", QJsonObject{{"readOnlyHint", readOnly}, {"destructiveHint", destructive},
                                         {"openWorldHint", !readOnly}}}});
     };
-    add("qqcom_get_capabilities", "Discover QQCom port types, parameter schemas, defaults, supported tools and limitations.", object());
+    add("qqcom_get_capabilities", "Discover QQCom-plus port types, parameter schemas, defaults, supported tools and limitations.", object());
     add("qqcom_get_state", "Read live GUI state: A/B configurations and connection states, counters, bridge, send editor and display settings.", object());
     add("qqcom_list_ports", "List serial devices from the GUI discovery snapshot and local IPv4 bind addresses. Refresh is asynchronous.", object({{"refresh", boolean()}}));
     QJsonObject allParameters;
@@ -175,7 +175,7 @@ QJsonObject capabilities()
             initial.insert(it.key(), QJsonValue::fromVariant(defaults.value(it.key())));
         types.append(QJsonObject{{"type", kinds.at(kind)}, {"parameters", object(fields)}, {"defaults", initial}});
     }
-    return {{"application", "QQCom"}, {"apiVersion", "1"}, {"phase", 1}, {"endpoints", QJsonArray{"A", "B"}},
+    return {{"application", "QQCom-plus"}, {"apiVersion", "1"}, {"phase", 1}, {"endpoints", QJsonArray{"A", "B"}},
             {"portTypes", types}, {"framing", framingSchema()}, {"tools", tools()},
             {"limitations", QJsonArray{"Open/close/send report submission, not device completion; query state and traffic.",
                 "Serial/TCP receive chunks are not necessarily protocol frames; inspect framing metadata.",

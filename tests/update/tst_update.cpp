@@ -12,8 +12,8 @@ QJsonObject downloadObject(const QJsonObject &overrides = {})
 {
     QJsonObject download{{QStringLiteral("type"), QStringLiteral("zip")},
                          {QStringLiteral("url"),
-                          QStringLiteral("https://gitee.com/qinjmin/qqcom/releases/download/v0.2.0/"
-                                         "QQCom-0.2.0-win64.zip")},
+                          QStringLiteral("https://github.com/hyb-oyqq/QQCom-plus/releases/download/v0.2.0/"
+                                         "QQCom-plus-0.2.0-win64.zip")},
                          {QStringLiteral("size"), 128},
                          {QStringLiteral("sha256"), QString(64, QLatin1Char('a'))}};
     for (auto it = overrides.constBegin(); it != overrides.constEnd(); ++it)
@@ -24,13 +24,13 @@ QJsonObject downloadObject(const QJsonObject &overrides = {})
 QByteArray manifestJson(const QJsonObject &overrides = {})
 {
     QJsonObject root{{QStringLiteral("schema"), 1},
-                     {QStringLiteral("product"), QStringLiteral("QQCom")},
+                     {QStringLiteral("product"), QStringLiteral("QQCom-plus")},
                      {QStringLiteral("channel"), QStringLiteral("stable")},
                      {QStringLiteral("version"), QStringLiteral("0.2.0")},
                      {QStringLiteral("mandatory"), false},
                      {QStringLiteral("download"), downloadObject()},
                      {QStringLiteral("notesUrl"),
-                      QStringLiteral("https://gitee.com/qinjmin/qqcom/releases/tag/v0.2.0")}};
+                      QStringLiteral("https://github.com/hyb-oyqq/QQCom-plus/releases/tag/v0.2.0")}};
     for (auto it = overrides.constBegin(); it != overrides.constEnd(); ++it)
         root.insert(it.key(), it.value());
     return QJsonDocument(root).toJson(QJsonDocument::Compact);
@@ -55,7 +55,7 @@ private slots:
     void rejectsProtocolAndPackageFields_data();
     void rejectsProtocolAndPackageFields();
     void packageFileMatchesChecksSizeAndHash();
-    void unwrapsGiteeContentsPayload();
+    void unwrapsContentsApiPayload();
     void loopbackOriginDoesNotWidenProductionUrls();
 };
 
@@ -69,11 +69,11 @@ void UpdateManifestTest::acceptsNewerStableRelease()
     QCOMPARE(offer.version, QStringLiteral("0.2.0"));
     QCOMPARE(offer.channel, QStringLiteral("stable"));
     QCOMPARE(offer.packageUrl.toString(),
-             QStringLiteral("https://gitee.com/qinjmin/qqcom/releases/download/v0.2.0/"
-                            "QQCom-0.2.0-win64.zip"));
+             QStringLiteral("https://github.com/hyb-oyqq/QQCom-plus/releases/download/v0.2.0/"
+                            "QQCom-plus-0.2.0-win64.zip"));
     QCOMPARE(offer.size, 128);
     QCOMPARE(offer.sha256.size(), 32);
-    QCOMPARE(offer.notesUrl, QStringLiteral("https://gitee.com/qinjmin/qqcom/releases/tag/v0.2.0"));
+    QCOMPARE(offer.notesUrl, QStringLiteral("https://github.com/hyb-oyqq/QQCom-plus/releases/tag/v0.2.0"));
     QVERIFY(!offer.mandatory);
 
     QJsonObject newer{{QStringLiteral("version"), QStringLiteral("0.1.10")}};
@@ -111,8 +111,10 @@ void UpdateManifestTest::rejectsProtocolAndPackageFields_data()
     QTest::newRow("schema") << QJsonObject{{QStringLiteral("schema"), 2}} << QByteArray();
     QTest::newRow("schema string") << QJsonObject{{QStringLiteral("schema"), QStringLiteral("1")}}
                                    << QByteArray();
-    QTest::newRow("product") << QJsonObject{{QStringLiteral("product"), QStringLiteral("qqcom")}}
+    QTest::newRow("product") << QJsonObject{{QStringLiteral("product"), QStringLiteral("qqcom-plus")}}
                              << QByteArray();
+    QTest::newRow("original product") << QJsonObject{{QStringLiteral("product"), QStringLiteral("QQCom")}}
+                                      << QByteArray();
     QTest::newRow("channel") << QJsonObject{{QStringLiteral("channel"), QStringLiteral("gamma")}}
                              << QByteArray();
     QTest::newRow("version") << QJsonObject{{QStringLiteral("version"), QStringLiteral("0.2")}}
@@ -153,7 +155,7 @@ void UpdateManifestTest::packageFileMatchesChecksSizeAndHash()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("QQCom-0.2.0-win64.zip"));
+    const QString path = dir.filePath(QStringLiteral("QQCom-plus-0.2.0-win64.zip"));
     const QByteArray bytes = QByteArrayLiteral("qqcom-ota-package");
     QFile file(path);
     QVERIFY(file.open(QIODevice::WriteOnly));
@@ -171,7 +173,7 @@ void UpdateManifestTest::packageFileMatchesChecksSizeAndHash()
 void UpdateManifestTest::loopbackOriginDoesNotWidenProductionUrls()
 {
     clearLoopbackUpdateOrigin();
-    const QUrl package(QStringLiteral("http://127.0.0.1:9/QQCom-0.1.1-win64.zip"));
+    const QUrl package(QStringLiteral("http://127.0.0.1:9/QQCom-plus-0.1.1-win64.zip"));
     QVERIFY(!isAllowedUpdateUrl(package));
     QJsonObject local{{QStringLiteral("download"),
                        downloadObject({{QStringLiteral("url"), package.toString()},
@@ -181,7 +183,7 @@ void UpdateManifestTest::loopbackOriginDoesNotWidenProductionUrls()
     setLoopbackUpdateOrigin(QUrl(QStringLiteral("http://127.0.0.1:9/")));
     QVERIFY(loopbackUpdateOriginActive());
     QVERIFY(isAllowedUpdateUrl(package));
-    QVERIFY(isAllowedUpdateUrl(QUrl(QStringLiteral("https://gitee.com/qinjmin/qqcom/releases"))));
+    QVERIFY(isAllowedUpdateUrl(QUrl(QStringLiteral("https://github.com/hyb-oyqq/QQCom-plus/releases"))));
     QVERIFY(!isAllowedUpdateUrl(QUrl(QStringLiteral("http://127.0.0.1:10/QQCom.zip"))));
     QVERIFY(!isAllowedUpdateUrl(QUrl(QStringLiteral("http://127.0.0.1:9/QQCom.zip?x=1"))));
     QVERIFY(!isAllowedUpdateUrl(QUrl(QStringLiteral("http://localhost:9/QQCom.zip"))));
@@ -193,7 +195,7 @@ void UpdateManifestTest::loopbackOriginDoesNotWidenProductionUrls()
     clearLoopbackUpdateOrigin();
 }
 
-void UpdateManifestTest::unwrapsGiteeContentsPayload()
+void UpdateManifestTest::unwrapsContentsApiPayload()
 {
     const QByteArray manifest = manifestJson();
     QString encoded = QString::fromLatin1(manifest.toBase64());

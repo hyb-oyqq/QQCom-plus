@@ -34,16 +34,16 @@ if ($IncludeOffscreen) {
     Copy-Item -LiteralPath $offscreen -Destination (Join-Path $platformDir $offscreenName) -Force
 }
 
-$updater = Join-Path $PSScriptRoot 'qqcom-updater.ps1'
+$updater = Join-Path $PSScriptRoot 'qqcom-plus-updater.ps1'
 if (-not (Test-Path -LiteralPath $updater -PathType Leaf)) {
     throw "Cannot find the updater script: $updater"
 }
-Copy-Item -LiteralPath $updater -Destination (Join-Path (Split-Path -Parent $binaryPath) 'qqcom-updater.ps1') -Force
+Copy-Item -LiteralPath $updater -Destination (Join-Path (Split-Path -Parent $binaryPath) 'qqcom-plus-updater.ps1') -Force
 
-if ([System.IO.Path]::GetFileName($binaryPath) -ieq 'QQCom.exe') {
-    $cliLauncher = Join-Path $PSScriptRoot 'qqcom-cli.cmd'
+if ([System.IO.Path]::GetFileName($binaryPath) -ieq 'QQCom-plus.exe') {
+    $cliLauncher = Join-Path $PSScriptRoot 'qqcom-plus-cli.cmd'
     $aiGuide = Join-Path (Split-Path -Parent $PSScriptRoot) 'AI_ACCESS.md'
-    Copy-Item -LiteralPath $cliLauncher -Destination (Join-Path (Split-Path -Parent $binaryPath) 'qqcom-cli.cmd') -Force
+    Copy-Item -LiteralPath $cliLauncher -Destination (Join-Path (Split-Path -Parent $binaryPath) 'qqcom-plus-cli.cmd') -Force
     Copy-Item -LiteralPath $aiGuide -Destination (Join-Path (Split-Path -Parent $binaryPath) 'AI_ACCESS.md') -Force
 }
 

@@ -20,7 +20,7 @@ qmake "%~dp0QQCom.pro" -spec win32-msvc "CONFIG+=release" "CONFIG-=debug"
 if errorlevel 1 goto failed
 nmake /nologo release
 if errorlevel 1 goto failed
-echo Built: %~dp0build\release\release\QQCom.exe
+echo Built: %~dp0build\release\release\QQCom-plus.exe
 popd
 exit /b 0
 :failed

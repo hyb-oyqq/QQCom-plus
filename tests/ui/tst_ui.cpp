@@ -195,7 +195,7 @@ QString productCli()
 {
     const auto override = qEnvironmentVariable("QQCOM_CLI_TEST_EXECUTABLE");
     if (!override.isEmpty()) return override;
-    return QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../../release/release/QQCom.exe");
+    return QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../../release/release/QQCom-plus.exe");
 }
 
 struct CliReply {
@@ -235,7 +235,7 @@ class UiSmokeTest : public QObject
 private slots:
     void cliCommandGroupsEditGuiAndSurviveReload()
     {
-        if (!QFileInfo::exists(productCli())) QSKIP("Build QQCom first or set QQCOM_CLI_TEST_EXECUTABLE");
+        if (!QFileInfo::exists(productCli())) QSKIP("Build QQCom-plus first or set QQCOM_CLI_TEST_EXECUTABLE");
         QTemporaryDir directory;
         QString groupId, firstId, secondId;
         {
@@ -353,7 +353,7 @@ private slots:
 
     void cliOfflineDiscoveryAndInstanceSelection()
     {
-        if (!QFileInfo::exists(productCli())) QSKIP("Build QQCom first or set QQCOM_CLI_TEST_EXECUTABLE");
+        if (!QFileInfo::exists(productCli())) QSKIP("Build QQCom-plus first or set QQCOM_CLI_TEST_EXECUTABLE");
         QTemporaryDir directory;
         const auto describe = cliProcess({"describe"}, directory.path());
         QCOMPARE(describe.code, 0);
@@ -401,7 +401,7 @@ private slots:
 
     void cliTcpAndUdpRoundTrip()
     {
-        if (!QFileInfo::exists(productCli())) QSKIP("Build QQCom first or set QQCOM_CLI_TEST_EXECUTABLE");
+        if (!QFileInfo::exists(productCli())) QSKIP("Build QQCom-plus first or set QQCOM_CLI_TEST_EXECUTABLE");
         QTemporaryDir directory;
         MainWindow window;
         auto *control = window.findChild<LocalControlServer *>();
@@ -465,7 +465,7 @@ private slots:
         // launches its own executable, exactly as in the installed product.
         const auto state = cliProcess({"state"}, directory.path(), QCoreApplication::applicationFilePath(), true);
         QVERIFY2(state.code == 0, state.diagnostic.constData());
-        QCOMPARE(state.body.value("application").toString(), QString("QQCom"));
+        QCOMPARE(state.body.value("application").toString(), QString("QQCom-plus"));
         QVERIFY(state.body.value("pid").toInteger() != QCoreApplication::applicationPid());
         QTRY_VERIFY_WITH_TIMEOUT(LocalControl::instances(directory.path()).isEmpty(), 6000);
     }
@@ -1232,6 +1232,66 @@ private slots:
         b->beginUserAttempt();
         b->report(Traffic::Issue::EndpointFailure, QStringLiteral("新的手动连接失败"));
         QCOMPARE(b->level(), EndpointAlertState::Error); // 新故障仍可重新提醒。
+    }
+
+    // 改名为 QQCom-plus 后首次启动：从原 QQCom 的配置复制一份，原 QQCom 优先于更早的
+    // easyDebug。只复制不移动，原文件保持原样，原版 QQCom 仍可继续使用。
+    void preferencesMigrateFromOriginalQQCom()
+    {
+        // 测试模式把配置目录重定向到 qttest，绝不碰真实用户配置。
+        QVERIFY(QStandardPaths::isTestModeEnabled());
+        const QString organization = QCoreApplication::organizationName();
+        const QString application = QCoreApplication::applicationName();
+        const auto restoreIdentity = qScopeGuard([organization, application] {
+            QCoreApplication::setOrganizationName(organization);
+            QCoreApplication::setApplicationName(application);
+        });
+        QCoreApplication::setOrganizationName(QStringLiteral("QQCom-plus"));
+        QCoreApplication::setApplicationName(QStringLiteral("QQCom-plus"));
+
+        const QDir configRoot(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation));
+        const QString target = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+            + QStringLiteral("/preferences.ini");
+        const QString original = configRoot.filePath(QStringLiteral("QQCom/QQCom/preferences.ini"));
+        const QString older = configRoot.filePath(QStringLiteral("easyDebug/easyDebug/preferences.ini"));
+        const auto removeFixtures = [target, original, older] {
+            QFile::remove(target);
+            QFile::remove(original);
+            QFile::remove(older);
+        };
+        removeFixtures();
+        const auto cleanupFixtures = qScopeGuard(removeFixtures);
+        {
+            PreferencesStore seed(nullptr, original);
+            seed.setValue(QStringLiteral("serial/baud"), 921600);
+            QVERIFY(seed.sync());
+        }
+        {
+            PreferencesStore seed(nullptr, older);
+            seed.setValue(QStringLiteral("serial/baud"), 9600);
+            QVERIFY(seed.sync());
+        }
+        QFile source(original);
+        QVERIFY(source.open(QIODevice::ReadOnly));
+        const QByteArray originalBytes = source.readAll();
+        source.close();
+        QVERIFY(!QFileInfo::exists(target));
+
+        {
+            PreferencesStore migrated;
+            QCOMPARE(migrated.value(QStringLiteral("serial/baud")).toInt(), 921600);
+            migrated.setValue(QStringLiteral("serial/baud"), 115200);
+            QVERIFY(migrated.sync());
+        }
+        QVERIFY(QFileInfo::exists(target));
+        QVERIFY(QFileInfo::exists(original));
+        QVERIFY(source.open(QIODevice::ReadOnly));
+        QCOMPARE(source.readAll(), originalBytes);
+        source.close();
+
+        // 目标已存在时不再复制，用户在新版里的修改保留。
+        PreferencesStore again;
+        QCOMPARE(again.value(QStringLiteral("serial/baud")).toInt(), 115200);
     }
 
     void eventOptionsFollowPrefixAndRememberChoices()
@@ -3924,7 +3984,7 @@ private slots:
         const auto hexLines = QString::fromUtf8(log.readAll()).trimmed().split(QLatin1Char('\n'));
         // 元信息头后是固定的列名：日志里的 Peer 字段有明确含义。
         QCOMPARE(hexLines.size(), 4);
-        QVERIFY2(hexLines.at(0).startsWith(QStringLiteral("# QQCom")), qPrintable(hexLines.at(0)));
+        QVERIFY2(hexLines.at(0).startsWith(QStringLiteral("# QQCom-plus ")), qPrintable(hexLines.at(0)));
         QVERIFY(hexLines.at(0).contains(QStringLiteral("格式=HEX")));
         QCOMPARE(hexLines.at(1), QStringLiteral("# Time\tPort\tPeer\tDirection\tData"));
         QVERIFY(hexLines.at(2).contains(QStringLiteral("A · 串口")));
@@ -4019,10 +4079,10 @@ private slots:
             QCOMPARE(file.readAll(), seed); // 模板内容原样：它只提供目录+基名+扩展名
         }
 
-        // ---- C2：新文件首行是元信息头 # QQCom ... 格式=... ----
+        // ---- C2：新文件首行是元信息头 # QQCom-plus ... 格式=... ----
         QStringList lines = readLines(firstLog);
         QVERIFY(!lines.isEmpty());
-        QVERIFY2(lines.at(0).startsWith(QStringLiteral("# QQCom ")), qPrintable(lines.at(0)));
+        QVERIFY2(lines.at(0).startsWith(QStringLiteral("# QQCom-plus ")), qPrintable(lines.at(0)));
         QVERIFY2(lines.at(0).contains(QStringLiteral("格式=")), qPrintable(lines.at(0)));
 
         // ---- C3：记录若干条 → 数据行数正确、每行 4 个制表符、且没有额外的 # 行 ----
@@ -4075,7 +4135,7 @@ private slots:
             QVERIFY(secondBase.startsWith(QStringLiteral("traffic-"))); // 跨秒：新时间戳
         const QStringList secondLines = readLines(secondLog);
         QCOMPARE(secondLines.size(), 2); // 元信息 + 列名，清空前的 2 条数据不在其中
-        QVERIFY2(secondLines.at(0).startsWith(QStringLiteral("# QQCom ")), qPrintable(secondLines.at(0)));
+        QVERIFY2(secondLines.at(0).startsWith(QStringLiteral("# QQCom-plus ")), qPrintable(secondLines.at(0)));
         QCOMPARE(secondLines.at(1), QStringLiteral("# Time\tPort\tPeer\tDirection\tData"));
 
         // ---- C5：切换显示格式 → 当前文件追加一行 # 格式切换 → ... ----
@@ -4193,11 +4253,11 @@ private slots:
         QVERIFY(choose->toolTip().contains(QDir::toNativeSeparators(programLog)));
         const QString first = currentLogPath(record, programLog);
         QVERIFY2(!first.isEmpty(), qPrintable(record->toolTip()));
-        QVERIFY(QFileInfo(first).fileName().startsWith(QStringLiteral("QQCom-log-")));
+        QVERIFY(QFileInfo(first).fileName().startsWith(QStringLiteral("QQCom-plus-log-")));
         QVERIFY(QFileInfo(first).fileName().endsWith(QStringLiteral(".txt")));
         QVERIFY(QFile::exists(first));
         QVERIFY(openLog->toolTip().contains(QDir::toNativeSeparators(first)));
-        QVERIFY(!QFile::exists(QDir(programLog).filePath(QStringLiteral("QQCom-log.txt"))));
+        QVERIFY(!QFile::exists(QDir(programLog).filePath(QStringLiteral("QQCom-plus-log.txt"))));
         QVERIFY(store.value(QStringLiteral("traffic/recordPath")).toString().isEmpty());
         created.append(first);
 
@@ -4208,10 +4268,10 @@ private slots:
         QVERIFY(record->isChecked());
         QCOMPARE(QDir::cleanPath(panel.logDirectory()), QDir::cleanPath(custom.path()));
         QCOMPARE(QDir::cleanPath(store.value(QStringLiteral("traffic/recordPath")).toString()),
-                 QDir::cleanPath(QDir(custom.path()).filePath(QStringLiteral("QQCom-log.txt"))));
+                 QDir::cleanPath(QDir(custom.path()).filePath(QStringLiteral("QQCom-plus-log.txt"))));
         const QString moved = currentLogPath(record, custom.path());
         QVERIFY(QFile::exists(moved));
-        QVERIFY(QFileInfo(moved).fileName().startsWith(QStringLiteral("QQCom-log-")));
+        QVERIFY(QFileInfo(moved).fileName().startsWith(QStringLiteral("QQCom-plus-log-")));
         QVERIFY(QFile::exists(first)); // 换目录另起新文件，旧文件留在原地
 
         panel.resetLogDirectory();
@@ -4383,7 +4443,7 @@ private slots:
     }
 
     // 运行中异常断开（TCP 对端 abort）→ Error 行 + 状态栏播报一句，**不弹窗**
-    // （长压测中断开/重连风暴会把弹窗叠成轰炸）。用 localhost TCP Server：QQCom
+    // （长压测中断开/重连风暴会把弹窗叠成轰炸）。用 localhost TCP Server：QQCom-plus
     // 监听、脚本/QTcpSocket 连上、先发一字节确认已接受，再 abort 掉。
     // 用户主动停止是正常迁移，走 State 行，同样不弹窗。
     void runtimeDisconnectReportsErrorRowWithoutPopup()
@@ -4418,7 +4478,7 @@ private slots:
         QTRY_COMPARE(client.state(), QAbstractSocket::ConnectedState);
         client.write("ping");
         QTRY_COMPARE(client.bytesToWrite(), qint64(0));
-        // 先确认 QQCom 已接受并收到了这条数据，再 abort——否则连接还没从 backlog
+        // 先确认 QQCom-plus 已接受并收到了这条数据，再 abort——否则连接还没从 backlog
         // 接进来，断开事件无 peer 可挂。
         QTRY_VERIFY2(text->toPlainText().contains(QStringLiteral("ping")),
             qPrintable(text->toPlainText()));

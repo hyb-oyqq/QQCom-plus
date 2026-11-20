@@ -26,14 +26,14 @@ function Get-ReleaseNotes {
         if ($text.Length -gt 0) { return $text + "`r`n" }
     }
 
-    $placeholder = '# V' + $Version + "`r`n`r`n" + ([System.Text.Encoding]::UTF8.GetString([byte[]](0xE6,0x9C,0xAC,0xE6,0xAC,0xA1,0xE5,0x8F,0x91,0xE5,0xB8,0x83)))
+    $placeholder = '# QQCom-plus-' + $Version + '-win64' + "`r`n`r`n" + ([System.Text.Encoding]::UTF8.GetString([byte[]](0xE6,0x9C,0xAC,0xE6,0xAC,0xA1,0xE5,0x8F,0x91,0xE5,0xB8,0x83)))
     return $placeholder + "`r`n"
 }
 
 $binaryRoot = (Resolve-Path -LiteralPath $BinaryDir).Path
-$exePath = Join-Path $binaryRoot 'QQCom.exe'
+$exePath = Join-Path $binaryRoot 'QQCom-plus.exe'
 if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
-    throw "QQCom.exe was not found in release directory: $binaryRoot"
+    throw "QQCom-plus.exe was not found in release directory: $binaryRoot"
 }
 
 if ([System.IO.Path]::IsPathRooted($OutputDir)) {
@@ -43,15 +43,15 @@ if ([System.IO.Path]::IsPathRooted($OutputDir)) {
 }
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 
-$packageName = "QQCom-$Version-win64.zip"
+$packageName = "QQCom-plus-$Version-win64.zip"
 $packagePath = Join-Path $outputRoot $packageName
 if (Test-Path -LiteralPath $packagePath) { Remove-Item -LiteralPath $packagePath -Force }
 
 $stage = Join-Path $outputRoot ("stage-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item -Path (Join-Path $binaryRoot '*') -Destination $stage -Recurse -Force
-$updaterSource = Join-Path $PSScriptRoot 'qqcom-updater.ps1'
-Copy-Item -LiteralPath $updaterSource -Destination (Join-Path $stage 'qqcom-updater.ps1') -Force
+$updaterSource = Join-Path $PSScriptRoot 'qqcom-plus-updater.ps1'
+Copy-Item -LiteralPath $updaterSource -Destination (Join-Path $stage 'qqcom-plus-updater.ps1') -Force
 # GBK treats 0xB4 as a line-continuation lead byte, so build the name from safe decimals.
 $notesName = -join ([char]0x56FA, [char]0x4EF6, [char]0x66F4, [char]0x65B0, [char]0x8BB0, [char]0x5F55) + '.md'
 $recordName = -join ([char]0x66F4, [char]0x65B0, [char]0x8BB0, [char]0x5F55) + '.md'
@@ -67,7 +67,7 @@ $packageInfo = Get-Item -LiteralPath $packagePath
 $hash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifest = [ordered]@{
     schema = 1
-    product = 'QQCom'
+    product = 'QQCom-plus'
     channel = $Channel
     version = $Version
     releaseDate = [DateTime]::UtcNow.ToString('o')
@@ -78,7 +78,7 @@ $manifest = [ordered]@{
         size = [int64]$packageInfo.Length
         sha256 = $hash
     }
-    notesUrl = "https://gitee.com/qinjmin/qqcom/releases/tag/v$Version"
+    notesUrl = "https://github.com/hyb-oyqq/QQCom-plus/releases/tag/v$Version"
 }
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -88,8 +88,8 @@ try {
 } finally {
     $zip.Dispose()
 }
-if ($names -notcontains 'QQCom.exe') {
-    throw 'Package does not contain QQCom.exe at the archive root.'
+if ($names -notcontains 'QQCom-plus.exe') {
+    throw 'Package does not contain QQCom-plus.exe at the archive root.'
 }
 if ($names -notcontains $notesName) {
     throw 'Package does not contain the release notes at the archive root.'

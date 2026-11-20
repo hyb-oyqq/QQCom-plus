@@ -1,6 +1,6 @@
-# QQCom AI / CLI 接入（第一阶段）
+# QQCom-plus AI / CLI 接入（第一阶段）
 
-QQCom 提供原生 JSON CLI，能执行本机终端命令的 AI 可操作窗口中的 A/B 端点，读取真实状态、监视记录和界面文本，并编辑快捷指令分组。CLI 随程序发布，无须额外安装 Python、Node.js 或其他服务。
+QQCom-plus 提供原生 JSON CLI，能执行本机终端命令的 AI 可操作窗口中的 A/B 端点，读取真实状态、监视记录和界面文本，并编辑快捷指令分组。CLI 随程序发布，无须额外安装 Python、Node.js 或其他服务。
 
 ## 复制给 AI
 
@@ -8,51 +8,51 @@ QQCom 提供原生 JSON CLI，能执行本机终端命令的 AI 可操作窗口�
 
 复制的说明已包含程序的完整路径、读取能力和状态的 PowerShell 命令，以及当前窗口的 `--instance` 标识。AI 根据接口返回的能力和参数自行操作，用户无需手动输入命令。多开时也只操作已确认的目标窗口，并记住 `state` 返回的程序路径、A/B 端点类型和设备参数。
 
-窗口关闭、重启或返回 `no_instance` 后，AI 应先通过同一入口执行 `instances`，不带旧的 `--instance` 筛选。对候选窗口执行 `state --instance <候选 ID> --no-start` 只读查询，根据程序路径、端点类型和设备参数与已知目标及任务要求核对。能够唯一确认目标时，自动更新 instance ID 并继续；只有一个在线窗口也需要核对，确认目标前仅执行发现和只读查询。没有在线窗口时，先检查 QQCom 进程及 `describe` 返回的发现目录，仍未找到再请用户打开目标窗口。只有无法唯一确认目标时，才请用户选择窗口，必要时重新复制接入说明。
+窗口关闭、重启或返回 `no_instance` 后，AI 应先通过同一入口执行 `instances`，不带旧的 `--instance` 筛选。对候选窗口执行 `state --instance <候选 ID> --no-start` 只读查询，根据程序路径、端点类型和设备参数与已知目标及任务要求核对。能够唯一确认目标时，自动更新 instance ID 并继续；只有一个在线窗口也需要核对，确认目标前仅执行发现和只读查询。没有在线窗口时，先检查 QQCom-plus 进程及 `describe` 返回的发现目录，仍未找到再请用户打开目标窗口。只有无法唯一确认目标时，才请用户选择窗口，必要时重新复制接入说明。
 
 ## CLI 直接接入
 
-发布目录包含 `QQCom.exe`、`qqcom-cli.cmd` 和 `AI_ACCESS.md`。在该目录运行：
+发布目录包含 `QQCom-plus.exe`、`qqcom-plus-cli.cmd` 和 `AI_ACCESS.md`。在该目录运行：
 
 ```powershell
-.\qqcom-cli.cmd describe
-.\qqcom-cli.cmd instances
-.\qqcom-cli.cmd state
-.\qqcom-cli.cmd ports --refresh
-.\qqcom-cli.cmd configure A --type serial --param serial.port=COM3 --param serial.baud=115200
-.\qqcom-cli.cmd open A
+.\qqcom-plus-cli.cmd describe
+.\qqcom-plus-cli.cmd instances
+.\qqcom-plus-cli.cmd state
+.\qqcom-plus-cli.cmd ports --refresh
+.\qqcom-plus-cli.cmd configure A --type serial --param serial.port=COM3 --param serial.baud=115200
+.\qqcom-plus-cli.cmd open A
 # 查询 state，确认 A 已 open 且 operationPending=false 后发送
-.\qqcom-cli.cmd send A --format ascii --data "AT+VERSION?" --line-ending crlf
-.\qqcom-cli.cmd traffic --endpoint A --limit 50
-.\qqcom-cli.cmd ui-text --max-chars 8000
-.\qqcom-cli.cmd close A
+.\qqcom-plus-cli.cmd send A --format ascii --data "AT+VERSION?" --line-ending crlf
+.\qqcom-plus-cli.cmd traffic --endpoint A --limit 50
+.\qqcom-plus-cli.cmd ui-text --max-chars 8000
+.\qqcom-plus-cli.cmd close A
 ```
 
 `describe` 离线输出工具、端口参数 Schema、默认值和 CLI 命令映射；`instances` 只列在线实例。其他命令自动连接同用户的运行窗口，没有窗口时自动启动。存在多个窗口时返回 `multiple_instances` 和候选列表，使用 `--instance <UUID 或 PID>` 选择；`--no-start` 禁止自动启动。CLI 与窗口通过同用户命名管道通信。
 
 复杂参数（例如组帧）使用 `call <工具名> --input-file <JSON 文件>`；`--input-file -` 从标准输入读取。也支持 `--json`，但 JSON 文件可避开不同 Shell 的引号差异。除可读的 `--help` 外，输出为 UTF-8 JSON；退出码 `0` 成功、`2` 参数错误、`3` 无在线实例或启动失败、`4` 多实例未选择、`5` 工具或通信失败。`--timeout <100..30000>` 设置控制请求超时（默认 5000 ms），自动启动另有最多 10 秒的等待。超时可能发生在写操作已提交之后，应检查状态/记录再决定是否重试。
 
-完整程序路径也可用作 `QQCom.exe --cli <命令>`，其中 `--cli` 必须是首个参数。在交互式 Windows Shell 中优先用 `.cmd` 启动脚本，以便等待 GUI 子系统程序并获取退出码。界面「CLI → 复制给 AI」会优先使用同目录下的启动脚本；没有脚本时直接调用程序，并通过 PowerShell 管道等待输出。
+完整程序路径也可用作 `QQCom-plus.exe --cli <命令>`，其中 `--cli` 必须是首个参数。在交互式 Windows Shell 中优先用 `.cmd` 启动脚本，以便等待 GUI 子系统程序并获取退出码。界面「CLI → 复制给 AI」会优先使用同目录下的启动脚本；没有脚本时直接调用程序，并通过 PowerShell 管道等待输出。
 
-**发现程序入口和发现能力是两步。** AI 需要从工作目录、安装目录或提供的完整路径找到 QQCom，然后自动执行 `describe` 发现能力；没有跨所有 AI 客户端的通用软件扫描机制。CLI 无需配置外部 AI 客户端，也不自动更改 PATH、注册表或外部 AI 客户端配置。
+**发现程序入口和发现能力是两步。** AI 需要从工作目录、安装目录或提供的完整路径找到 QQCom-plus，然后自动执行 `describe` 发现能力；没有跨所有 AI 客户端的通用软件扫描机制。CLI 无需配置外部 AI 客户端，也不自动更改 PATH、注册表或外部 AI 客户端配置。
 
-实例描述存放在 `QStandardPaths::AppLocalDataLocation/ai/control-<UUID>.json`，Windows 通常为 `%LOCALAPPDATA%/QQCom/QQCom/ai/`。CLI 会探测管道，忽略崩溃留下的无效描述；正常关闭自动移除描述。开发测试可用 `QQCOM_CONTROL_DIR` 隔离发现目录。
+实例描述存放在 `QStandardPaths::AppLocalDataLocation/ai/control-<UUID>.json`，Windows 通常为 `%LOCALAPPDATA%/QQCom-plus/QQCom-plus/ai/`。CLI 会探测管道，忽略崩溃留下的无效描述；正常关闭自动移除描述。开发测试可用 `QQCOM_CONTROL_DIR` 隔离发现目录。
 
 ## 快捷指令分组编辑
 
 `commands` 或 `commands list` 返回分组与指令 UUID。编辑按 UUID 定位，允许重名分组；只更新明确提供的字段，不会用列表预览替换整组数据。
 
 ```powershell
-.\qqcom-cli.cmd commands create-group --name "设备调试" --notes "台架验证"
+.\qqcom-plus-cli.cmd commands create-group --name "设备调试" --notes "台架验证"
 # 使用上一步返回的 groupId
-.\qqcom-cli.cmd commands update-group <groupId> --name "设备 v2"
-.\qqcom-cli.cmd commands add <groupId> --content "AA 55" --format hex --description "查询状态" --line-ending crlf --delay 100
+.\qqcom-plus-cli.cmd commands update-group <groupId> --name "设备 v2"
+.\qqcom-plus-cli.cmd commands add <groupId> --content "AA 55" --format hex --description "查询状态" --line-ending crlf --delay 100
 # 使用 add 返回的 commandId
-.\qqcom-cli.cmd commands update <groupId> <commandId> --content "AA 56" --enabled false
-.\qqcom-cli.cmd commands update <groupId> <commandId> --position 0
-.\qqcom-cli.cmd commands get <groupId> --offset 0 --limit 50
-.\qqcom-cli.cmd commands delete <groupId> <commandId>
-.\qqcom-cli.cmd commands delete-group <groupId>
+.\qqcom-plus-cli.cmd commands update <groupId> <commandId> --content "AA 56" --enabled false
+.\qqcom-plus-cli.cmd commands update <groupId> <commandId> --position 0
+.\qqcom-plus-cli.cmd commands get <groupId> --offset 0 --limit 50
+.\qqcom-plus-cli.cmd commands delete <groupId> <commandId>
+.\qqcom-plus-cli.cmd commands delete-group <groupId>
 ```
 
 分组支持名称和备注修改；指令支持内容、描述、HEX/文本格式、结尾符、延时、启用状态、原有组包字段和组内排序。`--position` 从 0 开始，表示修改后的位置；新增默认追加。指令格式为 `text|hex`，文本指令执行时跟随发送区当前文本编码；延时范围 `0..10000` ms。新增指令默认文本、无结尾符、50 ms、启用、未组包；允许空内容草稿。长文本/换行可用通用 `call` 与 JSON 文件传入。
@@ -84,13 +84,13 @@ QQCom 提供原生 JSON CLI，能执行本机终端命令的 AI 可操作窗口�
 | `qqcom_delete_command` | 按 UUID 删除一条指令 |
 | `qqcom_clear_traffic` | 与界面“清空”相同，保留已有日志文件和累计 RX/TX 字节统计 |
 
-类型为 `serial`、`tcp-client`、`tcp-server`、`udp`。参数名直接对应 QQCom 配置，例如 `serial.baud`、`client.host`、`server.port`、`udp.target`。范围与枚举以能力接口为准；未知字段、范围越界和其他类型的字段会被拒绝。
+类型为 `serial`、`tcp-client`、`tcp-server`、`udp`。参数名直接对应 QQCom-plus 配置，例如 `serial.baud`、`client.host`、`server.port`、`udp.target`。范围与枚举以能力接口为准；未知字段、范围越界和其他类型的字段会被拒绝。
 
 桥接、定时发送、文件传输暂不提供修改工具。文件传输期间拒绝 AI 开关端口或注入发送数据。
 
 ## 复杂参数调用示例
 
-将下面的参数对象保存为 `endpoint.json`，使用 `qqcom-cli.cmd call qqcom_configure_endpoint --input-file endpoint.json`：
+将下面的参数对象保存为 `endpoint.json`，使用 `qqcom-plus-cli.cmd call qqcom_configure_endpoint --input-file endpoint.json`：
 
 ```json
 {
@@ -105,7 +105,7 @@ QQCom 提供原生 JSON CLI，能执行本机终端命令的 AI 可操作窗口�
 调用 `open A` 后查询 `state`，直到 A 的 `state=open`、`operationPending=false`，再执行：
 
 ```powershell
-.\qqcom-cli.cmd send A --data "AT+VERSION?" --format ascii --line-ending crlf
+.\qqcom-plus-cli.cmd send A --data "AT+VERSION?" --format ascii --line-ending crlf
 ```
 
 发送不改动人工发送区的目标和编辑内容，产生的记录在界面、日志和查询中标为 `AI`。
