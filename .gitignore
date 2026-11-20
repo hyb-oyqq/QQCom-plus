@@ -99,6 +99,7 @@ __pycache__/
 /.gstack/
 /.grok/
 /.qm/
+/.omc/
 
 # Design drafts and working notes stay on this machine.
 /design/
