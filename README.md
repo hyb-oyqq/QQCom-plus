@@ -1,8 +1,13 @@
-# QQCom
+# QQCom-plus
+
+[![Build & Release](https://github.com/hyb-oyqq/QQCom-plus/actions/workflows/build-release.yml/badge.svg)](https://github.com/hyb-oyqq/QQCom-plus/actions/workflows/build-release.yml)
 
 QQCom 是一个基于 Qt Widgets 的 Windows 通信调试工作台，支持串口、TCP 客户端、TCP 服务器和 UDP，并提供收发监视、组帧、过滤、编码、日志和快捷指令管理。
 
-仓库地址：[gitee.com/qinjmin/qqcom](https://gitee.com/qinjmin/qqcom)
+本仓库 QQCom-plus 由 QQCom 原仓库迁移而来，保留完整的提交历史和版本标签。
+
+- 原仓库地址：<https://gitee.com/qinjmin/qqcom>
+- 本仓库地址：<https://github.com/hyb-oyqq/QQCom-plus>
 
 ## 当前能力
 
@@ -18,7 +23,7 @@ A/B 桥接把一端收到的字节原样写到另一端。后台日志轮转仍�
 
 ## 快速开始
 
-直接使用请从 [Gitee Release](https://gitee.com/qinjmin/qqcom/releases) 下载 Windows x64 ZIP，解压后运行 `QQCom.exe`，保留同目录的 DLL、插件和更新器。端口、显示过滤及 RAW/XMODEM/YMODEM 文件收发的操作见 [使用约定](docs/UI_DESIGN.md)。
+直接使用请从本仓库的 [GitHub Releases](https://github.com/hyb-oyqq/QQCom-plus/releases) 或原仓库的 [Gitee Release](https://gitee.com/qinjmin/qqcom/releases) 下载 Windows x64 ZIP，解压后运行 `QQCom.exe`，保留同目录的 DLL、插件和更新器。端口、显示过滤及 RAW/XMODEM/YMODEM 文件收发的操作见 [使用约定](docs/UI_DESIGN.md)。
 
 ### 开发环境
 
@@ -69,6 +74,8 @@ git diff --check
 ## 版本和发布
 
 版本号在 `version/version.h` 里手动修改，构建只刷新时间戳。版本记录维护在根目录 [更新记录](更新记录.md)，最终交付为 `build/releases/QQCom-<version>-win64.zip` 和同目录的 `固件更新记录.md`。完整打包、附件校验及稳定版发布流程见 [OTA 方案](docs/OTA.md)，约定见 [项目规则](AGENTS.md)。
+
+GitHub Actions 会在每次推送和 PR 时构建 Release、运行核心测试并上传 ZIP 构建产物；推送与 `version/version.h` 一致的 `v<version>` 标签后，自动创建同名 GitHub Release 并附上 ZIP。触发条件和补发方式见 [开发与验证](docs/DEVELOPMENT.md#github-actions-自动构建与发布)。
 
 ## AI 直接操作
 

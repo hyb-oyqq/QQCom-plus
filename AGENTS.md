@@ -28,6 +28,7 @@
 ## 推送与线上发布
 
 - 本项目远端为 `origin`（`https://gitee.com/qinjmin/qqcom.git`），发布分支为 `master`。推送前检查工作区、拉取远端引用并核对分支差异，保留用户已有修改；不强制推送。
+- GitHub 仓库 QQCom-plus 的远端为 `github`（`https://github.com/hyb-oyqq/QQCom-plus.git`），保留完整历史和标签。推送 `v<version>` 标签后由 GitHub Actions 自动构建并创建同名 Release，工作流约定见 `docs/DEVELOPMENT.md`。
 - 源码、规则、文档、根目录更新记录及 `ota/stable.json` 入 Git；`build/` 下的 ZIP、运行目录、校验记录和日志不入 Git。
 - 新版先完成版本号、更新记录、构建和测试，提交对应源码，创建并推送 `v<version>` 标签。标签固定发布源码；已经存在的发布标签不移动、不重建。后续规则、文档及稳定清单修订提交到 `master`。
 - 用户已上传 Gitee 固件时，直接读取现有 Release 的版本、名称、标签、说明和附件链接，并下载附件校验，不重复上传或要求上传令牌。

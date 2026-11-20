@@ -81,6 +81,18 @@ powershell -NoProfile -File scripts/deploy_qt_windows.ps1 -Binary build/ui-tests
 
 发布时整理完整运行文件并保留 DLL 和插件目录，准备匹配的 MSVC 运行库，排除编译中间产物。最终交付和更新记录格式按 [AGENTS.md](../AGENTS.md)，打包、线上附件校验和稳定清单推送见 [OTA 发布流程](OTA.md#发布流程)。
 
+### GitHub Actions 自动构建与发布
+
+工作流位于 `.github/workflows/build-release.yml`，在 `windows-2022` 上使用 Qt 6.10.1 MSVC 2022（含 SerialPort、Core5Compat、ImageFormats）和 VS 2022 工具链，通过 `build.bat` 构建，与本地 Kit 保持一致。
+
+| 触发 | 执行内容 |
+| --- | --- |
+| 推送任意分支、提交 PR | 构建 Release，运行核心测试，按 `build/release-runtime/<version>/` 整理运行文件（含 MSVC 运行库），用 `scripts/package_release.ps1` 打包并以 `validate_ota_manifest.ps1` 校验，ZIP 和 `固件更新记录.md` 作为构建产物保留 30 天 |
+| 推送 `v<version>` 标签 | 先确认标签等于 `version/version.h` 的版本、`更新记录.md` 含 `# QQCom-<version>-win64` 一节，再执行上述构建；通过后创建同名 GitHub Release，标题为 `QQCom-<version>-win64`，说明取该节内容并附 ZIP 大小和 SHA-256 |
+| 手动运行并填写已有标签 | 用当前工作流构建该标签的源码并补发 Release；同名 Release 已存在时更新说明并覆盖附件 |
+
+发新版仍按上文顺序：改版本号和更新记录，提交后创建 `v<version>` 标签，推送到 GitHub 即触发发布。标签与版本头不一致或缺少更新记录时工作流直接失败，不生成 Release。GitHub Release 只提供下载；客户端自动升级仍读取 `ota/stable.json`，是否切换稳定版按 [OTA 发布流程](OTA.md#发布流程) 单独核验。
+
 ## 贡献与提交
 
 从 `master` 创建短期分支，提交标题使用 Conventional Commits，例如 `fix: 修复 TCP 服务器关闭时的尾帧处理`。一次提交围绕一个主题，不混入生成物、个人配置或无关格式化。C++ 风格由根目录 `.clang-format` 和 `.editorconfig` 约束；历史文件不做无关的整篇重排。
