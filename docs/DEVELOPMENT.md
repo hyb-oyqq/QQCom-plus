@@ -87,7 +87,7 @@ powershell -NoProfile -File scripts/deploy_qt_windows.ps1 -Binary build/ui-tests
 
 | 触发 | 执行内容 |
 | --- | --- |
-| 推送任意分支、提交 PR | 构建 Release，运行核心、升级和 UI 测试（UI 测试关闭自动检查更新，跨进程 CLI 用例使用本次构建的主程序；失败时上传测试结果），按 `build/release-runtime/<version>/` 整理运行文件（含 MSVC 运行库），用 `scripts/package_release.ps1` 打包并以 `validate_ota_manifest.ps1` 校验，ZIP 和 `固件更新记录.md` 作为构建产物保留 30 天 |
+| 推送任意分支、提交 PR | 构建 Release，运行核心、升级和 UI 测试（UI 测试关闭自动检查更新，跨进程 CLI 用例使用本次构建的主程序；失败时上传测试结果），按 `build/release-runtime/<version>/` 整理运行文件（含 MSVC 运行库），用 `scripts/package_release.ps1` 打包并以 `validate_ota_manifest.ps1` 校验，再运行 `test_ota.ps1` 和 `local_update_test.ps1` 做更新器校验与真实升级演练，ZIP 和 `固件更新记录.md` 作为构建产物保留 30 天 |
 | 推送 `v<version>` 标签 | 先确认标签等于 `version/version.h` 的版本、`更新记录.md` 含 `# QQCom-plus-<version>-win64` 一节，再执行上述构建；通过后创建同名 GitHub Release，标题为 `QQCom-plus-<version>-win64`，说明取该节内容并附 ZIP 大小和 SHA-256 |
 | 手动运行并填写已有标签 | 用当前工作流构建该标签的源码并补发 Release；产品名取自该标签 `QQCom.pro` 的 `TARGET`，改名前的标签仍按 `QQCom-<version>-win64` 发布。同名 Release 已存在时只补传缺少的附件并更新说明；已有同名附件时直接失败，不覆盖已发布附件 |
 

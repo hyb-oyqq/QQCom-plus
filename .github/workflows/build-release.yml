@@ -248,6 +248,18 @@ jobs:
             "- SHA-256: ``$sha256``"
           ) -join "`n" >> $env:GITHUB_STEP_SUMMARY
 
+      # 更新器校验和真实升级演练：本机回环源，不访问网络，不改真实用户配置。
+      - name: OTA tests
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test_ota.ps1
+          if ($LASTEXITCODE -ne 0) { throw "test_ota.ps1 failed with exit code $LASTEXITCODE." }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/local_update_test.ps1 -BinaryDir "build/release-runtime/$env:VERSION"
+          if ($LASTEXITCODE -ne 0) { throw "local_update_test.ps1 failed with exit code $LASTEXITCODE." }
+
       - name: Upload package
         uses: actions/upload-artifact@v7
         with:
