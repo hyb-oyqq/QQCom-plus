@@ -1,0 +1,265 @@
+# 自动构建与发布：
+# - 推送分支或提交 PR：构建 Release、运行核心测试、打包 ZIP 并上传为构建产物。
+# - 推送 v<主.次.修订> 标签：标签必须与 version/version.h 一致，构建通过后自动创建同名 GitHub Release。
+# - 手动运行并填写已有标签：为该标签补发 Release（例如启用工作流之前打的标签）。
+name: Build & Release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '为已有标签补发 Release，例如 v1.2.3；留空则只构建所选分支'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' && !inputs.tag }}
+
+env:
+  QT_VERSION: '6.10.1'
+  QT_ARCH: win64_msvc2022_64
+  QT_MODULES: qtserialport qt5compat qtimageformats
+
+jobs:
+  build:
+    name: Build (Windows x64)
+    # 与本地工具链 Qt 6.10.1 MSVC 2022 保持一致；windows-latest 已切换到 VS 2026。
+    runs-on: windows-2022
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      release: ${{ steps.meta.outputs.release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Resolve version
+        id: meta
+        shell: pwsh
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $header = Get-Content -LiteralPath 'version/version.h' -Raw
+          $match = [regex]::Match($header, '(?m)^#define\s+QQCOM_VERSION_STR\s+"(\d+\.\d+\.\d+)"')
+          if (-not $match.Success) { throw 'QQCOM_VERSION_STR was not found in version/version.h.' }
+          $version = $match.Groups[1].Value
+
+          $tag = $env:INPUT_TAG
+          if (-not $tag -and $env:GITHUB_REF_TYPE -eq 'tag') { $tag = $env:GITHUB_REF_NAME }
+          $release = [bool]$tag
+          if ($release) {
+            if ($tag -cne "v$version") {
+              throw "Tag '$tag' does not match version/version.h ($version). Expected 'v$version'."
+            }
+            $heading = "# QQCom-$version-win64"
+            $notes = Get-Content -LiteralPath '更新记录.md' -Encoding utf8
+            if (-not ($notes | Where-Object { $_.TrimEnd() -ceq $heading })) {
+              throw "Release notes heading '$heading' was not found in the changelog."
+            }
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "release=$($release.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $version | Tag: $(if ($tag) { $tag } else { '-' }) | Release: $release"
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: ${{ env.QT_ARCH }}
+          modules: ${{ env.QT_MODULES }}
+          cache: true
+
+      - name: Locate MSVC toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:QT_ROOT_DIR) { throw 'QT_ROOT_DIR is not set by install-qt-action.' }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual Studio with the x64 C++ toolset was not found.' }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          $redistVersion = (Get-Content -LiteralPath (Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCRedistVersion.default.txt') -TotalCount 1).Trim()
+          $crt = Get-ChildItem -Directory -Path (Join-Path $vs "VC\Redist\MSVC\$redistVersion\x64") -Filter 'Microsoft.VC*.CRT' | Select-Object -First 1
+          if (-not $crt) { throw "MSVC CRT redist was not found for $redistVersion." }
+          "QT_BIN=$(Join-Path $env:QT_ROOT_DIR 'bin')" >> $env:GITHUB_ENV
+          "VCVARS64=$vcvars" >> $env:GITHUB_ENV
+          "MSVC_CRT_DIR=$($crt.FullName)" >> $env:GITHUB_ENV
+          Write-Host "Visual Studio: $vs"
+          Write-Host "MSVC CRT:      $($crt.FullName)"
+
+      - name: Build
+        shell: cmd
+        env:
+          # 让 cl 在批量编译时并行，缩短 nmake 构建时间。
+          CL: /MP
+        run: call build.bat
+
+      - name: Core tests
+        shell: cmd
+        env:
+          CL: /MP
+        run: |
+          call "%VCVARS64%" >nul || exit /b 1
+          set "PATH=%QT_BIN%;%PATH%"
+          if not exist build\core-tests mkdir build\core-tests
+          cd build\core-tests || exit /b 1
+          qmake ..\..\tests\core\core_tests.pro -spec win32-msvc "CONFIG+=release" "CONFIG-=debug" || exit /b 1
+          nmake /nologo release || exit /b 1
+          echo Running core tests...
+          release\QQCom_core_tests.exe -o core-results.txt,txt
+          set "TEST_EXIT=%ERRORLEVEL%"
+          echo Core tests exit code: %TEST_EXIT%
+          if exist core-results.txt type core-results.txt
+          if not "%TEST_EXIT%"=="0" exit /b %TEST_EXIT%
+          findstr /b /c:"Totals:" core-results.txt || exit /b 1
+
+      - name: Package
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-ProjectScript([string] $Script, [string[]] $Arguments) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Script @Arguments
+            if ($LASTEXITCODE -ne 0) { throw "$Script failed with exit code $LASTEXITCODE." }
+          }
+
+          # windeployqt 依赖 vcvars 提供的 Windows SDK 路径部署 dxcompiler.dll/dxil.dll，先导入该环境。
+          cmd /c "call `"$env:VCVARS64`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2]) }
+          }
+          if (-not $env:WindowsSdkDir) { throw 'vcvars64.bat did not provide WindowsSdkDir.' }
+
+          # 只放运行文件：程序、Qt 运行库与插件、MSVC 运行库、更新器、CLI 入口和说明。
+          $runtime = "build/release-runtime/$env:VERSION"
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+          Copy-Item -LiteralPath 'build/release/release/QQCom.exe' -Destination $runtime
+          Invoke-ProjectScript 'scripts/deploy_qt_windows.ps1' @('-Binary', "$runtime/QQCom.exe", '-QtBin', $env:QT_BIN, '-Configuration', 'Release')
+          Copy-Item -Path (Join-Path $env:MSVC_CRT_DIR '*.dll') -Destination $runtime
+          $required = @(
+            'QQCom.exe', 'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Network.dll', 'Qt6SerialPort.dll',
+            'Qt6Core5Compat.dll', 'platforms/qwindows.dll', 'dxcompiler.dll', 'dxil.dll',
+            'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll',
+            'qqcom-updater.ps1', 'qqcom-cli.cmd', 'AI_ACCESS.md'
+          )
+          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $runtime $_)) })
+          if ($missing.Count -gt 0) { throw "Runtime directory is missing: $($missing -join ', ')" }
+
+          $baseUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION"
+          Invoke-ProjectScript 'scripts/package_release.ps1' @('-BinaryDir', $runtime, '-Version', $env:VERSION, '-BaseUrl', $baseUrl, '-OutputDir', 'build/ota')
+          $zipPath = "build/ota/QQCom-$env:VERSION-win64.zip"
+          Invoke-ProjectScript 'scripts/validate_ota_manifest.ps1' @('-ManifestPath', 'build/ota/manifest.json', '-PackagePath', $zipPath)
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $zipPath).Path)
+          try {
+            $zip.Entries | Sort-Object FullName | ForEach-Object { '{0,12}  {1}' -f $_.Length, $_.FullName }
+          } finally {
+            $zip.Dispose()
+          }
+
+          $size = (Get-Item -LiteralPath $zipPath).Length
+          $sha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          @(
+            "### QQCom-$env:VERSION-win64.zip"
+            ''
+            "- Size: $size bytes"
+            "- SHA-256: ``$sha256``"
+          ) -join "`n" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: QQCom-${{ steps.meta.outputs.version }}-win64
+          path: |
+            build/ota/QQCom-*-win64.zip
+            build/ota/*.md
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: needs.build.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+      VERSION: ${{ needs.build.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@v8
+        with:
+          name: QQCom-${{ needs.build.outputs.version }}-win64
+          path: dist
+
+      - name: Compose release notes
+        run: |
+          set -euo pipefail
+          zip="dist/QQCom-${VERSION}-win64.zip"
+          test -f "$zip"
+          changelog=$(find dist -maxdepth 1 -name '*.md' | head -n 1)
+          test -n "$changelog"
+
+          # 截取更新记录中本版本一节（标题与 ZIP 文件名去掉 .zip 一致），去掉首尾空行。
+          heading="# QQCom-${VERSION}-win64"
+          awk -v h="$heading" '
+            { sub(/\r$/, "") }
+            $0 == h { found = 1; next }
+            found && /^# / { exit }
+            found { print }
+          ' "$changelog" | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}' > section.md
+          if ! grep -q '[^[:space:]]' section.md; then
+            echo "::error::Release notes for ${heading} are empty or missing."
+            exit 1
+          fi
+
+          size=$(stat -c %s "$zip")
+          sha256=$(sha256sum "$zip" | cut -d ' ' -f 1)
+          {
+            cat section.md
+            echo
+            echo '---'
+            echo
+            echo '| 文件 | 大小 | SHA-256 |'
+            echo '| --- | --- | --- |'
+            echo "| \`QQCom-${VERSION}-win64.zip\` | ${size} 字节 | \`${sha256}\` |"
+            echo
+            echo "解压后运行 \`QQCom.exe\`，保留同目录的 DLL、插件目录和更新器。本发行版由 GitHub Actions 根据标签 \`${TAG}\` 自动构建。"
+            echo
+            echo "原仓库：https://gitee.com/qinjmin/qqcom"
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          zip="dist/QQCom-${VERSION}-win64.zip"
+          title="QQCom-${VERSION}-win64"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --title "$title" --notes-file release-notes.md
+            gh release upload "$TAG" "$zip" --clobber
+          else
+            gh release create "$TAG" "$zip" --title "$title" --notes-file release-notes.md --verify-tag
+          fi
+          gh release view "$TAG" --json url,assets --jq '.url, (.assets[] | "\(.name)  \(.size) bytes")'
