@@ -1264,6 +1264,7 @@ private slots:
         {
             PreferencesStore seed(nullptr, original);
             seed.setValue(QStringLiteral("serial/baud"), 921600);
+            seed.setValue(QStringLiteral("window/colorScheme"), QStringLiteral("dark"));
             QVERIFY(seed.sync());
         }
         {
@@ -1276,6 +1277,12 @@ private slots:
         const QByteArray originalBytes = source.readAll();
         source.close();
         QVERIFY(!QFileInfo::exists(target));
+
+        // 首次启动时，入口恢复配色这一步就完成复制，原 QQCom 选的配色在建窗口前生效。
+        AppTheme::setMode(AppTheme::Mode::Light);
+        MainWindow::restoreSavedColorScheme();
+        QCOMPARE(AppTheme::mode(), AppTheme::Mode::Dark);
+        QVERIFY(QFileInfo::exists(target));
 
         {
             PreferencesStore migrated;
@@ -7783,9 +7790,11 @@ private slots:
         QVERIFY(AppTheme::isDark());
         QCOMPARE(qApp->styleHints()->colorScheme(), Qt::ColorScheme::Dark);
 
-        // 窗口写进的就是入口读的这份配置。
+        // 窗口写进的就是这份 preferences.ini。
         {
-            const PreferencesStore store;
+            const PreferencesStore store(nullptr,
+                QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+                    + QStringLiteral("/preferences.ini"));
             QCOMPARE(store.value(QStringLiteral("window/colorScheme")).toString(),
                 QStringLiteral("dark"));
         }
